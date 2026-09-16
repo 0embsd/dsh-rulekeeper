@@ -25,6 +25,12 @@ rk-gate / rk-check / rk-snap / rk-crossplat / …   # 22 个薄壳子命令
 **实测口径（诚实）**：Windows（Git for Windows）与 Linux（Ubuntu + Node v22.23.2）两侧的全量用例与三个自检门都已跑过；
 **macOS 尚未实测**（按设计走系统 `bash`/`sh` 分支）。谁要声称 macOS 可用，请先贴实测。
 
+> **更正（2026-09-16，原文保留不改写）**：macOS **已实测** —— 本仓 CI 的 `test (macos-latest)` 任务在 `main` 上
+> 跑全量用例 **531 条（524 pass / 0 fail / 7 skip）**，与 `test (ubuntu-latest)` 同源同结果；凭证是该任务
+> check-run 的**注解**（注解无需 token 即可读）：`node --test 通过：# tests 531 # pass 524 # fail 0 # skipped 7`。
+> 跳过数差异来自"只对 Windows 有意义"的 Git Bash 用例（POSIX 上显式跳过并说明理由，不是掩盖）。
+> 首次真跑同时暴露并修掉 3 处**用例**里的平台二分假设（"非 win32 即 Linux"），详见 CHANGELOG 式提交 `045f91f`。
+
 ## 它解决什么问题
 
 纪律写在文档里，靠人记；人一忙就绕过，绕过之后**没人知道**。本工具把三件事做成机械的：
@@ -136,13 +142,22 @@ dsh plugin --profile <你的档> remove dsh-rulekeeper
 
 - **524 个用例**（Windows：523 pass / 0 fail / 1 skip）、**22 个入口**、`node --check` 0 失败；
   `rk-selfcheck` / `rk-schema` / `rk-rc` 三门 0 finding；`scripts/gen-expected.mjs --check` 逐字一致。
+  - **更正（2026-09-16，原文保留不改写）**：用例数已增至 **531**：Windows 本机 530 pass / 0 fail / 1 skip；
+    Linux 与 macOS（CI 实测，凭证见上文注解）各 524 pass / **0 fail** / 7 skip。三门自检与基准逐字比对仍在 Windows 侧重跑。
 - 环境：**Node ≥ 22**，纯 ESM；Windows 与 Linux 双侧已实测（见"运行环境"）。
   - ⚠ **历史更正（保留不改写）**：更早版本本行曾写"Windows 与 Linux 两侧都有实测凭证"，**当时是错的**——Linux 侧
     从未真正跑过；首次在 Linux 上跑暴露 15 例失败，根因是 `GIT_BASH_DEFAULT` 写死 Windows 路径（`C:\Program Files\Git\bin\bash.exe`）。
     该硬编码已改为**平台自适应**（win32 → Git Bash；其它 → `bash`），并在 Linux 侧复跑到 0 失败。**macOS 仍未实测。**
+    - **更正（2026-09-16，原文保留不改写）**：macOS 已实测通过（CI 的 `test (macos-latest)`，531 用例 0 失败，凭证见"运行环境"节）；
+      首次真跑还暴露了**同类硬编码的第三种形态**——三处**用例**把"非 win32"当成 Linux（载体标记、L4 的 uname/node 平台、假声明判定），
+      已按真实平台改为三支（win32 / darwin / linux），产品侧判据本身无误。
 - 已完成（曾列在"未做"里）：落点目录迁移（老 `.dsh-ai/lessonflow` → 新 `.dsh-ai/rulekeeper`，含兼容窗口与 `rk-migrate`）、
   `core.autocrlf=true` 下的跨形态对比口径、写入侧脱敏收敛 + `--check` 扫描。
 - 仍未做：分支保护强制项（需仓库 token）、macOS 实测、远端 CI 的**真实载体**运行（当前如实自曝 `CI_CARRIER_DONE=false`）。
+  - **进展（2026-09-16，原文保留不改写）**：macOS 实测**已完成**、远端 CI **真实载体已运行**（`main` 上 `gate` 与两个平台任务全绿，
+    凭证为 check-run 注解）。**仍未做**：
+    ① **分支保护强制项**（把 `gate` / `test (ubuntu-latest)` / `test (macos-latest)` 设为 required status checks）——需仓库管理员在 GitHub 设置里开；
+    ② `CI_CARRIER_DONE` 仍**恒为 false**：本机代码无法自证远端执行，标注 true 必须另附远端运行记录（凭证制，不由工具自动推断）。
 
 ## 许可证
 

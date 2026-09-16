@@ -160,8 +160,9 @@ ci = 远端防线（LF-540，**服务端入口**：新 clone 没有 hook 时的�
   · **范围口径**：生成物默认用 github.event.before..github.sha（push 判"这次推上来的"）；
     拿不到 before（首次 push / pull_request）时 --base 为空 ⇒ **自动退回全历史**（fail-closed，不默认放行）；
     --workflow-range <参数> 可生成固定范围（首次接入/一次性 backfill 用）
-  · **自曝边界**：CI_CARRIER_DONE=false（无远端/未 push/分支保护需 token）—— 本机模拟**不冒充**远端已执行，
-    显式 --claim-remote 判红；谁要说"远端 CI 拦住了"必须另附远端运行记录（并需分支保护 + required checks，属老板保留项）
+  · **自曝边界**：CI_CARRIER_DONE=false（本机代码无法自证 GitHub 侧事实：远端是否真执行、分支保护是否设置）——
+    本机模拟**不冒充**远端已执行，显式 --claim-remote 判红；谁要说"远端 CI 拦住了"必须另附远端运行记录
+    （如 check-run 注解；注解无需 token 可读，job 日志要 token），并需分支保护 + required checks（属老板保留项）
 
 close = **收尾闸**（LF-550）：close 必答"本批碰到哪几条纪律、靠什么拦住"
   · 必须**显式作答**（--hit 或 --none；沉默不算答）· 纪律必须在**账本里真实存在**（canonical 口径）

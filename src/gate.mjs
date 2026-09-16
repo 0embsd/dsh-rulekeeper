@@ -932,7 +932,7 @@ export function autoCiBinRel(repoRoot) {
   return rel.startsWith('..') || isAbsolute(rel) ? CI_BIN_REL : rel;
 }/** **自曝边界**：远端 CI 是否真的执行过 —— 本机无法自证，恒为 false，谁要标 true 必须另附远端运行记录 */
 export const CI_CARRIER_DONE = false;
-export const CI_CARRIER_REASON = '本仓无远端/未 push/分支保护需 token：GitHub 侧执行与分支保护设置**未验证**（本条只提供本机等价模拟）';
+export const CI_CARRIER_REASON = '本机代码无法自证 GitHub 侧事实（远端是否真执行过、分支保护是否设置）：要标 true 必须另附远端运行凭证（如 check-run 注解），本条不代替凭证、也不由本机推断';
 
 /** 生成物里的 node 版本**唯一来源** = 本包 `package.json` 的 `engines.node`（避免"CI 跑 20、engines 要 22"这类自相矛盾） */
 function engineNodeMajor() {
