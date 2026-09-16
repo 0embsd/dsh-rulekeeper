@@ -52,13 +52,16 @@ test('判据: 生成物里的 test 步骤**逐字**内嵌 CI_TEST_SCRIPT（单�
   assert.equal(yml.includes('actions/setup-node@v5'), true);
 });
 
-test('green: 用例全过 ⇒ 退出码 0、且**不打**任何注解（注解不能被噪声淹没）', { skip: skipNoBash }, () => {
+test('green: 用例全过 ⇒ 退出码 0、无 error 注解，但有 **notice 摘要**（公开可复核的"真跑过"凭证）', { skip: skipNoBash }, () => {
   const dir = tempDir('green');
   try {
     writeFileSync(join(dir, 'ok.test.mjs'), "import { test } from 'node:test';\ntest('全过', () => {});\n", 'utf8');
     const r = runStep(dir, CI_TEST_SCRIPT.join('\n') + '\n');
     assert.equal(r.status, 0, `全过时脚本必须返回 0:\n${r.stdout}${r.stderr}`);
-    assert.equal(r.stdout.includes('::error::'), false, `全过时不得有注解:\n${r.stdout}`);
+    assert.equal(r.stdout.includes('::error::'), false, `全过时不得有 error 注解:\n${r.stdout}`);
+    // 与失败侧同源：TAP 摘要里的 tests/pass/fail/skipped 必须原样进注解（注解无凭证可读 ⇒ 这就是凭证）
+    assert.match(r.stdout, /^::notice::node --test 通过：# tests 1 # pass 1 # fail 0 # skipped 0 $/m,
+      `全过时必须给出可复核的摘要注解:\n${r.stdout}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
