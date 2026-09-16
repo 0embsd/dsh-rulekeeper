@@ -34,9 +34,11 @@ export const PLUGIN_EVENTS = Object.freeze([
 
 /** 本插件向宿主注册的工具（名字必须带 TOOL_PREFIX） */
 export const PLUGIN_TOOLS = Object.freeze([
-  { name: `${TOOL_PREFIX}gate`, event: 'tools/pre-execute', summary: '写入/提交前的门禁判定（deny 时阻断）' },
-  { name: `${TOOL_PREFIX}record`, event: 'tools/post-execute', summary: '把这次执行的结果写成取证台账行' },
-  { name: `${TOOL_PREFIX}snap`, event: 'tools/result', summary: '快照/回滚入口（pre-image 留证）' },
+  // 2026-09-16：摘要按**实际默认行为**改写 —— 默认注入的是"只读判定"（`src/handlers.mjs`），
+  //   不再写"deny 时阻断"（那需要消费者改用 ctx.tools.guard，属部署决策，不在默认安装面）。
+  { name: `${TOOL_PREFIX}gate`, event: 'tools/pre-execute', summary: '门禁判定（只读给出 allow/deny；默认不阻断——要硬阻断需消费者改用 ctx.tools.guard）' },
+  { name: `${TOOL_PREFIX}record`, event: 'tools/post-execute', summary: '把这次执行的结果写成取证台账行（追加到落点的 ledger.jsonl）' },
+  { name: `${TOOL_PREFIX}snap`, event: 'tools/result', summary: '快照/回滚入口（pre-image 留证：备份 + 回读校验 + 索引登记）' },
 ]);
 
 /**
@@ -70,6 +72,10 @@ export const TOOL_PARAMETERS = Object.freeze({
       rootCause: { type: 'string' },
       solution: { type: 'string' },
       evidence: { type: 'array', items: { type: 'string' }, description: '凭证路径列表' },
+      // 2026-09-16：账本契约（src/ledger.mjs）还要求 category / mechanism —— 作为**可选**入参暴露，
+      //   缺省由 handlers 填（category=纪律、mechanism=插件工具自述），避免用户为了记账被迫读源码。
+      category: { type: 'string', description: '类别（默认「纪律」；如 纪律/技术/流程/代码/文档）' },
+      mechanism: { type: 'string', description: '机制（默认「dsh-rulekeeper 插件工具 rulekeeper_record」）' },
     },
     required: ['rule', 'problem'],
   },

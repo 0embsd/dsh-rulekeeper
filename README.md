@@ -129,6 +129,12 @@ node <包目录>/bin/rk-gate.mjs hooks verify --repo <某个仓库根> # 真调�
 - 想要"会话里点一下就跑真判定"，需要消费者侧注入 handler；若要用**硬阻断**，消费者应走 `ctx.tools.guard(name, handler)`
   而非 `register`（见 `src/guard.mjs`）——那会真的拒绝宿主动作，属部署决策，不在默认安装面内。
 
+> **已修（2026-09-16，同日）**：上面这段"默认是空壳"是**当时的实现缺陷**，不是应有行为 ——
+> 老板当场指出"插件装上了不能用，装它干嘛"。现在默认装载**注入包内真实实现**（`src/handlers.mjs`）：
+> `rulekeeper_gate` 真判定（只读 allow/deny）、`rulekeeper_record` 真追加取证台账行、`rulekeeper_snap` 真留 pre-image 快照；
+> 落点默认 `<项目>/.dsh-ai/rulekeeper`，`mode=off` 仍零副作用。**边界不变**：判定是**只读**的，
+> 要"真的拦下来"必须由消费者改用 `ctx.tools.guard`（默认安装面不阻断任何操作）。
+
 ### 卸载
 
 ```bash
