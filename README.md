@@ -78,6 +78,52 @@ node bin/rk-migrate.mjs --project <项目根>
 - **判据输出不含绝对路径**（跨机可复现）。
 - **公开面零基础设施信息**：S8 扫发布面全量文件，命中"真实 IP / 私钥头 / 云凭据真值 / 私钥文件名 / 本机绝对路径"等即判红。
 
+## 安装到 DSH（两种方式）
+
+本包既是 **CLI**（`node <包目录>/bin/rk-gate.mjs …`），也是 **DSH 插件/bundle**（入口 `index.js` + bundle 补丁 `dsh-rulekeeper.patch.yml`）。
+`dsh plugin` 子命令是对 **pnpm** 的直通（`dsh plugin --profile <档> add | remove | list`），所以两种方式在三平台一致。
+
+### 方式 1：本地挂载（推荐起步）
+
+```bash
+git clone https://github.com/0embsd/dsh-rulekeeper.git <包目录>
+dsh plugin --profile <你的档> add link:<包目录>
+# ⚠ 实测提醒：`add` 只写 dependencies；bundle 清单是**手工表** —— 请确认
+#    <档目录>/package.json 的 dsh.profile.bundles 里出现 "dsh-rulekeeper"
+# 然后**重启该档 DSH**（插件树在启动时装载）
+```
+
+本包**没有构建步骤**（纯 ESM、零 npm 依赖），**不需要** `npm run assemble`、也没有 `dist/` 需要挂——直接挂包目录即可。
+
+### 方式 2：从 npm 安装（发布到 npm 之后）
+
+```bash
+dsh plugin --profile <你的档> add dsh-rulekeeper
+```
+
+尚未发布到 npm 时请用方式 1。
+
+### 装完怎么验证（三条，缺一不算装上）
+
+```bash
+node <包目录>/bin/rk-dshcompat.mjs                            # 宿主契约探针（事件名 / 形参 / decision 形状）
+node <包目录>/bin/rk-selfcheck.mjs --root <包目录>            # 期望 FINDINGS=0 / RESULT=pass
+node <包目录>/bin/rk-gate.mjs hooks verify --repo <某个仓库根> # 真调一次工具面
+```
+
+### 卸载
+
+```bash
+dsh plugin --profile <你的档> remove dsh-rulekeeper
+# 并把 <档目录>/package.json 的 dsh.profile.bundles 里的 "dsh-rulekeeper" 删掉
+```
+
+### 排障
+
+- **档起不来**：多半是"同名工具/事件重复注册"（同一档里装了功能重叠的插件）→ 先 `remove` 掉冲突的那个。
+- **装完没反应**：① 忘了重启档；② `dsh.profile.bundles` 里没登记（见方式 1 的提醒）；③ 宿主契约不符 —— `rk-dshcompat.mjs` 会点名具体哪条不符。
+- **只想用 CLI**：不装插件也能用：`node <包目录>/bin/dsh-rulekeeper.mjs <子命令>`。
+
 ## 独立性 / 边界
 
 - 本仓**独立演进、独立发布**：不引用、不依赖任何内部项目，也不需要任何内部服务。
