@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { join } from 'node:path';
 
 import { defaultHandlers } from '../src/handlers.mjs';
+import { sha256OfFile } from '../src/gate.mjs';
 import { PLUGIN_TOOLS, toolDefinition } from '../src/plugin.mjs';
 import { cleanupAll, tempDir } from './helpers/sandbox.mjs';
 
@@ -120,6 +121,20 @@ test('snap 真留证: 写备份 + 索引登记（含 sha256_before），路径�
   const missing = h.rulekeeper_snap({ project: f.projectRoot, path: 'nope.txt' });
   assert.equal(missing.ok, false);
   assert.equal(missing.skipped, false);
+});
+
+test('相对路径必须按**项目根**解析: cwd 里有同名文件时也不得抓错（2026-09-16 实测缺陷）', () => {
+  const f = fixture('ph-snap-rel');
+  const h = defaultHandlers({ cwd: f.projectRoot });
+  const out = h.rulekeeper_snap({ project: f.projectRoot, path: 'AGENTS.md', why: '相对路径解析用例' });
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const rows = readFileSync(join(f.landingDir, 'snapshots', 'index.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(rows[0].sha256_before, sha256OfFile(join(f.projectRoot, 'AGENTS.md')), '必须拍项目根下那个文件');
+  // 诱饵：测试进程的 cwd（= 包根）里也存在同名 AGENTS.md —— 修复前会抓到它
+  const decoy = join(process.cwd(), 'AGENTS.md');
+  if (existsSync(decoy)) {
+    assert.notEqual(rows[0].sha256_before, sha256OfFile(decoy), '不得拍到 cwd 里的同名文件（本仓的 167KB AGENTS.md）');
+  }
 });
 
 test('off 档零副作用（LF-800）: record/snap 都不落盘，且如实说明原因', () => {

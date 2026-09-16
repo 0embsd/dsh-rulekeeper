@@ -91,7 +91,16 @@ export function recordOnce({ projectRoot, input }) {
 export function snapOnce({ projectRoot, path, why }) {
   const root = resolve(projectRoot);
   const landingDir = landingOf(root);
-  const out = takeSnapshot({ projectRoot: root, landingDir, file: path, why: why ?? 'rulekeeper_snap（插件工具）' });
+  const rel = typeof path === 'string' ? path.trim() : '';
+  if (rel === '') {
+    return { ok: false, skipped: false, path: null, sha256: null, reason: 'snap 需要 path（相对项目根的路径）' };
+  }
+  // **必须按项目根解析**（2026-09-16 实测缺陷）：直接把入参交给 `takeSnapshot` 时，它内部先判
+  //   `existsSync(file)` —— 相对路径会命中**宿主进程工作目录**里的同名文件。
+  //   实测后果：演练项目的 `AGENTS.md`(2B) 变成把主仓 `AGENTS.md`(167KB) 拍成快照，索引里的 sha256
+  //   与项目里那个文件不符（gate 随即判 deny，暴露出"两个工具看的不是同一个文件"）。
+  const abs = resolve(root, rel);
+  const out = takeSnapshot({ projectRoot: root, landingDir, file: abs, why: why ?? 'rulekeeper_snap（插件工具）' });
   if (out.skipped === true) {
     return { ok: true, skipped: true, path: null, sha256: null, reason: String(out.reasons?.[0] ?? 'mode=off：零副作用，未拍快照') };
   }
