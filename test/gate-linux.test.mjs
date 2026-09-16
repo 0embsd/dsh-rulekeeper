@@ -136,42 +136,40 @@ test('red（清单红态）: 把"Git Bash 里 node 能跑"写成 **Linux 验证�
   // 正对照：不宣称就放行；声明"没有该载体"时载体标记为 false 仍判红
   assert.equal(fakeLinuxClaimGuard({}).ok, true);
   assert.equal(fakeLinuxClaimGuard({ claim: 'win32', probe }).ok, true, '声称 win32 不在此守卫范围');
-  // LF-565：载体标记平台化 —— Windows 上"没有 Linux 载体"；本机就是 Linux 时载体成立
-  if (process.platform === 'win32') {
-    assert.equal(LINUX_CARRIER_DONE, false);
-    assert.match(LINUX_CARRIER_REASON, /没有 Linux node 载体/);
-  } else {
+  // LF-565 + 2026-09-16 macOS 实测：载体成立与否 = **本机是不是 Linux**，
+  // 不是"非 win32 就是 Linux"—— darwin 上没有 Linux node 载体（用例原来这么写，macOS 首次真跑就红）
+  if (process.platform === 'linux') {
     assert.equal(LINUX_CARRIER_DONE, true);
     assert.match(LINUX_CARRIER_REASON, /本机就是 Linux/);
+  } else {
+    assert.equal(LINUX_CARRIER_DONE, false, `本机平台=${process.platform} 不是 Linux ⇒ 没有 Linux node 载体`);
+    assert.match(LINUX_CARRIER_REASON, /没有 Linux node 载体/);
   }
 });
 
 test('green/red: `rk-crossplat --hooks` 走 L4；`--claim-linux linux` 必红', { skip: !HAS_BASH ? '本机没有 Git Bash' : false }, () => {
   const isWin = process.platform === 'win32';
+  const isLinux = process.platform === 'linux';
   const ok = crossplat(['--project', '.', '--now', '2026-09-14T00:00:00Z', '--hooks']);
   assert.equal(ok.rc, RC.OK, ok.out);
   assert.match(ok.out, /^RK_CROSSPLAT_L4_HOOK_CASES=\d+ L4_HOOK_OK=\d+ L4_RESULT=pass$/m);
-  // LF-565：L4 的平台事实按本机平台断言（Windows=Git Bash/MINGW64/win32 node；POSIX=真 Linux）
-  if (isWin) {
-    assert.match(ok.out, /^RK_CROSSPLAT_L4_BASH_UNAME=MINGW64_NT-/m);
-    assert.match(ok.out, /^RK_CROSSPLAT_L4_BASH_NODE_PLATFORM=win32$/m);
-    assert.match(ok.out, /^RK_CROSSPLAT_L4_IS_WINDOWS_NODE=true$/m);
-    assert.match(ok.out, /^RK_CROSSPLAT_LINUX_CARRIER_DONE=false$/m);
-  } else {
-    assert.match(ok.out, /^RK_CROSSPLAT_L4_BASH_UNAME=Linux$/m);
-    assert.match(ok.out, /^RK_CROSSPLAT_L4_BASH_NODE_PLATFORM=linux$/m);
-    assert.match(ok.out, /^RK_CROSSPLAT_L4_IS_WINDOWS_NODE=false$/m);
-    assert.match(ok.out, /^RK_CROSSPLAT_LINUX_CARRIER_DONE=true$/m);
-  }
+  // LF-565 + 2026-09-16 macOS 实测：L4 报的是**本机 bash/node 的事实** —— "非 win32"不等于 Linux
+  // （macOS 上 uname=Darwin、node 自报 darwin；原先的 else 分支按 Linux 断言，macOS 首次真跑即红）
+  const expectUname = isWin ? 'MINGW64_NT-\\S*' : (process.platform === 'darwin' ? 'Darwin' : 'Linux');
+  assert.match(ok.out, new RegExp(`^RK_CROSSPLAT_L4_BASH_UNAME=${expectUname}$`, 'm'));
+  assert.match(ok.out, new RegExp(`^RK_CROSSPLAT_L4_BASH_NODE_PLATFORM=${process.platform}$`, 'm'));
+  assert.match(ok.out, new RegExp(`^RK_CROSSPLAT_L4_IS_WINDOWS_NODE=${isWin}$`, 'm'));
+  assert.match(ok.out, new RegExp(`^RK_CROSSPLAT_LINUX_CARRIER_DONE=${isLinux}$`, 'm'));
   assert.match(ok.out, /^RK_CROSSPLAT_RESULT=pass$/m);
   const bad = crossplat(['--project', '.', '--now', '2026-09-14T00:00:00Z', '--hooks', '--claim-linux', 'linux']);
-  if (isWin) {
+  if (isLinux) {
+    // 本机真是 Linux：声明成立 ⇒ 不判红（防假绿的反面：也不许把真话判成假话）
+    assert.equal(bad.out.includes('CROSSPLAT_FAKE_LINUX_CLAIM'), false, bad.out);
+  } else {
+    // win32/darwin 上声称"Linux 验证通过"都是假声明 ⇒ 必红
     assert.equal(bad.rc, RC.FAIL, bad.out);
     assert.match(bad.out, /^FINDING CROSSPLAT_FAKE_LINUX_CLAIM /m);
     assert.match(bad.out, /^RK_CROSSPLAT_RESULT=fail$/m);
-  } else {
-    // 本机真是 Linux：声明成立 ⇒ 不判红（防假绿的反面：也不许把真话判成假话）
-    assert.equal(bad.out.includes('CROSSPLAT_FAKE_LINUX_CLAIM'), false, bad.out);
   }
   // 默认（不带 --hooks）不跑 L4：老口径的输出保持原样（不破坏 LF-2D0 的凭证语义）
   const plain = crossplat(['--project', '.', '--now', '2026-09-14T00:00:00Z']);
