@@ -157,6 +157,11 @@ dsh plugin --profile <你的档> remove dsh-rulekeeper
   - **进展（2026-09-16，原文保留不改写）**：macOS 实测**已完成**、远端 CI **真实载体已运行**（`main` 上 `gate` 与两个平台任务全绿，
     凭证为 check-run 注解）。**仍未做**：
     ① **分支保护强制项**（把 `gate` / `test (ubuntu-latest)` / `test (macos-latest)` 设为 required status checks）——需仓库管理员在 GitHub 设置里开；
+       - **已完成（2026-09-16）**：三个 context 已写入 `main` 的 required status checks（`strict=true` = 合并前须与目标分支同步，
+         `enforce_admins=false` ⇒ 管理员仍可直推）。读回复核：`GET /branches/main/protection` →
+         `contexts = gate | test (ubuntu-latest) | test (macos-latest)`、`strict=true`、PR 要求未启用、禁强推 / 禁删除分支。
+       - **同批教训**：只勾"Require status checks"开关而**不选检查名** ⇒ `required_status_checks.contexts` 为空 = **空转闸**
+         （页面看着配了、实际一条都不拦）——与本工具 `CI_VACUOUS_NO_PROTECTION` 要防的是同一件事：**配完必须回读明细，不能只看勾选框**。
     ② `CI_CARRIER_DONE` 仍**恒为 false**：本机代码无法自证远端执行，标注 true 必须另附远端运行记录（凭证制，不由工具自动推断）。
 
 ## 许可证
