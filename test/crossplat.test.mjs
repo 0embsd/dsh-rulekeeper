@@ -87,17 +87,22 @@ test('red: 时间戳不在归一面内（--inject-now-diff）→ L2 必红（等
   assert.match(r.out, /^FINDING CROSSPLAT_L2_DIFF /m);
 });
 
-test('red: 声称在 linux 上验证过 → 防假绿守卫判红（本机是 win32）', () => {
-  // LF-565：本机**真是 Linux** 时，"我在 linux 上验证过"是真话 —— 判红反而成了假红（防假绿不等于把真话判假）
-  if (process.platform === 'win32') {
-    const r = crossplat(['--project', '.', '--claim-platform', 'linux']);
+test('red: 声称在 linux 上验证过 → 防假绿守卫判红（**除本机真是 linux 外**）', () => {
+  // LF-565：本机**真是 Linux** 时，"我在 linux 上验证过"是真话 —— 判红反而成了假红（防假绿不等于把真话判假）。
+  // 2026-09-16 macOS 首次真跑 CI 补的洞：原先写成 win32 / **else** 二分 ⇒ 把 darwin 当成"就是 linux"，
+  // 于是 macOS 上"假声明"被当成"真话"（错的是**用例的判据**，产品侧 fakePlatformGuard 一直在如实判红）。
+  const claimIsTrue = process.platform === 'linux';
+  const r = crossplat(['--project', '.', '--claim-platform', 'linux']);
+  assert.equal(r.out.includes('CROSSPLAT_FAKE_PLATFORM_CLAIM'), !claimIsTrue,
+    `本机平台=${process.platform}：假声明必须判红、真话不得判红\n${r.out}`);
+  if (!claimIsTrue) {
     assert.equal(r.rc, RC.FAIL, r.out);
     assert.match(r.out, /^FINDING CROSSPLAT_FAKE_PLATFORM_CLAIM /m);
-  } else {
-    const r = crossplat(['--project', '.', '--claim-platform', 'linux']);
-    assert.equal(r.out.includes('CROSSPLAT_FAKE_PLATFORM_CLAIM'), false, r.out);
   }
+  // 判据本身与"平台二分"无关 —— 三平台各断言一遍（darwin 那条就是 CI 里真跑到的那条）
   assert.equal(fakePlatformGuard({ claim: 'linux', platform: 'win32' }).ok, false);
+  assert.equal(fakePlatformGuard({ claim: 'linux', platform: 'darwin' }).ok, false, 'darwin 上声称 linux 同样是假声明');
+  assert.equal(fakePlatformGuard({ claim: 'linux', platform: 'linux' }).ok, true, '真话必须放行');
   assert.equal(fakePlatformGuard({ claim: 'win32', platform: 'win32' }).ok, true);
   assert.equal(fakePlatformGuard({}).ok, true, '不声称就放行');
 });
