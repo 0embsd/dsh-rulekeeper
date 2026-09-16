@@ -1,0 +1,44 @@
+{
+  "detail": {
+    "expired": false,
+    "fields": {
+      "missing": [
+        "controlOutput",
+        "controlSample"
+      ],
+      "required": [
+        "rule",
+        "probeCommand",
+        "probeOutput",
+        "controlSample",
+        "controlOutput",
+        "falsifier",
+        "decidedAt",
+        "expiresAt"
+      ]
+    },
+    "hasFalsifier": true,
+    "path": "uncheckable-no-control.json",
+    "recurredAt": null,
+    "rule": "PATH-SANITIZE",
+    "window": {
+      "days": 19,
+      "decidedAt": "2026-09-01T00:00:00.000Z",
+      "expiresAt": "2026-09-20T00:00:00.000Z",
+      "maxDays": 30
+    }
+  },
+  "findings": [
+    {
+      "code": "UNCHECKABLE_NO_CONTROL",
+      "message": "缺正对照（controlSample）：没有正对照就无法证明\"仪器不是永远说抓不到\""
+    },
+    {
+      "code": "UNCHECKABLE_NO_CONTROL",
+      "message": "缺正对照（controlOutput）：没有正对照就无法证明\"仪器不是永远说抓不到\""
+    }
+  ],
+  "kind": "uncheckable_justified",
+  "ok": false,
+  "verdict": "violation"
+}

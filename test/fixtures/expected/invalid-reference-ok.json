@@ -1,0 +1,27 @@
+{
+  "detail": {
+    "fileRefs": [
+      {
+        "lineCount": 3,
+        "ref": "output-shape-ok.txt:2",
+        "status": "ok"
+      }
+    ],
+    "headings": [
+      1,
+      2
+    ],
+    "path": "invalid-reference-ok.md",
+    "scope": "invalid-reference-ok.md",
+    "sectionRefs": [
+      {
+        "ref": "§2",
+        "status": "ok"
+      }
+    ]
+  },
+  "findings": [],
+  "kind": "invalid_reference",
+  "ok": true,
+  "verdict": "pass"
+}

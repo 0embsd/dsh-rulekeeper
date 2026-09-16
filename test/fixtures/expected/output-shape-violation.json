@@ -1,0 +1,27 @@
+{
+  "detail": {
+    "expect": {
+      "maxLineLength": 80,
+      "maxLines": 5,
+      "minLines": 2,
+      "resultLinePattern": "^(?:PROJ|LF)_[A-Z0-9_]*RESULT=(?:pass|fail)$"
+    },
+    "lines": 2,
+    "maxLineLength": 120,
+    "path": "output-shape-violation.txt",
+    "resultLine": null
+  },
+  "findings": [
+    {
+      "code": "SHAPE_RESULT_LINE_MISSING",
+      "message": "缺少约定结果行（模式 ^(?:PROJ|LF)_[A-Z0-9_]*RESULT=(?:pass|fail)$）"
+    },
+    {
+      "code": "SHAPE_LINE_TOO_LONG",
+      "message": "最长行 120 > 上限 80"
+    }
+  ],
+  "kind": "output_shape",
+  "ok": false,
+  "verdict": "violation"
+}

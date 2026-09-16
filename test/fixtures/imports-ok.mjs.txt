@@ -1,0 +1,10 @@
+// 合规导入样本（LF-150 fixture）
+// 扩展名用 .mjs.txt：node --test 会把 test/ 下所有 .mjs/.js/.cjs 当测试文件加载，
+// 故 fixture 一律用非 JS 扩展名；其文本由检查器按源码扫描。
+
+import { readFileSync } from 'node:fs';
+import rel from './config.mjs';
+export * from './renamed.mjs';
+export const S = "from 'ghost-pkg'";
+export const RE = /\brequire\s*\(/;
+export const T = `require('ghost-pkg')`;

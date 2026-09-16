@@ -1,0 +1,18 @@
+{
+  "detail": {
+    "expect": {
+      "maxLineLength": 80,
+      "maxLines": 5,
+      "minLines": 2,
+      "resultLinePattern": "^(?:PROJ|LF)_[A-Z0-9_]*RESULT=(?:pass|fail)$"
+    },
+    "lines": 3,
+    "maxLineLength": 22,
+    "path": "output-shape-ok.txt",
+    "resultLine": "PROJ_CHECK_RESULT=pass"
+  },
+  "findings": [],
+  "kind": "output_shape",
+  "ok": true,
+  "verdict": "pass"
+}

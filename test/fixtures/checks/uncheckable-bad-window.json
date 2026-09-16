@@ -1,0 +1,10 @@
+{
+  "rule": "PS-OUTPUT-STREAM",
+  "probeCommand": "node bin/lf-check.mjs untracked-change --file <目标> --landing <落点> --project <根>",
+  "probeOutput": "FINDING UNTRACKED_CHANGE_NO_SNAPSHOT target.txt | exit=1",
+  "controlSample": "test/fixtures/checks/untracked-ok/target.txt",
+  "controlOutput": "LF_CHECK_VERDICT=pass | exit=0",
+  "falsifier": "若该纪律再复发一次且能给出可机检判据，本结论即失效",
+  "decidedAt": "2026-08-20T00:00:00.000Z",
+  "expiresAt": "2026-09-20T00:00:00.000Z"
+}

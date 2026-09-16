@@ -1,0 +1,37 @@
+{
+  "detail": {
+    "expired": false,
+    "fields": {
+      "missing": [],
+      "required": [
+        "rule",
+        "probeCommand",
+        "probeOutput",
+        "controlSample",
+        "controlOutput",
+        "falsifier",
+        "decidedAt",
+        "expiresAt"
+      ]
+    },
+    "hasFalsifier": true,
+    "path": "uncheckable-bad-window.json",
+    "recurredAt": null,
+    "rule": "PS-OUTPUT-STREAM",
+    "window": {
+      "days": 31,
+      "decidedAt": "2026-08-20T00:00:00.000Z",
+      "expiresAt": "2026-09-20T00:00:00.000Z",
+      "maxDays": 30
+    }
+  },
+  "findings": [
+    {
+      "code": "UNCHECKABLE_BAD_WINDOW",
+      "message": "有效期 31 天 > 上限 30 天"
+    }
+  ],
+  "kind": "uncheckable_justified",
+  "ok": false,
+  "verdict": "violation"
+}

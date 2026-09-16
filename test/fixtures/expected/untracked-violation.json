@@ -1,0 +1,24 @@
+{
+  "detail": {
+    "exists": true,
+    "path": "target.txt",
+    "recordedSha256": null,
+    "sha256": "998c8a48953e1efec9f1a9f3d1dac38afa4aa108a104de6d1e4b1bd281935fe9",
+    "snapshotHealth": {
+      "badLines": 0,
+      "missing": true,
+      "oversized": 0,
+      "truncatedTail": false
+    },
+    "snapshotRecords": 0
+  },
+  "findings": [
+    {
+      "code": "UNTRACKED_CHANGE_NO_SNAPSHOT",
+      "message": "target.txt 已存在且被改动，但 snapshots 无对应记录"
+    }
+  ],
+  "kind": "file_untracked_change",
+  "ok": false,
+  "verdict": "violation"
+}

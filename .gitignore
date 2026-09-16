@@ -1,0 +1,20 @@
+# dsh-rulekeeper · 包内本地状态（不入仓）
+# 本包自食其果：`dsh-rulekeeper init --project .` 会在 <包根>/.dsh-ai/rulekeeper 建"开发态落点"，
+# 供 rk-selfcheck 的 S3（落点存在性）与真实树自检使用。属本地运行状态，**不随包发布**（但落点配置除外，见下）。
+# 教训 L474：L471 清理"误建目录"时把整个 .dsh-ai 删掉了，真实树自检随即报 S3_LANDING_MISSING；
+# 故此处显式声明该目录是**预期的本地状态**，避免再被当成垃圾清理。
+# 注意：必须写 `.dsh-ai/*` 而**不是** `.dsh-ai/` —— 目录整体被忽略时 git **根本不下探**，
+# 后面的 `!` 反忽略对子路径无效（2026-09-15 实测：`git add` 直接报 paths are ignored）。
+.dsh-ai/*
+# 但**落点配置必须入库**：`rules.json`/`config.json` 定义了"保护面"，
+# 不入库 ⇒ 新 clone / CI 上保护面为空 ⇒ `rk-gate ci` 直接判 `CI_VACUOUS_NO_PROTECTION`（空转闸）。
+# 台账 / 快照 / 备份（运行态）继续 ignore。
+# 2026-09-16（R2）：落点默认名 `lessonflow` → `rulekeeper`；新名为主，老名规则**保留**（兼容窗口期仍可能用到）。
+!.dsh-ai/rulekeeper/
+.dsh-ai/rulekeeper/*
+!.dsh-ai/rulekeeper/config.json
+!.dsh-ai/rulekeeper/rules.json
+!.dsh-ai/lessonflow/
+.dsh-ai/lessonflow/*
+!.dsh-ai/lessonflow/config.json
+!.dsh-ai/lessonflow/rules.json

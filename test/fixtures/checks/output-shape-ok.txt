@@ -1,0 +1,3 @@
+alpha
+beta
+PROJ_CHECK_RESULT=pass

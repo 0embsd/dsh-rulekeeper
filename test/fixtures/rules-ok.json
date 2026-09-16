@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "project": "proj",
+  "protected_paths": [
+    "AGENTS.md",
+    ".claude/rules/",
+    "deploy/openwrt/**",
+    "**/*_test.go",
+    "internal/modules/ops/backup.go"
+  ],
+  "gates": [
+    {
+      "gateName": "project-check",
+      "evidence": ".dsh-ai/gates.json",
+      "strict": true
+    }
+  ],
+  "checks": [
+    "file_untracked_change",
+    "output_shape",
+    "invalid_reference"
+  ],
+  "inject": [
+    {
+      "id": "fact-writing",
+      "template": "先取证再下结论（无证据行禁止用陈述句）"
+    }
+  ]
+}

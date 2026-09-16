@@ -1,0 +1,37 @@
+{
+  "detail": {
+    "expired": false,
+    "fields": {
+      "missing": [],
+      "required": [
+        "rule",
+        "probeCommand",
+        "probeOutput",
+        "controlSample",
+        "controlOutput",
+        "falsifier",
+        "decidedAt",
+        "expiresAt"
+      ]
+    },
+    "hasFalsifier": true,
+    "path": "uncheckable-placeholder-output.json",
+    "recurredAt": null,
+    "rule": "PATH-SANITIZE",
+    "window": {
+      "days": 19,
+      "decidedAt": "2026-09-01T00:00:00.000Z",
+      "expiresAt": "2026-09-20T00:00:00.000Z",
+      "maxDays": 30
+    }
+  },
+  "findings": [
+    {
+      "code": "UNCHECKABLE_PLACEHOLDER_OUTPUT",
+      "message": "probeOutput 只有占位话「抓不到」——不算实证（必须贴真实输出）"
+    }
+  ],
+  "kind": "uncheckable_justified",
+  "ok": false,
+  "verdict": "violation"
+}

@@ -1,0 +1,10 @@
+{
+  "rule": "PS-OUTPUT-STREAM",
+  "probeCommand": "Get-ChildItem <repo> -Recurse -Filter 工具脚本 | %{ $t = Get-Content $_.FullName -Raw; [pscustomobject]@{ f = $_.Name; comma = ([regex]::Matches($t, ',\\s*@\\(')).Count; inputObj = ([regex]::Matches($t, 'Add-Member[^\\r\\n]*-InputObject')).Count } } | ?{ $_.comma -gt 0 -or $_.inputObj -gt 0 }",
+  "probeOutput": "TOOL_PS1_FILES=25；命中 6 个：上下文工具.ps1 comma_wrap=1 / 进化工具.ps1 comma_wrap=1 addmember_inputobject=2 / 工具脚本 comma_wrap=8 / tool-rules.ps1 comma_wrap=1 / tool-dev.ps1 comma_wrap=1 / 工具脚本 comma_wrap=4",
+  "controlSample": "test/fixtures/replay/l454-control.ps1（含两种缺陷写法；sha256=57A9290A8F6D696545E263A9C3DC832E360356B429104357070A4925E09ABFC2，220 B）",
+  "controlOutput": "对正对照样本：CONTROL_COMMA_WRAP=1 CONTROL_ADDMEMBER_INPUTOBJECT=1（探针确实会抓，不是永远说抓不到）",
+  "falsifier": "若 lessonflow 引入跨语言（PowerShell AST）清查能力，或 工具脚本 工具退出本仓，本「不可机检」结论即失效；另：探针是**启发式**首过，已知误报面 = 固定长度元组用法（如 工具脚本 的 ,@() 合规例外），最终判定必须逐点读语义——这正是 L454 要求「类级清查必须用 AST」的原因",
+  "decidedAt": "2026-09-14T00:00:00.000Z",
+  "expiresAt": "2026-10-14T00:00:00.000Z"
+}

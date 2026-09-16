@@ -1,0 +1,55 @@
+{
+  "name": "dsh-rulekeeper",
+  "version": "0.1.0",
+  "description": "DSH 纪律治理：教训账本 + 机械门禁（pre/post-commit 真阻断）+ 自进化提案；零依赖 Node CLI，命令前缀 rk-*",
+  "type": "module",
+  "license": "MIT",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "src/",
+    "bin/",
+    "dsh-rulekeeper.patch.yml",
+    "README.md",
+    "NOTICE.md",
+    "LICENSE",
+    "SCHEMA.md",
+    "RUNBOOK.md"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "discipline",
+    "guard"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0embsd/dsh-rulekeeper.git"
+  },
+  "homepage": "https://github.com/0embsd/dsh-rulekeeper#readme",
+  "bugs": {
+    "url": "https://github.com/0embsd/dsh-rulekeeper/issues"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./dsh-rulekeeper.patch.yml"
+    }
+  },
+  "bin": {
+    "dsh-rulekeeper": "./bin/dsh-rulekeeper.mjs",
+    "rk-selfcheck": "./bin/rk-selfcheck.mjs"
+  },
+  "scripts": {
+    "test": "node --test",
+    "smoke": "node bin/rk-dshcompat.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

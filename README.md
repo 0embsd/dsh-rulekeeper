@@ -1,0 +1,101 @@
+# dsh-rulekeeper
+
+> **独立工具**：把「纪律」从文字变成**可机械阻断 + 可自动留证 + 可自进化**的**零依赖 Node CLI**。
+> **跨平台**（Windows / Linux / macOS），**不依赖任何具体项目**，且**不含任何主机地址/凭据/身份信息**
+> —— 这条由 `rk-selfcheck` 的 **S8** 机械保证（扫发布面全量文件，含 README/RUNBOOK 等顶层文档）。
+>
+> 历史注记（2026-09-16）：更早的本文写的是"它与某个内部项目的关系……"，既让人误以为本仓依附某个项目、
+> 又把内部结构写到了公开面。现改为**不含项目名**的表述；内部侧的历史不改写。
+
+```
+dsh-rulekeeper <子命令>        # 主入口（bin/dsh-rulekeeper.mjs）
+rk-gate / rk-check / rk-snap / rk-crossplat / …   # 22 个薄壳子命令
+```
+
+## 运行环境（跨平台）
+
+| 项 | 要求 | 说明 |
+|---|---|---|
+| Node.js | **≥ 22** | 纯 ESM、**零 npm 依赖**（只用 `node:*`；`rk-selfcheck` 的 S4 机械拦裸导入与 `require`） |
+| git | 2.x | 判据与钩子依赖 `git rev-parse` / `git show` / `git log --name-status` / `--no-verify` 语义 |
+| POSIX shell | Windows：**Git for Windows** 自带的 `sh`；Linux/macOS：系统自带 | 只用来跑 `.githooks/*` 里的**钩子薄壳**（内容就一行 `exec node …`）；也可用 `--hooks-path` 指到别处 |
+| PowerShell | **不需要** | 只有当**你自己**写的控制脚本是 `.ps1` 时才会用到——解释器按扩展名选：`.mjs/.js → node`、`.sh → sh`、`.ps1 → pwsh` |
+| 远端 CI | 任意 | `rk-gate ci --write-workflow` 生成 `ubuntu-latest` 工作流（新 clone 天然没有 hook，故需要这条"远端兜底"） |
+
+**实测口径（诚实）**：Windows（Git for Windows）与 Linux（Ubuntu + Node v22.23.2）两侧的全量用例与三个自检门都已跑过；
+**macOS 尚未实测**（按设计走系统 `bash`/`sh` 分支）。谁要声称 macOS 可用，请先贴实测。
+
+## 它解决什么问题
+
+纪律写在文档里，靠人记；人一忙就绕过，绕过之后**没人知道**。本工具把三件事做成机械的：
+
+| 能力 | 机制 | 判据 |
+|---|---|---|
+| **真阻断** | `pre-commit` 钩子：受保护文件"改了但没留证" → 直接拒提交 | 拒时 `exit≠0` 且点名文件 |
+| **被绕过也对账** | `--no-verify` 跳过 `pre-commit`，但 `post-commit` 仍执行 ⇒ 台账留痕；`rk-gate bypass` 用 `git log ∖ 台账` 找出"没人看过的提交" | 有差集 → `exit≠0` |
+| **远端兜底** | `rk-gate ci`：**不依赖本机 hook**（新 clone 天然没有 hook），按 `base..head` 范围对账 | 未留证改动 → `exit≠0` |
+| **删除也算改动** | 提交枚举用 `--name-status`，D 面单列（`--diff-filter=ACMR` 会**整条漏掉**"只删"的提交） | 删受保护文件 → 判红 |
+| **台账不自证** | `verdict:"pass"` 必须带可对账物证（`committed == 提交内容 == baseline`），否则判红 | 手写一行 JSON **洗不白** |
+| **自进化** | 同一纪律复发 ≥2 次 → `evolve` 生成**提案**（只写 `proposals/`，**绝不自动改规则**） | 闸先于写者 |
+| **落点可迁移** | `rk-migrate`：老落点 → 新落点（默认 dry-run；五项核对通过才成功；默认保留旧落点） | 核对不一致 → `exit≠0` 且不删源 |
+
+## 快速开始
+
+```bash
+# 1) 建落点（<项目>/.dsh-ai/rulekeeper + <DSH_HOME>/rulekeeper）
+node bin/dsh-rulekeeper.mjs init --project <项目根>
+#    老落点兼容：若项目里已存在 .dsh-ai/lessonflow，工具会**继续沿用**它（不搬、不新建）
+
+# 2) 配保护面（哪些文件"改之前必须先留证"）
+#    <项目>/.dsh-ai/rulekeeper/rules.json 里的 protected_paths
+#    没配保护面 = 空转闸：rk-gate ci 会直接判 CI_VACUOUS_NO_PROTECTION
+
+# 3) 装钩子（默认装到 .githooks 并设置 core.hooksPath）
+node bin/rk-gate.mjs hooks install --repo <仓库根>
+
+# 4) 生成服务端入口（GitHub Actions，事件感知范围）
+node bin/rk-gate.mjs ci --repo <仓库根> --write-workflow
+
+# 日常：改受保护文件前先留证
+node bin/rk-snap.mjs take --landing <项目>/.dsh-ai/rulekeeper --path AGENTS.md --project .
+
+# 老项目要搬到新落点（默认 dry-run；--apply 才落盘）
+node bin/rk-migrate.mjs --project <项目根>
+```
+
+## 命令面（22 个入口）
+
+`dsh-rulekeeper`（init/check/snap/record/rules/evolve/report/gate/redact/migrate）｜`rk-gate`（write/precommit/postcommit/bypass/ci/close/hooks）
+｜`rk-check`｜`rk-snap`｜`rk-ledger`｜`rk-rules`｜`rk-doctor`｜`rk-schema`｜`rk-rc`｜`rk-replay`｜`rk-crossplat`｜`rk-selfcheck`｜`rk-shard`｜`rk-baseline`｜`rk-backup`｜`rk-log`｜`rk-env`｜`rk-migrate`｜`rk-redact`｜`rk-stop-loss`｜`rk-shell-revert`｜`rk-dshcompat`
+
+## 硬约束（不是"最佳实践"，是设计底线）
+
+- **零依赖**：只用 `node:*`（`rk-selfcheck` 的 S4 机械拦裸导入与 `require`）。
+- **fail-closed**：拿不到范围/结果不可信/规则表为空 → 判红，不判绿。
+- **自曝边界**：做不到的事写在输出里而不是藏在文档里——例如 `CI_CARRIER_DONE=false`（远端 CI 未真正执行过）、
+  `RK_GATE_CI_LEDGER_AUTHENTICATED=false`（台账无签名，能改台账的人也能把物证写全；真防篡改靠分支保护 + required checks + CODEOWNERS）。
+- **判据可被弄红**：每条判据都配"红态样本"，且有**变异测试**矩阵（把判据改坏 → 用例必须失败）。
+- **判据输出不含绝对路径**（跨机可复现）。
+- **公开面零基础设施信息**：S8 扫发布面全量文件，命中"真实 IP / 私钥头 / 云凭据真值 / 私钥文件名 / 本机绝对路径"等即判红。
+
+## 独立性 / 边界
+
+- 本仓**独立演进、独立发布**：不引用、不依赖任何内部项目，也不需要任何内部服务。
+- 本仓**不含**主机地址、私钥、云凭据与使用者身份信息（S8 机械保证，见上）。
+- 工具的开发计划与内部凭证台账**不在本仓**（历史不改）。
+
+## 状态与边界
+
+- **524 个用例**（Windows：523 pass / 0 fail / 1 skip）、**22 个入口**、`node --check` 0 失败；
+  `rk-selfcheck` / `rk-schema` / `rk-rc` 三门 0 finding；`scripts/gen-expected.mjs --check` 逐字一致。
+- 环境：**Node ≥ 22**，纯 ESM；Windows 与 Linux 双侧已实测（见"运行环境"）。
+  - ⚠ **历史更正（保留不改写）**：更早版本本行曾写"Windows 与 Linux 两侧都有实测凭证"，**当时是错的**——Linux 侧
+    从未真正跑过；首次在 Linux 上跑暴露 15 例失败，根因是 `GIT_BASH_DEFAULT` 写死 Windows 路径（`C:\Program Files\Git\bin\bash.exe`）。
+    该硬编码已改为**平台自适应**（win32 → Git Bash；其它 → `bash`），并在 Linux 侧复跑到 0 失败。**macOS 仍未实测。**
+- 已完成（曾列在"未做"里）：落点目录迁移（老 `.dsh-ai/lessonflow` → 新 `.dsh-ai/rulekeeper`，含兼容窗口与 `rk-migrate`）、
+  `core.autocrlf=true` 下的跨形态对比口径、写入侧脱敏收敛 + `--check` 扫描。
+- 仍未做：分支保护强制项（需仓库 token）、macOS 实测、远端 CI 的**真实载体**运行（当前如实自曝 `CI_CARRIER_DONE=false`）。
+
+## 许可证
+
+MIT（见 `LICENSE`）。第三方思路致谢与红线见 `NOTICE.md`。

@@ -1,0 +1,15 @@
+{
+  "detail": {
+    "path": "uncheckable-not-object.json",
+    "type": "array"
+  },
+  "findings": [
+    {
+      "code": "UNCHECKABLE_NOT_OBJECT",
+      "message": "声明必须是 JSON 对象（\"只有一句话\"不算实证）"
+    }
+  ],
+  "kind": "uncheckable_justified",
+  "ok": false,
+  "verdict": "violation"
+}

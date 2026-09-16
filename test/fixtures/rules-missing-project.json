@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "protected_paths": [
+    "AGENTS.md"
+  ],
+  "gates": [],
+  "checks": [
+    "output_shape"
+  ],
+  "inject": []
+}

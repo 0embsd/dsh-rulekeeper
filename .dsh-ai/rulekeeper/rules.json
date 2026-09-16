@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "project": "dsh-rulekeeper",
+  "protected_paths": [
+    "src/schema.mjs",
+    "test/fixtures/**"
+  ],
+  "gates": [],
+  "checks": [],
+  "inject": []
+}

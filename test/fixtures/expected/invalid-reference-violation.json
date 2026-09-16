@@ -1,0 +1,43 @@
+{
+  "detail": {
+    "fileRefs": [
+      {
+        "ref": "ghost.md:5",
+        "status": "missing-file"
+      },
+      {
+        "lineCount": 3,
+        "ref": "output-shape-ok.txt:9999",
+        "status": "line-out-of-range"
+      }
+    ],
+    "headings": [
+      1
+    ],
+    "path": "invalid-reference-violation.md",
+    "scope": "invalid-reference-violation.md",
+    "sectionRefs": [
+      {
+        "ref": "§9",
+        "status": "missing-heading"
+      }
+    ]
+  },
+  "findings": [
+    {
+      "code": "REF_FILE_NOT_FOUND",
+      "message": "引用文件不存在: ghost.md"
+    },
+    {
+      "code": "REF_LINE_OUT_OF_RANGE",
+      "message": "output-shape-ok.txt:9999 越界（该文件仅 3 行）"
+    },
+    {
+      "code": "REF_SECTION_NOT_FOUND",
+      "message": "§9 在 invalid-reference-violation.md 中无对应标题"
+    }
+  ],
+  "kind": "invalid_reference",
+  "ok": false,
+  "verdict": "violation"
+}

@@ -1,0 +1,10 @@
+{
+  "rule": "PATH-SANITIZE",
+  "probeCommand": "node bin/lf-check.mjs invalid-reference --file <文档> --project <根>",
+  "probeOutput": "抓不到",
+  "controlSample": "test/fixtures/checks/invalid-reference-violation.md",
+  "controlOutput": "FINDING REF_FILE_NOT_FOUND ghost.md | exit=1",
+  "falsifier": "若探针能对任意文档稳定给出 FINDING，则本结论失效",
+  "decidedAt": "2026-09-01T00:00:00.000Z",
+  "expiresAt": "2026-09-20T00:00:00.000Z"
+}

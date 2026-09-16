@@ -1,0 +1,18 @@
+{
+  "schema": "dsh-rulekeeper.shape-baseline/1",
+  "note": "LF-260 形态守卫的冻结源：rk-check shape / dsh-rulekeeper check --shape 未显式给 --sha256 时从这里取。改了夹具必须跑 node scripts/gen-expected.mjs --baseline 同步，否则报 SHAPE_FIXTURE_DRIFT。键 = 相对包根的 posix 路径。",
+  "fixtures": {
+    "test/fixtures/checks/output-shape-ok.txt": {
+      "lines": 3,
+      "maxLineLength": 22,
+      "bytes": 34,
+      "sha256": "043c35c3fa2f001fb50edb96025772d2dfafde60888e4433e959c74e862acbdb"
+    },
+    "test/fixtures/checks/output-shape-violation.txt": {
+      "lines": 2,
+      "maxLineLength": 120,
+      "bytes": 127,
+      "sha256": "a094855212302b0ec43bd22c126eb9a34525100999fbd1a8796888e8b13d5f42"
+    }
+  }
+}

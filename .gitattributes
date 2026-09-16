@@ -1,0 +1,13 @@
+# dsh-rulekeeper · 行尾与文本属性纪律（LF-250/260 实测换来的）
+#
+# 为什么必须有这个文件：`test/fixtures/expected/*.json` 是**逐字基准**，
+# 6 份基准与 7 个夹具都依赖"必须纯 LF"。在 autocrlf=true 的 Windows 机器上 checkout
+# 会把它们变成 CRLF → 逐字比对全红，而 TextDiff 肉眼看不出来（LF-250 真实踩过：
+# 12 处 CRLF 致 6 例全红）。
+*.json   text eol=lf
+*.md     text eol=lf
+*.mjs    text eol=lf
+*.txt    text eol=lf
+*.ps1    text eol=lf
+# 夹具一律按二进制对待：不让 git 做任何行尾转换（字节即判据）
+test/fixtures/**  -text

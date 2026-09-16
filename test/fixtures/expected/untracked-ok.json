@@ -1,0 +1,19 @@
+{
+  "detail": {
+    "exists": true,
+    "path": "target.txt",
+    "recordedSha256": "998c8a48953e1efec9f1a9f3d1dac38afa4aa108a104de6d1e4b1bd281935fe9",
+    "sha256": "998c8a48953e1efec9f1a9f3d1dac38afa4aa108a104de6d1e4b1bd281935fe9",
+    "snapshotHealth": {
+      "badLines": 0,
+      "missing": false,
+      "oversized": 0,
+      "truncatedTail": false
+    },
+    "snapshotRecords": 1
+  },
+  "findings": [],
+  "kind": "file_untracked_change",
+  "ok": true,
+  "verdict": "pass"
+}

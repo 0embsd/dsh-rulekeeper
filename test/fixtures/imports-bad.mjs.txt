@@ -1,0 +1,5 @@
+// 违规导入样本（LF-150 fixture）：一条裸导入 + 一条 require 调用
+// 扩展名用 .mjs.txt，原因见 imports-ok.mjs.txt 顶部说明。
+
+import leftPad from 'left-pad';
+export const x = require('left-pad');

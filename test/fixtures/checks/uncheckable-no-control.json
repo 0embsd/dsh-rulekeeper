@@ -1,0 +1,10 @@
+{
+  "rule": "PATH-SANITIZE",
+  "probeCommand": "node bin/lf-check.mjs invalid-reference --file <文档> --project <根>",
+  "probeOutput": "FINDING REF_LINE_OUT_OF_RANGE x.md:9999 越界（该文件仅 3 行）| exit=1",
+  "controlSample": "",
+  "controlOutput": "",
+  "falsifier": "若探针能对任意文档稳定给出 FINDING，则本结论失效",
+  "decidedAt": "2026-09-01T00:00:00.000Z",
+  "expiresAt": "2026-09-20T00:00:00.000Z"
+}

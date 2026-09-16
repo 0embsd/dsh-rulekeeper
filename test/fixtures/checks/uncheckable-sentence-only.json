@@ -1,0 +1,5 @@
+{
+  "rule": "FACT-WRITING",
+  "mechanism": "uncheckable（探针说抓不到）",
+  "notes": "反面样本：只有一句话，没有探针命令/输出/正对照/falsifier/有效期"
+}
