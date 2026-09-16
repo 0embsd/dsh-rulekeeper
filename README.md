@@ -90,6 +90,8 @@ git clone https://github.com/0embsd/dsh-rulekeeper.git <包目录>
 dsh plugin --profile <你的档> add link:<包目录>
 # ⚠ 实测提醒：`add` 只写 dependencies；bundle 清单是**手工表** —— 请确认
 #    <档目录>/package.json 的 dsh.profile.bundles 里出现 "dsh-rulekeeper"
+#    （2026-09-16 补充实测：对**带 `dsh.bundle.patch` 的包**，`dsh plugin add` 会**自动**同时登记进
+#     `dsh.profile.bundles`；上面那句"手工表"在更早的 DSH 构建上成立。无论哪种，**装完核对一次**最稳。）
 # 然后**重启该档 DSH**（插件树在启动时装载）
 ```
 
