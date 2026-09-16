@@ -16,6 +16,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { effectiveConfig, isProtected, loadLandingRules, normalizeTarget } from './rules.mjs';
 import { displayPath } from './checks.mjs';
@@ -909,10 +910,41 @@ export function closeGate(opts = {}) {
 /** 服务端入口的工作流文件（相对项目根）。目录形态与 GitHub Actions 对齐 */
 export const CI_WORKFLOW_REL = '.github/workflows/dsh-rulekeeper-gate.yml';
 /** 生成物里引用的 dsh-rulekeeper 入口（上游仓布局；消费方可用 `--bin` 覆盖） */
-export const CI_BIN_REL = 'dsh-rulekeeper/bin/rk-gate.mjs';
-/** **自曝边界**：远端 CI 是否真的执行过 —— 本机无法自证，恒为 false，谁要标 true 必须另附远端运行记录 */
+export const CI_BIN_REL = 'bin/rk-gate.mjs';
+/** 本包根目录（`src/gate.mjs` 上溯两级） */
+const PKG_ROOT_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
+
+/**
+ * **自动推算**工作流里该引用的入口路径（相对仓库根）——两种消费方布局都不用手传参：
+ *   · 包**就是**仓库根（本仓形态） → `bin/rk-gate.mjs`
+ *   · 包被 vendored 在仓内子目录（消费方形态，如 `<repo>/dsh-rulekeeper/`） → `dsh-rulekeeper/bin/rk-gate.mjs`
+ * 推算不出（包在仓外/相对路径越界）时回落到 `CI_BIN_REL`；显式 `--bin` 永远优先。
+ */
+export function autoCiBinRel(repoRoot) {
+  if (typeof repoRoot !== 'string' || repoRoot.trim() === '') return CI_BIN_REL;
+  const root = resolve(repoRoot);
+  // ① **看仓里的真实布局**（比"猜代码在哪"可靠；夹具仓/消费方仓都能自动认出来）
+  for (const candidate of ['bin/rk-gate.mjs', 'dsh-rulekeeper/bin/rk-gate.mjs']) {
+    if (existsSync(join(root, candidate))) return candidate;
+  }
+  // ② 都找不到：若本包就在这个仓里，按相对位置算；换算不出来再回落默认
+  const rel = toPosix(relative(root, join(PKG_ROOT_DIR, 'bin', 'rk-gate.mjs')));
+  return rel.startsWith('..') || isAbsolute(rel) ? CI_BIN_REL : rel;
+}/** **自曝边界**：远端 CI 是否真的执行过 —— 本机无法自证，恒为 false，谁要标 true 必须另附远端运行记录 */
 export const CI_CARRIER_DONE = false;
 export const CI_CARRIER_REASON = '本仓无远端/未 push/分支保护需 token：GitHub 侧执行与分支保护设置**未验证**（本条只提供本机等价模拟）';
+
+/** 生成物里的 node 版本**唯一来源** = 本包 `package.json` 的 `engines.node`（避免"CI 跑 20、engines 要 22"这类自相矛盾） */
+function engineNodeMajor() {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    const m = /(\d+)/.exec(String(pkg?.engines?.node ?? ''));
+    return m === null ? '22' : m[1];
+  } catch {
+    return '22';
+  }
+}
+export const ENGINE_NODE = engineNodeMajor();
 
 /** 工作流内容**单一来源**：生成与校验都走它（L474：同一语义只许一套实现）
  *
@@ -923,8 +955,8 @@ export const CI_CARRIER_REASON = '本仓无远端/未 push/分支保护需 token
  *   · 显式 `range`（如 `--all`）= 逐字使用，供"首次接入/一次性 backfill"场景生成。
  */
 export function ciWorkflowYaml(opts = {}) {
-  const nodeVersion = String(opts.nodeVersion ?? '20');
-  const binPath = toPosix(String(opts.binPath ?? CI_BIN_REL));
+  const nodeVersion = String(opts.nodeVersion ?? ENGINE_NODE);
+  const binPath = toPosix(String(opts.binPath ?? (opts.projectRoot ? autoCiBinRel(opts.projectRoot) : CI_BIN_REL)));
   const range = typeof opts.range === 'string' && opts.range.trim() !== '' ? opts.range.trim() : null;
   const runLine = range !== null
     ? `        run: node ${binPath} ci ${range}`
@@ -949,6 +981,22 @@ export function ciWorkflowYaml(opts = {}) {
     `          node-version: '${nodeVersion}'`,
     '      - name: dsh-rulekeeper 服务端防线（不依赖本机 hook：新 clone 也拦得住）',
     runLine,
+    // 2026-09-16 新增：**跨平台测试任务**（此前 CI 只跑门禁、不跑用例）。
+    // 为什么：本仓只在 Windows/Linux 上人工跑过用例；macOS 从未真跑过（README 曾如实标"未实测"）。
+    //   把它放进 CI 矩阵，既补 macOS 实测，又让"CI 真的跑过用例"成为可引用的凭证。
+    '  test:',
+    '    strategy:',
+    '      fail-fast: false',
+    '      matrix:',
+    '        os: [ubuntu-latest, macos-latest]',
+    '    runs-on: ${{ matrix.os }}',
+    '    steps:',
+    '      - uses: actions/checkout@v4',
+    '      - uses: actions/setup-node@v4',
+    '        with:',
+    `          node-version: '${nodeVersion}'`,
+    '      - name: 全量用例（Windows 之外的两平台同源复核）',
+    '        run: node --test',
     '',
   ].join('\n');
 }
@@ -1057,7 +1105,9 @@ export function ciGate(opts = {}) {
   const recon = bypassRecon({ repoRoot, landingDir: landing, range, all, limit: opts.limit, runGitRaw, protection, ledger });
   for (const f of recon.findings) findings.push({ code: `CI_${f.code}`, message: f.message });
 
-  const binRel = toPosix(String(opts.binPath ?? CI_BIN_REL));
+  // 入口路径必须与**生成器**同一个来源（⑰ 单一实现）：此前这里写 `opts.binPath ?? CI_BIN_REL`，
+  // 而生成器已改成 autoCiBinRel() ⇒ "写的是 A、查的是 B"，CI_BIN_MISSING 假红（2026-09-16 实测）。
+  const binRel = toPosix(String(opts.binPath ?? autoCiBinRel(repoRoot)));
   const binAbs = isAbsolute(binRel) ? binRel : join(repoRoot, binRel);
   const binPresent = existsSync(binAbs);
   const binSha256 = binPresent ? sha256OfFile(binAbs) : null;

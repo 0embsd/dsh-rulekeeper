@@ -336,7 +336,9 @@ test('判据: 恒报 CI_CARRIER_DONE=false；显式 `--claim-remote` 判红（�
 test('判据: 工作流内容**单一来源**（生成 == 校验基准），且 `--write-workflow` 是显式动作', () => {
   const f = fixture('ci-gen', { withHooks: false });
   const onDisk = readFileSync(join(f.repo, CI_WORKFLOW_REL), 'utf8');
-  assert.equal(onDisk, ciWorkflowYaml(), '写盘内容必须等于生成函数的内容（防两套实现）');
+  // 注意：生成器默认值**依赖项目根的真实布局**（包即仓根 vs 包在子目录）⇒ 比对时必须传同一个 projectRoot，
+  // 否则就是"用另一套参数去对同一份生成物"（2026-09-16 实测：曾经这条因默认值变化而假红）。
+  assert.equal(onDisk, ciWorkflowYaml({ projectRoot: f.repo }), '写盘内容必须等于生成函数的内容（防两套实现）');
   assert.equal(onDisk.includes('github.event.before'), true, '默认生成物必须用**事件感知**范围（评审 中危①：此前恒为 --all）');
   assert.equal(onDisk.includes('--all-if-no-base'), false, '不引入装饰性开关：base 缺失时自动退回全历史是内建行为');
   assert.equal(onDisk.endsWith('\n'), true);
@@ -344,7 +346,7 @@ test('判据: 工作流内容**单一来源**（生成 == 校验基准），且 
   const again = ci(['--repo', f.repo, '--write-workflow']);
   assert.equal(again.rc, RC.OK, again.out);
   assert.match(again.out, /^RK_GATE_CI_WROTE=/m);
-  assert.equal(readFileSync(join(f.repo, CI_WORKFLOW_REL), 'utf8'), ciWorkflowYaml(), '重复生成必须幂等');
+  assert.equal(readFileSync(join(f.repo, CI_WORKFLOW_REL), 'utf8'), ciWorkflowYaml({ projectRoot: f.repo }), '重复生成必须幂等');
   // `range` 不再是死参数：显式范围能生成出固定范围的 run: 行
   const scoped = ci(['--repo', f.repo, '--write-workflow', '--workflow-range', '--all']);
   assert.equal(scoped.rc, RC.OK, scoped.out);

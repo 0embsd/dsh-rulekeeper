@@ -1,0 +1,32 @@
+# 本文件由 dsh-rulekeeper 生成，请勿手改：`node <bin> ci --write-workflow`
+# 源：dsh-rulekeeper/src/gate.mjs 的 ciWorkflowYaml()（手改会被 `rk-gate ci` 的完整性校验判红）
+# 范围口径：push 用 github.event.before..github.sha；拿不到 before（首次 push / pull_request）退回 --all（fail-closed）
+name: dsh-rulekeeper-gate
+on:
+  push:
+  pull_request:
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: dsh-rulekeeper 服务端防线（不依赖本机 hook：新 clone 也拦得住）
+        run: node bin/rk-gate.mjs ci --base "${{ github.event.before }}" --head "${{ github.sha }}"
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 全量用例（Windows 之外的两平台同源复核）
+        run: node --test
