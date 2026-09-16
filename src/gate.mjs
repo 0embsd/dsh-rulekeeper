@@ -946,6 +946,32 @@ function engineNodeMajor() {
 }
 export const ENGINE_NODE = engineNodeMajor();
 
+/** test 任务的脚本正文 —— **单一来源**：生成物写盘用它，`test/ci-annotate.test.mjs` 也直接跑它
+ *
+ * 为什么不是一句 `node --test`（2026-09-16 实测的事实）：
+ *   · GitHub 的 job 日志下载接口**要凭证**（无 token 实测 403 `Must have admin rights to Repository.`）；
+ *   · 而 check-run **注解（annotation）无凭证可读**（实测 HTTP 200）——失败信息只有走注解才对外可见。
+ * 所以失败时必须把「用例名 + 断言信息 + 文件:行」打成 `::error::` 工作流命令：
+ * 只把输出留在日志里，仓外只读的审阅者（含本项目的自检流程）就看不到失败原因。
+ * 输出转 TAP 是为了**机器可解析**（`spec` 是人看的、`tap` 才带 key: value 诊断块）。
+ */
+export const CI_TEST_SCRIPT = [
+  'set +e',
+  'node --test --test-reporter=tap > "$RUNNER_TEMP/rk-tap.txt" 2>&1',
+  'rc=$?',
+  'if [ "$rc" -eq 0 ]; then',
+  '  tail -n 5 "$RUNNER_TEMP/rk-tap.txt"',
+  '  exit 0',
+  'fi',
+  'echo "::error::node --test 失败（rc=$rc）：以下为失败用例名与断言信息（注解无需凭证即可读）"',
+  'grep -A 16 -E \'not ok \' "$RUNNER_TEMP/rk-tap.txt" \\',
+  '  | grep -vE \'duration_ms:|type: |name: |stack:|^--$|^ *-{3} *$|^ *\\.{3} *$|^ *$\' \\',
+  '  | head -n 40 \\',
+  '  | while IFS= read -r line; do echo "::error::$line"; done',
+  'tail -n 60 "$RUNNER_TEMP/rk-tap.txt"',
+  'exit "$rc"',
+];
+
 /** 工作流内容**单一来源**：生成与校验都走它（L474：同一语义只许一套实现）
  *
  * `run:` 行两种形态（**`range` 参数不再是死参数**，独立评审 中危①）：
@@ -973,10 +999,10 @@ export function ciWorkflowYaml(opts = {}) {
     '  gate:',
     '    runs-on: ubuntu-latest',
     '    steps:',
-    '      - uses: actions/checkout@v4',
+    '      - uses: actions/checkout@v5',
     '        with:',
     '          fetch-depth: 0',
-    '      - uses: actions/setup-node@v4',
+    '      - uses: actions/setup-node@v5',
     '        with:',
     `          node-version: '${nodeVersion}'`,
     '      - name: dsh-rulekeeper 服务端防线（不依赖本机 hook：新 clone 也拦得住）',
@@ -991,12 +1017,14 @@ export function ciWorkflowYaml(opts = {}) {
     '        os: [ubuntu-latest, macos-latest]',
     '    runs-on: ${{ matrix.os }}',
     '    steps:',
-    '      - uses: actions/checkout@v4',
-    '      - uses: actions/setup-node@v4',
+    '      - uses: actions/checkout@v5',
+    '      - uses: actions/setup-node@v5',
     '        with:',
     `          node-version: '${nodeVersion}'`,
     '      - name: 全量用例（Windows 之外的两平台同源复核）',
-    '        run: node --test',
+    // 脚本正文来自 CI_TEST_SCRIPT（**同一份**东西既写盘也被用例真跑，防"生成物 ≠ 实测的东西"）
+    '        run: |',
+    ...CI_TEST_SCRIPT.map((l) => `          ${l}`),
     '',
   ].join('\n');
 }

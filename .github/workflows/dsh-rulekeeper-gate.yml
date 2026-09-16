@@ -9,10 +9,10 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
       - name: dsh-rulekeeper 服务端防线（不依赖本机 hook：新 clone 也拦得住）
@@ -24,9 +24,23 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
       - name: 全量用例（Windows 之外的两平台同源复核）
-        run: node --test
+        run: |
+          set +e
+          node --test --test-reporter=tap > "$RUNNER_TEMP/rk-tap.txt" 2>&1
+          rc=$?
+          if [ "$rc" -eq 0 ]; then
+            tail -n 5 "$RUNNER_TEMP/rk-tap.txt"
+            exit 0
+          fi
+          echo "::error::node --test 失败（rc=$rc）：以下为失败用例名与断言信息（注解无需凭证即可读）"
+          grep -A 16 -E 'not ok ' "$RUNNER_TEMP/rk-tap.txt" \
+            | grep -vE 'duration_ms:|type: |name: |stack:|^--$|^ *-{3} *$|^ *\.{3} *$|^ *$' \
+            | head -n 40 \
+            | while IFS= read -r line; do echo "::error::$line"; done
+          tail -n 60 "$RUNNER_TEMP/rk-tap.txt"
+          exit "$rc"
