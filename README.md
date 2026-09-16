@@ -119,6 +119,16 @@ node <包目录>/bin/rk-selfcheck.mjs --root <包目录>            # 期望 FIN
 node <包目录>/bin/rk-gate.mjs hooks verify --repo <某个仓库根> # 真调一次工具面
 ```
 
+### ⚠ 装上之后，`rulekeeper_*` 工具默认是**空壳**（诚实边界，2026-09-16 实测）
+
+- 插件装载后注册的三个工具（`rulekeeper_gate` / `rulekeeper_record` / `rulekeeper_snap`）**默认不判定、不写任何东西**：
+  调用返回 `{ok:false, configured:false, reason:'本工具未注入 handler（默认零副作用）'}`（`src/plugin.mjs` 的 `toolDefinition()`）。
+  这是**设计**：本包只提供"装得上 + 与第三方同场不互相打断"的契约面，真正的判定逻辑由**消费者注入** `handlers`
+  （`apply(ctx, { handlers })` / `index.js` 的默认装载**不注入**任何 handler）。
+- 因此装机后立刻可用的形态是 **CLI**：`node <包目录>/bin/dsh-rulekeeper.mjs <子命令>`（以及 `rk-gate` / `rk-snap` / `rk-migrate` 等入口）。
+- 想要"会话里点一下就跑真判定"，需要消费者侧注入 handler；若要用**硬阻断**，消费者应走 `ctx.tools.guard(name, handler)`
+  而非 `register`（见 `src/guard.mjs`）——那会真的拒绝宿主动作，属部署决策，不在默认安装面内。
+
 ### 卸载
 
 ```bash
