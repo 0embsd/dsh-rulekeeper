@@ -299,6 +299,19 @@ test('LF-A50 applyActivation：已批准/不存在的提案一律拒绝（幂等
   assert.equal(already.code, 'EFFECT_PLAN_UNQUALIFIED');
 });
 
+test('LF-A50 applyActivation 路径穿越防线：含 ../ 或分隔符的提案 id 一律拒绝（LF-270 同族）', () => {
+  const { landing } = scene('a50-traversal');
+  seedProposal(landing, 'FACT-WRITING');
+  for (const bad of ['../evil', 'a/b', '..', '.', 'x\\y']) {
+    const out = applyActivation({ landingDir: landing, proposalId: bad, by: 'human', apply: true });
+    assert.equal(out.ok, false, `${bad} 应被拒绝`);
+    assert.equal(out.code, 'EFFECT_PROPOSAL_ID_UNSAFE', `${bad} 应报 id 不安全`);
+  }
+  assert.ok(!existsSync(join(landing, '..', 'evil.json')), '不得在落点之外写出任何文件');
+  const cli = rk(['effect', 'apply', '--landing', landing, '--proposal', '../../evil', '--by', 'human', '--apply']);
+  assert.equal(cli.rc, RC.USAGE, 'CLI 侧按用法错误处置（exit=2）');
+});
+
 // ── LF-A60 生效后自动进化 ───────────────────────────────────────────────────────
 
 test('LF-A60 生效后复发 => evolve 必须产**升级提案**（不得被幂等静默跳过）', () => {

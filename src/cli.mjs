@@ -35,6 +35,7 @@ import {
   DEFAULT_STALE_DAYS, EFFECT_STATES, appendVerification, applyActivation,
   effectInjectPlan, effectPlan, parseCarrier, ruleBindings, verifyBinding,
 } from './effect.mjs';
+import { isSafeId } from './proposal.mjs';
 import { importLedger } from './importer.mjs';
 import { landingFingerprint, migrateLanding, planMigration } from './migrate.mjs';
 import { query as queryLedger, readLedger, record, summary as ledgerSummary } from './ledger.mjs';
@@ -2427,6 +2428,11 @@ function runCliEffect(argv, io, env) {
     let entries = [];
     for (const [rule, b] of bindings) for (const c of b.checks) entries.push({ rule, binding: c });
     if (flags.proposal !== undefined) {
+      // id 是**输入**：含 `../` 或分隔符时会拼出落点之外的路径（读写都在此列）⇒ 先过安全校验
+      if (!isSafeId(flags.proposal)) {
+        io.err(`dsh-rulekeeper effect verify: --proposal id 不安全（只允许 [A-Za-z0-9._-] 且禁 ".."）: ${JSON.stringify(flags.proposal)}\n`);
+        return RC.USAGE;
+      }
       const pf = join(landing, 'proposals', `${flags.proposal}.json`);
       if (!existsSync(pf)) {
         io.err(`dsh-rulekeeper effect verify: 提案不存在: ${toPosix(pf)}\n`);
@@ -2482,6 +2488,11 @@ function runCliEffect(argv, io, env) {
     }
     if (!['human', 'auto'].includes(flags.by)) {
       io.err(`dsh-rulekeeper effect apply: --by 只能是 human|auto（收到 ${JSON.stringify(flags.by)}）\n`);
+      return RC.USAGE;
+    }
+    // id 是**输入**（会拼进文件名）：含 `../` 时 `renameSync` 会写到落点之外 ⇒ 先过安全校验、按用法错误处置
+    if (!isSafeId(flags.proposal)) {
+      io.err(`dsh-rulekeeper effect apply: --proposal id 不安全（只允许 [A-Za-z0-9._-] 且禁 ".."）: ${JSON.stringify(flags.proposal)}\n`);
       return RC.USAGE;
     }
     const out = applyActivation({

@@ -33,7 +33,7 @@ import { injectPlan } from './inject.mjs';
 import { record as ledgerRecord, readLedger } from './ledger.mjs';
 import { offGuard } from './mode.mjs';
 import { toPosix } from './platform/paths.mjs';
-import { listProposals, proposalPath, validateProposalQuality } from './proposal.mjs';
+import { isSafeId, listProposals, proposalPath, validateProposalQuality } from './proposal.mjs';
 import { redactValue } from './redact.mjs';
 import { canonicalRule } from './ruleid.mjs';
 import { isProtected, loadLandingRules, loadRules } from './rules.mjs';
@@ -493,6 +493,11 @@ export function applyActivation(opts = {}) {
   if (typeof landingDir !== 'string' || landingDir.trim() === '') return fail('EFFECT_NO_LANDING', 'applyActivation 需要 landingDir');
   if (by !== 'human') return fail('EFFECT_HUMAN_SIGNATURE_REQUIRED', `rules.json 只能由人签字写入（收到 by=${JSON.stringify(by)}）；auto 一律拒绝——闸门本身不可被 AI 直接改`);
   if (typeof opts.proposalId !== 'string' || opts.proposalId.trim() === '') return fail('EFFECT_NO_PROPOSAL', '需要 --proposal <id>');
+  // **id 必须先过安全校验**（LF-270 的同族风险）：`proposalPath()` 会把 id 拼进文件名，
+  // 含 `../` 或分隔符的 id 会让随后的 `renameSync` **写到落点之外**（读时会泄露落点外的文件）。
+  if (!isSafeId(opts.proposalId)) {
+    return fail('EFFECT_PROPOSAL_ID_UNSAFE', `提案 id 不安全（只允许 [A-Za-z0-9._-] 且禁 ".."）: ${JSON.stringify(opts.proposalId)}`);
+  }
 
   const proposalFile = proposalPath(landingDir, opts.proposalId);
   if (!existsSync(proposalFile)) return fail('EFFECT_PROPOSAL_MISSING', `提案不存在: ${toPosix(proposalFile)}`);
