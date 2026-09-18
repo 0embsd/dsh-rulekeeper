@@ -28,7 +28,7 @@ import { dirname, join } from 'node:path';
 import { appendLine, readLines } from './append.mjs';
 import { backupFile } from './backup.mjs';
 import { CHECK_KINDS } from './checks.mjs';
-import { CLOSE_KNOWN_GATES, effectiveProtection, reconWrite } from './gate.mjs';
+import { CLOSE_KNOWN_GATES, effectiveProtection, readGateLedger, reconWrite } from './gate.mjs';
 import { injectPlan } from './inject.mjs';
 import { record as ledgerRecord, readLedger } from './ledger.mjs';
 import { acquireLock, releaseLock } from './lock.mjs';
@@ -40,9 +40,13 @@ import { canonicalRule } from './ruleid.mjs';
 import { isProtected, loadLandingRules, loadRules } from './rules.mjs';
 import { SCHEMA_VERSION } from './schema.mjs';
 
-export const EFFECT_STATES = Object.freeze(['none', 'injected', 'mechanized', 'verified', 'recurred']);
+export const EFFECT_STATES = Object.freeze(['none', 'injected', 'mechanized', 'verified', 'recurred', 'retired']);
 /** 生效登记事件行的事务名（账本里的 `category`）：状态**派生**，不原地改历史行 */
 export const EFFECT_EVENT_CATEGORY = '生效登记';
+/** 生效**退役**事件行的事务名（与登记同族：退役也是一次可审计的状态迁移） */
+export const EFFECT_RETIRE_CATEGORY = '生效退役';
+/** 退役提案的机器标记（写在 `redCriteria` 前缀）：`planActivation` 据此走"摘绑定"而不是"加绑定" */
+export const RETIRE_MARK = 'EFFECT_RETIRE_CANDIDATE';
 /** 验证记录的机器标记（写在 findings.jsonl 的 evidence 里） */
 export const EFFECT_VERIFIED_MARK = 'EFFECT_VERIFIED';
 export const EFFECT_FAILED_MARK = 'EFFECT_VERIFY_FAILED';
@@ -178,11 +182,20 @@ export function normalizeGateBinding(entry) {
 
 /** 生效登记事件行 → `rule -> [activation]`（**派生**，不原地改账本） */
 export function activationsFromLanding(landingDir) {
+  return eventRowsOf(landingDir, EFFECT_EVENT_CATEGORY);
+}
+
+/** 生效**退役**事件行 → `rule -> [retirement]`（同族派生；退役后不再报"登记了却没绑定"） */
+export function retirementsFromLanding(landingDir) {
+  return eventRowsOf(landingDir, EFFECT_RETIRE_CATEGORY);
+}
+
+function eventRowsOf(landingDir, category) {
   const out = new Map();
   const read = readLedger(landingDir);
   for (const row of read.values) {
     if (row === null || typeof row !== 'object') continue;
-    if (row.category !== EFFECT_EVENT_CATEGORY) continue;
+    if (row.category !== category) continue;
     if (typeof row.rule !== 'string' || row.rule.trim() === '') continue;
     const rule = canonicalRule(row.rule);
     const m = /proposal=([A-Za-z0-9._-]+)/.exec(String(row.problem ?? ''));
@@ -191,6 +204,73 @@ export function activationsFromLanding(landingDir) {
     out.set(rule, list);
   }
   return out;
+}
+
+/**
+ * **有效性回写（命中）**：从门禁台账里把"这条纪律真的拦住过"读出来（LF-A50，2026-09-19）。
+ *
+ * 两个来源（都是**规则/载体可归属**的，不是"落点里有过 finding"那种不可归属的计数）：
+ *  · `gate:'close'` 行的 `hits[].rule` —— 收尾闸自报"本批碰到哪几条纪律、靠什么拦住"（**规则级**）
+ *  · `gate:'precommit'` 行的 `violations[].path` —— 真阻断在**具体路径**上拦过（**载体级**，与绑定的 carrier 对齐）
+ *
+ * 诚实边界：precommit 行**不带 rule**（机械门禁不知道自己拦的是哪条纪律），故载体级命中必须靠
+ * "绑定声明的 carrier"来归属——这也正是要求绑定写 `carrier` 的另一个理由。
+ */
+export function hitsFromLanding(landingDir) {
+  const byRule = new Map();
+  const byPath = new Map();
+  const read = readGateLedger(landingDir);
+  for (const row of read.values) {
+    if (row === null || typeof row !== 'object') continue;
+    if (row.gate === 'close' && Array.isArray(row.hits)) {
+      for (const h of row.hits) {
+        if (h === null || typeof h !== 'object' || typeof h.rule !== 'string' || h.rule.trim() === '') continue;
+        const rule = canonicalRule(h.rule);
+        const cur = byRule.get(rule) ?? { rule, closes: 0, stoppedBy: new Set() };
+        cur.closes += 1;
+        if (typeof h.stoppedBy === 'string' && h.stoppedBy !== '') cur.stoppedBy.add(h.stoppedBy);
+        byRule.set(rule, cur);
+      }
+    }
+    if (row.gate === 'precommit' && Array.isArray(row.violations)) {
+      for (const v of row.violations) {
+        if (v === null || typeof v !== 'object' || typeof v.path !== 'string' || v.path === '') continue;
+        const key = toPosix(v.path.toLowerCase());
+        byPath.set(key, (byPath.get(key) ?? 0) + 1);
+      }
+    }
+  }
+  return { byRule, byPath, rows: read.values.length };
+}
+
+/** 某条纪律的命中统计（收尾闸自报 + 其绑定 carrier 上的真阻断） */
+export function hitsOfRule({ rule, bindings, hits }) {
+  const info = hits.byRule.get(rule) ?? { closes: 0, stoppedBy: new Set() };
+  let carrierViolations = 0;
+  for (const c of bindings?.checks ?? []) {
+    if (c.carrier === null) continue;
+    carrierViolations += hits.byPath.get(toPosix(c.carrier.toLowerCase())) ?? 0;
+  }
+  return { closes: info.closes, carrierViolations, stoppedBy: [...info.stoppedBy].sort() };
+}
+
+/**
+ * 退役提案的**四要件**（LF-A55）。
+ *
+ * 为什么不"推定"：本仓红线是"四要件只能显式提供、不得从账本条目推定"（那会把质量门降级成复制粘贴）。
+ * 这里给的不是"推定的判据"，而是**实测事实 + 可否证的底线**：零信号的窗口/计数是量出来的，
+ * 载体沿用已生效绑定的事实值，`activationCheck` 写明"什么情况下这次退役作废"。
+ * 且产物**只是提案**：真正摘绑定仍要人签字走 `rk-effect apply`。
+ */
+export function retireQualityOf({ rule, binding, windowDays, closes, carrierViolations, lastActivation }) {
+  return {
+    redCriteria: `${RETIRE_MARK} 退役后底线：${rule} 在生效后 ${windowDays} 天内零命中（close=${closes} carrier=${carrierViolations}）且零复发；一旦再命中/再复发 ⇒ 本次退役作废，须恢复绑定`,
+    counterExample: binding?.carrier
+      ? `path:${binding.carrier}（原判据载体：退役后它将不再被这条绑定拦，故必须靠"零复发"作为替代证据）`
+      : `${rule}：原绑定没有 carrier（无反例载体可指，退役建议需人工补载体后再批准）`,
+    falsePositiveSurface: binding?.falsePositive ? `path:${binding.falsePositive}` : '无（原绑定未声明误报面载体）',
+    activationCheck: `rk-effect plan --landing <落点> --rule ${rule} 必须显示 retired（生效登记${lastActivation === null ? '无' : `=${lastActivation}`}），且此后 30 天不得再现 EFFECT_RECURRED_AFTER_ACTIVATION`,
+  };
 }
 
 /** 验证记录 → `rule -> [record]`（读 findings.jsonl；该文件此前**没有生产者**，本模块是第一个）
@@ -226,6 +306,7 @@ export function ledgerGroups(landingDir) {
     if (row === null || typeof row !== 'object' || Array.isArray(row)) continue;
     if (typeof row.rule !== 'string' || row.rule.trim() === '') continue;
     if (row.category === EFFECT_EVENT_CATEGORY) continue; // 生效登记不是"又踩了一次"
+    if (row.category === EFFECT_RETIRE_CATEGORY) continue; // 生效退役同理
     const rule = canonicalRule(row.rule);
     const g = groups.get(rule) ?? { rule, count: 0, firstSeen: null, lastSeen: null, variants: new Set() };
     g.count += 1;
@@ -256,6 +337,8 @@ export function effectPlan(opts = {}) {
   const protection = effectiveProtection(landingDir);
   const bindings = ruleBindings(rules);
   const activations = activationsFromLanding(landingDir);
+  const retirements = retirementsFromLanding(landingDir);
+  const hits = hitsFromLanding(landingDir);
   const verifications = verificationsFromLanding(landingDir);
   const groups = ledgerGroups(landingDir);
   const proposals = listProposals(landingDir).items;
@@ -286,6 +369,15 @@ export function effectPlan(opts = {}) {
     else if (recurred > 0) state = 'recurred';
     else if (verified) state = 'verified';
     else state = 'mechanized';
+    // **退役**（LF-A55）：有人签字退役过、且晚于最后一次生效登记 ⇒ 这一条是"主动不再拦"，
+    // 不是"坏了"。故它既不算没绑定（ACTIVATED_UNBOUND），也不算"只写下来了"（TEXT_ONLY）。
+    const retireTs = (() => {
+      const list = retirements.get(rule) ?? [];
+      return list.length === 0 ? null : list.map((x) => x.ts ?? '').sort().pop();
+    })();
+    const retired = retireTs !== null && (lastActivation === null || retireTs > lastActivation);
+    if (retired) state = 'retired';
+    const hitInfo = hitsOfRule({ rule, bindings: b, hits });
 
     // 空转闸（"已实现未生效"在**数据面**的对应物）：绑定的载体必须真被保护面覆盖，否则这条绑定是挂名
     const uncovered = [];
@@ -305,11 +397,14 @@ export function effectPlan(opts = {}) {
     if (g.count > 0 && state === 'none') {
       findings.push({ code: 'EFFECT_TEXT_ONLY', severity: 'error', rule, message: `${rule}: 账本有 ${g.count} 条但 rules.json 无绑定（只写下来了，没生效）` });
     }
+    if (state === 'retired') {
+      findings.push({ code: 'EFFECT_RETIRED', severity: 'info', rule, message: `${rule}: 已于 ${retireTs} 人签字退役（零信号窗口内）；再命中/再复发即作废` });
+    }
     // **"登记了却没绑定"**（对抗性 QA 2 号发现，fail-closed）：有生效登记、却没有对应绑定
     //   —— 可能来自：并发写互相覆盖、绑定被手删、`rk-backup rebuild` 用旧包覆盖。
     //   此前只查 `g.count > 0`（有教训行）才报 TEXT_ONLY，于是"登记在、绑定没了"这种**最危险的状态**
     //   反而判 pass（plan 输出 TEXT_ONLY=0 + 全绿）⇒ 现在单列一条 error 级发现。
-    if (acts.length > 0 && b.checks.length === 0 && b.inject.length === 0) {
+    if (acts.length > 0 && b.checks.length === 0 && b.inject.length === 0 && state !== 'retired') {
       findings.push({ code: 'EFFECT_ACTIVATED_UNBOUND', severity: 'error', rule, message: `${rule}: 有 ${acts.length} 次生效登记但 rules.json 里**没有绑定**（被回滚/被删/被还原覆盖）——体检不得判通过` });
     }
     if (openProposal !== null) {
@@ -334,10 +429,11 @@ export function effectPlan(opts = {}) {
     if (state === 'recurred') {
       findings.push({ code: 'EFFECT_RECURRED_AFTER_ACTIVATION', severity: 'error', rule, message: `${rule}: 生效后（${lastActivation}）又踩了（${g.lastSeen}）——判据没拦住，须升级` });
     }
-    if (state !== 'recurred' && lastActivation !== null) {
+    if (state !== 'recurred' && state !== 'retired' && lastActivation !== null) {
       const ageDays = (now.getTime() - Date.parse(lastActivation)) / 86400000;
-      if (Number.isFinite(ageDays) && ageDays > staleDays) {
-        findings.push({ code: 'EFFECT_STALE_NO_SIGNAL', severity: 'warn', rule, message: `${rule}: 生效 ${Math.floor(ageDays)} 天既没拦住过也没再复发（零信号），建议退役或收紧` });
+      // **零信号 = 零命中 + 零复发**（有效性回写后再判，不再是"只看复发"的弱判据）
+      if (Number.isFinite(ageDays) && ageDays > staleDays && recurred === 0 && hitInfo.closes === 0 && hitInfo.carrierViolations === 0) {
+        findings.push({ code: 'EFFECT_STALE_NO_SIGNAL', severity: 'warn', rule, message: `${rule}: 生效 ${Math.floor(ageDays)} 天零命中零复发（close=0 carrier=0），建议退役（rk-effect apply 批准退役提案）或收紧` });
       }
     }
 
@@ -353,6 +449,9 @@ export function effectPlan(opts = {}) {
       gates: b.gates.length,
       activations: acts.length,
       lastActivation,
+      retired,
+      lastRetirement: retireTs,
+      hits: hitInfo,
       verified,
       recurredAfterActivation: recurred > 0,
       openProposal: openProposal === null ? null : openProposal.id,
@@ -546,6 +645,48 @@ export function planActivation(opts = {}) {
   if (problems.length > 0) return { ok: false, findings: problems.map((p) => ({ code: 'EFFECT_PLAN_UNQUALIFIED', message: p })), candidate: null, additions: null };
 
   const rule = canonicalRule(proposal.rule);
+  const loaded = loadLandingRules(landingDir);
+  const before = loaded.rulesResult.rules ?? { schema: SCHEMA_VERSION, project: 'unknown', protected_paths: [], gates: [], checks: [], inject: [] };
+
+  // ── **退役**分支（LF-A55）：提案带 RETIRE_MARK ⇒ 摘绑定，而不是加绑定 ────────────────────
+  // 判据：只摘**这条纪律自己的** checks 绑定；其 `patterns` 若仍被**别的**绑定声明，则**不许摘**
+  //（否则会顺手把别人的保护面削掉 —— 那是"退役"变"拆台"）。
+  if (typeof proposal.redCriteria === 'string' && proposal.redCriteria.includes(RETIRE_MARK)) {
+    const mine = ruleBindings(before).get(rule) ?? { checks: [] };
+    if (mine.checks.length === 0) {
+      return { ok: false, findings: [{ code: 'EFFECT_PLAN_UNQUALIFIED', message: `${rule}: 没有可退役的 checks 绑定（已经是未绑定状态）` }], candidate: null, additions: null };
+    }
+    const others = new Set();
+    for (const [r, g] of ruleBindings(before)) {
+      if (r === rule) continue;
+      for (const c of g.checks) for (const p of c.patterns ?? []) others.add(toPosix(String(p).toLowerCase()));
+    }
+    const removable = new Set();
+    for (const c of mine.checks) for (const p of c.patterns ?? []) removable.add(toPosix(String(p)));
+    const dropPatterns = [...removable].filter((p) => !others.has(toPosix(p.toLowerCase())));
+    const candidate = {
+      ...before,
+      protected_paths: (Array.isArray(before.protected_paths) ? before.protected_paths : []).filter((p) => !dropPatterns.includes(toPosix(String(p)))),
+      checks: (Array.isArray(before.checks) ? before.checks : []).filter((e) => {
+        const b = normalizeBinding(e);
+        return !(b !== null && b.rule === rule);
+      }),
+    };
+    return {
+      ok: true,
+      kind: 'retire',
+      findings: [],
+      rule,
+      gate: mine.checks[0].gate ?? DEFAULT_EFFECT_GATE,
+      carriers: mine.checks.map((c) => c.carrier).filter((c) => c !== null),
+      falsePositive: mine.checks[0].falsePositive ?? null,
+      patterns: dropPatterns,
+      additions: { patterns: [], binding: null, retirement: { removedPatterns: dropPatterns, removedBindings: mine.checks.length } },
+      candidate,
+      before,
+    };
+  }
+
   const carriers = [];
   const ce = parseCarrier(proposal.counterExample);
   if (ce.kind === 'path') {
@@ -559,8 +700,6 @@ export function planActivation(opts = {}) {
   const patterns = Array.isArray(opts.patterns) && opts.patterns.length > 0
     ? opts.patterns.map((p) => toPosix(String(p).trim().replace(/^\.\//, ''))).filter((p) => p !== '')
     : carriers.map((c) => toPosix(c));
-  const loaded = loadLandingRules(landingDir);
-  const before = loaded.rulesResult.rules ?? { schema: SCHEMA_VERSION, project: 'unknown', protected_paths: [], gates: [], checks: [], inject: [] };
   const existing = new Set((Array.isArray(before.protected_paths) ? before.protected_paths : []).map((p) => String(p)));
   const addPatterns = patterns.filter((p) => !existing.has(p));
   // 覆盖该 carrier 的**既有**保护面模式（本次没新增时，靠它把"谁在拦"写进绑定）
@@ -591,6 +730,7 @@ export function planActivation(opts = {}) {
   };
   return {
     ok: true,
+    kind: 'activate',
     findings: [],
     rule,
     gate,
@@ -722,13 +862,20 @@ export function applyActivation(opts = {}) {
     }
     steps.push(`proposal ${opts.proposalId} -> approved`);
 
-    // ⑥ 生效登记（账本事件行；`record` 自带脱敏 + off 档零副作用）
+    // ⑥ 生效登记 / **生效退役**（账本事件行；`record` 自带脱敏 + off 档零副作用）
+    const isRetire = planned.kind === 'retire';
     const logged = ledgerRecord({
       rule: planned.rule,
-      category: EFFECT_EVENT_CATEGORY,
-      problem: `EFFECT_ACTIVATE rule=${planned.rule} proposal=${opts.proposalId} patterns=${planned.additions.patterns.length} gate=${planned.gate}`,
-      root_cause: '入账未生效：生效面此前没有绑定（rules.json 的 checks 无消费者）',
-      solution: `protected_paths += [${planned.additions.patterns.join(', ')}]；checks += [carrier=${planned.additions.binding.carrier}]`,
+      category: isRetire ? EFFECT_RETIRE_CATEGORY : EFFECT_EVENT_CATEGORY,
+      problem: isRetire
+        ? `EFFECT_RETIRE rule=${planned.rule} proposal=${opts.proposalId} removedPatterns=${planned.additions.retirement.removedPatterns.length} removedBindings=${planned.additions.retirement.removedBindings}`
+        : `EFFECT_ACTIVATE rule=${planned.rule} proposal=${opts.proposalId} patterns=${planned.additions.patterns.length} gate=${planned.gate}`,
+      root_cause: isRetire
+        ? '零信号窗口内主动不再拦（退役）：判据成本高于收益，或场景已消失'
+        : '入账未生效：生效面此前没有绑定（rules.json 的 checks 无消费者）',
+      solution: isRetire
+        ? `checks 摘掉 ${planned.additions.retirement.removedBindings} 条绑定；protected_paths -= [${planned.additions.retirement.removedPatterns.join(', ')}]`
+        : `protected_paths += [${planned.additions.patterns.join(', ')}]；checks += [carrier=${planned.additions.binding.carrier}]`,
       mechanism: 'rules.json',
       evidence: [toPosix(rulesFile), ...(backupPath === null ? [] : [toPosix(backupPath)])],
     }, { landingDir, now });

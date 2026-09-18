@@ -14,7 +14,11 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
 import { loadConfig } from './config.mjs';
-import { EFFECT_EVENT_CATEGORY, activationsFromLanding } from './effect.mjs';
+import {
+  DEFAULT_STALE_DAYS, EFFECT_EVENT_CATEGORY, EFFECT_RETIRE_CATEGORY, activationsFromLanding,
+  hitsFromLanding, hitsOfRule, retireQualityOf, retirementsFromLanding, ruleBindings,
+} from './effect.mjs';
+import { loadLandingRules } from './rules.mjs';
 import { readLedger } from './ledger.mjs';
 import { canonicalRule } from './ruleid.mjs';
 import {
@@ -44,6 +48,9 @@ export function evolve(opts = {}) {
   const escalateGate = opts.escalateGate === true;
   const wantRule = typeof opts.rule === 'string' && opts.rule.trim() !== '' ? canonicalRule(opts.rule) : null;
   const dryRun = opts.dryRun === true;
+  /** 退役候选窗口（天）：>0 才产退役提案；默认 30 天（对齐 `DEFAULT_STALE_DAYS`），0 = 关闭 */
+  const retireDays = opts.retireDays === undefined ? DEFAULT_STALE_DAYS
+    : (Number.isInteger(opts.retireDays) && opts.retireDays >= 0 ? opts.retireDays : DEFAULT_STALE_DAYS);
 
   const findings = [];
   const proposals = [];
@@ -103,6 +110,7 @@ export function evolve(opts = {}) {
     //   这里此前没排除 —— 同一个"复发"概念两处口径不一致，导致 apply 之后立即可被当"复发"，
     //   还把 `EFFECT_ACTIVATE …` 那句 problem 算成"另一个不同的坑"（distinctProblems 虚增）。
     if (entry.category === EFFECT_EVENT_CATEGORY) continue;
+    if (entry.category === EFFECT_RETIRE_CATEGORY) continue;   // 退役行同样不是"又踩了一次"
     const key = canonicalRule(entry.rule);
     const g = groups.get(key) ?? { rule: key, count: 0, variants: new Set(), problems: new Set(), latestId: null, latestTs: '' };
     g.count += 1;
@@ -198,13 +206,59 @@ export function evolve(opts = {}) {
   // 只有"真的出问题"才 exit≠0：跳过（幂等）/ off 档 / 生效后复发后**已产升级提案**，都是正常结局
   const BENIGN = new Set([
     'EVOLVE_SKIP_EXISTING_PROPOSAL', 'EVOLVE_SKIP_ALREADY_ACTIVE', 'EVOLVE_SKIPPED_MODE_OFF',
-    'EFFECT_RECURRED_AFTER_ACTIVATION',
+    'EFFECT_RECURRED_AFTER_ACTIVATION', 'EFFECT_RETIRE_CANDIDATE',
   ]);
   const ok = findings.every((f) => BENIGN.has(f.code));
+  // ── 生效后自动进化②：**退役候选**（零信号 ⇒ 产退役提案；仍只产提案，不写 rules）──────────────
+  const retireProposals = [];
+  if (retireDays > 0) {
+    const hits = hitsFromLanding(landingDir);
+    const retirements = retirementsFromLanding(landingDir);
+    const bindingsNow = ruleBindings(loadLandingRules(landingDir).rulesResult.rules);
+    for (const rule of [...approvedRules].sort()) {
+      if (openRules.has(rule)) continue;
+      if ((retirements.get(rule) ?? []).length > 0) continue;
+      const mine = bindingsNow.get(rule) ?? { checks: [] };
+      if (mine.checks.length === 0) continue;
+      const acts = activations.get(rule) ?? [];
+      const lastAct = acts.length === 0 ? null : acts.map((a) => a.ts ?? '').sort().pop();
+      if (lastAct === null) continue;
+      const ageDays = (now.getTime() - Date.parse(lastAct)) / 86400000;
+      if (!(ageDays > retireDays)) continue;
+      const g = groups.get(rule) ?? null;
+      if (g !== null && g.lastSeen !== null && g.lastSeen > lastAct) continue;   // 复发 ⇒ 该升级，不退役
+      const stat = hitsOfRule({ rule, bindings: mine, hits });
+      if (stat.closes > 0 || stat.carrierViolations > 0) continue;               // 有命中 ⇒ 判据仍在干活
+      const quality = retireQualityOf({
+        rule, binding: mine.checks[0], windowDays: retireDays,
+        closes: stat.closes, carrierViolations: stat.carrierViolations, lastActivation: lastAct,
+      });
+      const proposal = buildProposal({ rule, quality, source, now });
+      const qualified = validateProposalQuality(proposal);
+      if (!qualified.ok) {
+        findings.push({ code: 'PROPOSAL_QUALITY_MISSING', message: `${rule}: ${qualified.reason}` });
+        continue;
+      }
+      if (dryRun) {
+        retireProposals.push({ rule, id: proposal.id, written: false, proposal });
+        continue;
+      }
+      const written = writeProposal(landingDir, proposal);
+      if (!written.ok) {
+        findings.push({ code: 'PROPOSAL_WRITE_FAILED', message: `${rule}: ${written.reason}` });
+        continue;
+      }
+      retireProposals.push({ rule, id: proposal.id, written: true, path: written.path, windowDays: retireDays, ageDays: Math.floor(ageDays) });
+      findings.push({
+        code: 'EFFECT_RETIRE_CANDIDATE',
+        message: `${rule}: 生效 ${Math.floor(ageDays)} 天零命中零复发（close=${stat.closes} carrier=${stat.carrierViolations}）⇒ 产**退役提案** ${proposal.id}（须人签字后 rk-effect apply 才真摘绑定）`,
+      });
+    }
+  }
   return {
     ok, mode, ledgerEntries, ledgerHealth,
     candidates: counts.map((c) => ({ rule: c.rule, count: c.count, variants: [...c.variants].sort(), distinctProblems: c.problems.size })),
-    proposals, skipped, findings, dryRun,
+    proposals, retireProposals, skipped, findings, dryRun,
   };
 }
 

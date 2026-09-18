@@ -18,7 +18,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, st
 import { join } from 'node:path';
 
 import {
-  DEFAULT_EFFECT_GATE, EFFECT_EVENT_CATEGORY, EFFECT_FAILED_MARK, EFFECT_VERIFIED_MARK,
+  DEFAULT_EFFECT_GATE, EFFECT_EVENT_CATEGORY, EFFECT_FAILED_MARK, EFFECT_VERIFIED_MARK, RETIRE_MARK,
   applyActivation, effectInjectPlan, effectPlan, normalizeBinding, parseCarrier, planActivation,
   ruleBindings, verifyBinding,
 } from '../src/effect.mjs';
@@ -449,8 +449,57 @@ test('LF-A60 生效登记行**不算复发**（effect 与 evolve 必须同一口
   assert.equal(listProposals(landing).items.length, 1, '生效登记行被当成复发 => 会多出一条提案（口径不一致）');
 });
 
-// ── LF-A70 注入接线 + 插件工具 ───────────────────────────────────────────────────
+// ── LF-A55 退役通路 + 有效性（命中）回写 ────────────────────────────────────────
 
+test('LF-A55 退役通路：零信号 ⇒ evolve 产退役提案 ⇒ 人签字后摘绑定与模式 ⇒ plan 报 retired', () => {
+  const { landing } = scene('a55-retire', { patterns: ['docs/x.md'] });
+  const t0 = new Date('2026-01-01T00:00:00.000Z');
+  seedProposal(landing, 'FACT-WRITING');
+  const applied = applyActivation({ landingDir: landing, proposalId: 'P-20260919-000000-aaaaaa', by: 'human', apply: true, now: t0 });
+  assert.equal(applied.ok, true, applied.message ?? '');
+  // 生效后 30 天以上零命中零复发 ⇒ evolve 必须产**退役提案**（只产提案，不写规则）
+  const before = sha256File(join(landing, 'rules.json'));
+  const ev = rk(['evolve', '--landing', landing, '--rule', 'FACT-WRITING', '--quality', qualityFileFor(landing), '--now', '2026-06-01T00:00:00.000Z']);
+  assert.equal(ev.rc, RC.OK, ev.err + ev.out);
+  assert.match(ev.out, /EFFECT_RETIRE_CANDIDATE/, ev.out);
+  assert.equal(sha256File(join(landing, 'rules.json')), before, 'evolve 绝不写 rules.json');
+  const retire = listProposals(landing).items.find((p) => typeof p.redCriteria === 'string' && p.redCriteria.includes(RETIRE_MARK));
+  assert.ok(retire !== undefined, `必须产退役提案: ${JSON.stringify(listProposals(landing).items.map((p) => p.redCriteria))}`);
+  // 人签字退役（同一条写通路）
+  const done = applyActivation({ landingDir: landing, proposalId: retire.id, by: 'human', apply: true, now: new Date('2026-06-02T00:00:00.000Z') });
+  assert.equal(done.ok, true, done.message ?? '');
+  const rules = JSON.parse(readFileSync(join(landing, 'rules.json'), 'utf8'));
+  assert.deepEqual(rules.checks, [], '退役后必须摘掉绑定');
+  assert.deepEqual(rules.protected_paths, [], '退役后必须摘掉本绑定声明的模式');
+  const plan = effectPlan({ landingDir: landing, now: new Date('2026-06-03T00:00:00.000Z') });
+  assert.equal(plan.items[0].state, 'retired');
+  assert.equal(plan.ok, true, `退役后不得再报"登记了却没绑定": ${JSON.stringify(plan.findings)}`);
+  assert.ok(plan.findings.some((f) => f.code === 'EFFECT_RETIRED'));
+});
+
+test('LF-A50 有效性（命中）回写：门禁台账的真命中算进有效性，零信号判据不再只看复发', () => {
+  const { landing } = scene('a50-hits', { patterns: ['docs/x.md'] });
+  seedProposal(landing, 'FACT-WRITING');
+  assert.equal(applyActivation({ landingDir: landing, proposalId: 'P-20260919-000000-aaaaaa', by: 'human', apply: true, now: new Date('2026-01-01T00:00:00.000Z') }).ok, true);
+  mkdirSync(join(landing, 'logs'), { recursive: true });
+  writeFileSync(join(landing, 'logs', 'gate.jsonl'), `${[
+    JSON.stringify({ schema: 1, ts: '2026-02-01T00:00:00.000Z', gate: 'close', hits: [{ rule: 'FACT-WRITING', stoppedBy: 'pre-commit' }] }),
+    JSON.stringify({ schema: 1, ts: '2026-02-02T00:00:00.000Z', gate: 'precommit', violations: [{ path: 'docs/x.md', code: 'GATE_PRECOMMIT_NO_SNAPSHOT' }] }),
+  ].join('\n')}\n`, 'utf8');
+  const plan = effectPlan({ landingDir: landing, now: new Date('2026-06-01T00:00:00.000Z') });
+  assert.equal(plan.items[0].hits.closes, 1, '收尾闸自报的命中必须被读出来');
+  assert.equal(plan.items[0].hits.carrierViolations, 1, 'precommit 在该 carrier 上的真阻断必须被读出来');
+  assert.equal(plan.findings.some((f) => f.code === 'EFFECT_STALE_NO_SIGNAL'), false, '有命中就不算零信号');
+  // 有命中的规则不得被推荐退役
+  rk(['evolve', '--landing', landing, '--rule', 'FACT-WRITING', '--quality', qualityFileFor(landing), '--now', '2026-06-01T00:00:00.000Z']);
+  assert.equal(
+    listProposals(landing).items.filter((p) => typeof p.redCriteria === 'string' && p.redCriteria.includes(RETIRE_MARK)).length,
+    0,
+    '仍在干活的判据不得产退役提案',
+  );
+});
+
+// ── LF-A70 注入接线 + 插件工具 ───────────────────────────────────────────────────
 test('LF-A70 effectInjectPlan：产出注入计划（唯一 id + <untrusted>），且**零落点写入**', () => {
   const { landing } = scene('a70-inject');
   writeFileSync(join(landing, 'ledger.jsonl'), `${JSON.stringify(ledgerEntry({ id: 'LF-1', ts: '2026-09-01T00:00:00.000Z', rule: 'FACT-WRITING' }))}\n`, 'utf8');

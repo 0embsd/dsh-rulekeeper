@@ -2833,7 +2833,7 @@ function runCliEvolve(argv, io, env) {
     '--landing': 'string', '--project': 'string', '--quality': 'string', '--source': 'string',
     '--escalate-gate': 'boolean', '--rule': 'string', '--dry-run': 'boolean',
     '--red-criteria': 'string', '--counter-example': 'string', '--false-positive-surface': 'string',
-    '--activation-check': 'string',
+    '--activation-check': 'string', '--retire-days': 'string',
     '--now': 'string', '--json': 'boolean',
   }, io);
   if (parsed.error !== null) return parsed.error;
@@ -2918,6 +2918,7 @@ function runCliEvolve(argv, io, env) {
       escalateGate: parsed.flags['escalate-gate'] === true,
       rule: parsed.flags.rule ?? null,
       dryRun: parsed.flags['dry-run'] === true,
+      retireDays: parsed.flags['retire-days'] === undefined ? undefined : Number(parsed.flags['retire-days']),
     });
   } catch (err) {
     // 兜底：任何未预期异常都转成受控 rc（绝不把栈留给调用方）
