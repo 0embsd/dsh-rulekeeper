@@ -14,7 +14,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
 import { loadConfig } from './config.mjs';
-import { activationsFromLanding } from './effect.mjs';
+import { EFFECT_EVENT_CATEGORY, activationsFromLanding } from './effect.mjs';
 import { readLedger } from './ledger.mjs';
 import { canonicalRule } from './ruleid.mjs';
 import {
@@ -99,6 +99,10 @@ export function evolve(opts = {}) {
   const groups = new Map();
   for (const entry of entries) {
     if (typeof entry.rule !== 'string' || entry.rule.trim() === '') continue;
+    // **生效登记行不是"又踩了一次"**（独立 CR major #8）：`src/effect.mjs` 的 ledgerGroups 显式排除它，
+    //   这里此前没排除 —— 同一个"复发"概念两处口径不一致，导致 apply 之后立即可被当"复发"，
+    //   还把 `EFFECT_ACTIVATE …` 那句 problem 算成"另一个不同的坑"（distinctProblems 虚增）。
+    if (entry.category === EFFECT_EVENT_CATEGORY) continue;
     const key = canonicalRule(entry.rule);
     const g = groups.get(key) ?? { rule: key, count: 0, variants: new Set(), problems: new Set(), latestId: null, latestTs: '' };
     g.count += 1;

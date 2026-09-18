@@ -2423,6 +2423,12 @@ function runCliEffect(argv, io, env) {
   }
 
   if (sub === 'verify') {
+    // `--all` **必须真的被读**（独立 CR nit #10：此前它被解析却从不使用 = 空转 flag，
+    // 而 README/RUNBOOK/用例都在传播"verify --all"这个错觉）。语义：显式选择"全部绑定"。
+    if (flags.proposal === undefined && flags.all !== true) {
+      io.err(`dsh-rulekeeper effect verify: 需要 --proposal <id>（只验某条纪律）或 --all（验全部绑定）\n${USAGE_EFFECT}\n`);
+      return RC.USAGE;
+    }
     const rules = loadLandingRules(landing).rulesResult.rules;
     const bindings = ruleBindings(rules);
     let entries = [];
@@ -2468,7 +2474,7 @@ function runCliEffect(argv, io, env) {
         rule: e.rule, target: e.binding.carrier ?? '', ok: report.ok,
         evidence: [`carrier=${e.binding.carrier ?? '(none)'}`, `gate=${e.binding.gate ?? '(none)'}`], now,
       });
-      io.out(line(`RK_EFFECT_VERIFY_RULE=${e.rule} RESULT=${report.ok === true ? 'pass' : 'fail'} EVIDENCE=${wrote.ok === true ? 'written' : `skipped(${wrote.reason ?? ''})`}`));
+      io.out(line(`RK_EFFECT_VERIFY_RULE=${e.rule} RESULT=${report.ok === true ? 'pass' : 'fail'} EVIDENCE=${wrote.ok !== true ? `failed(${wrote.reason ?? ''})` : (wrote.skipped === true ? 'skipped(mode=off)' : 'written')}`));
       if (report.ok === true) passed += 1; else failed += 1;
     }
     io.out(line(`RK_EFFECT_VERIFY_PASSED=${passed} FAILED=${failed}`));

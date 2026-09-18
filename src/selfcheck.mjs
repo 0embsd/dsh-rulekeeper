@@ -109,7 +109,7 @@ export function toCode(src, opts = {}) {
 }
 
 /**
- * S9 **例外表**：属"消费者注入面"的模块（默认面刻意不接线，见 `index.js` 的行为边界说明）。
+ * S9 例外表：属"消费者注入面"的模块（默认面刻意不接线，见 `index.js` 的行为边界说明）。
  * 反向约束：表里每一项都必须是真实存在的文件，否则 `S9_STALE_ALLOWLIST` 判红。
  */
 export const S9_CONSUMER_API = Object.freeze({
@@ -117,6 +117,43 @@ export const S9_CONSUMER_API = Object.freeze({
   'src/observer.mjs': 'LF-440 观察者清点：由消费者按需注册观察者，默认面不订阅',
   'src/autorecord.mjs': 'LF-420 自动记录：由消费者按需接 tools/result，默认面不写',
 });
+
+/**
+ * 把**模板字面量**的内容抹成空格（保留 `'`/`"` 字符串，因为 import 说明符是它们）。
+ *
+ * 为什么要这一步（2026-09-19 对抗性 QA 9 号发现）：`toCode()` 默认**保留**字符串/模板内容，
+ * 于是"在模板字面量里写一行 `import './zz-tpl.mjs'`"就能**凭空造出一条假的接线边**，
+ * 让 S9 判它"已接线"。这里先按反引号扫一遍把模板内容抹掉，再交给 `toCode`。
+ * 说明：这是**字符级启发式**（不处理 `${}` 嵌套反引号），与 `REGEX_PRECEDERS` 同族的诚实边界；
+ * 本仓无嵌套模板反引号用法，够用即止——**勿复用于别处**。
+ */
+export function blankTemplateLiterals(text) {
+  let out = '';
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (c === '`') {
+      out += '`';
+      i += 1;
+      while (i < n && text[i] !== '`') {
+        if (text[i] === '\\') { out += '  '; i += 2; continue; }
+        out += text[i] === '\n' ? '\n' : ' ';
+        i += 1;
+      }
+      if (i < n) { out += '`'; i += 1; }
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+
+/** 抹掉**动态** `import('…')` 调用（"写了但从没被调用"的动态导入不算接线，QA 9 号 P2） */
+export function blankDynamicImports(text) {
+  return text.replace(/\bimport\s*\(\s*(['"])[^'"]*\1\s*\)/g, (m) => ' '.repeat(m.length));
+}
 
 function listModules(root) {
   const out = [];
@@ -386,45 +423,63 @@ export function checkSkeleton(root, opts = {}) {
   //   同族形态还有：`rules.json` 的 `checks`/`gates`/`inject` 三个数组**没有任何消费者**、
   //   `findings.jsonl` **没有任何生产者**（数据契约冻结了，实现却没接上）。
   //   **用例全绿抓不出这类问题**（用例只证明函数本身对），必须以**调用图**为判据。
-  // 判据：`src/**/*.mjs` 必须被 `index.js` / `bin/*.mjs` / 另一个 `src/*.mjs` import 到（test/ 与 scripts/ 不算消费者）。
+  // 判据：`src/**/*.mjs` 必须**从真实入口可达**（`index.js` / `bin/*.mjs` 起，沿静态 import 传递闭包）。
   //
-  // **例外表**（S9_CONSUMER_API）：有三个模块是"**消费者注入面**"——默认面刻意不接线
-  //   （`index.js` 的行为边界写着"默认零拦截，要真拦下来必须由消费者改用 ctx.tools.guard()"）。
-  //   允许例外的同时必须有**反向约束**：表里每一项都必须是真实存在的文件（`S9_STALE_ALLOWLIST`），
-  //   否则例外表自己会腐烂成"谁都能被豁免"的后门。
+  // **S9 v2（2026-09-19 对抗性 QA 9 号发现后加固）**：v1 只问"有没有哪个文件 import 它"，
+  //   被三条路绕过：①模板字面量里写一行假 import ②从没被调用的 `() => import('./x.mjs')`
+  //   ③把孤儿模块 A 挂在另一个孤儿 B 上（B 被报、A 逃掉）。v2 三条一起堵：
+  //   入口 = index.js + bin/*.mjs；边只认**静态** import 且**先抹掉模板内容与动态 import**；判据变为**可达性**。
   {
     const srcPrefix = join(root, 'src') + sep;
-    for (const rel of Object.keys(S9_CONSUMER_API)) {
-      if (!existsSync(join(root, rel))) {
-        add('S9_STALE_ALLOWLIST', `S9 例外表里的 ${rel} 已不存在（例外必须随文件一起回收，否则表会腐烂）`);
+    // 例外表是**本包专属**（独立 CR nit #12）：对别的 root 求值只会恒报 3 条噪声 ⇒ 先认包名。
+    let isThisPkg = false;
+    try {
+      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+      isThisPkg = pkg !== null && typeof pkg === 'object' && pkg.name === 'dsh-rulekeeper';
+    } catch { isThisPkg = false; }
+    if (isThisPkg) {
+      for (const rel of Object.keys(S9_CONSUMER_API)) {
+        if (!existsSync(join(root, rel))) {
+          add('S9_STALE_ALLOWLIST', `S9 例外表里的 ${rel} 已不存在（例外必须随文件一起回收，否则表会腐烂）`);
+        }
       }
     }
-    const consumers = [];
+    const entries = [];
     const indexPath = join(root, 'index.js');
-    if (existsSync(indexPath)) consumers.push(indexPath);
-    const testPrefix = join(root, 'test') + sep;
-    const scriptsPrefix = join(root, 'scripts') + sep;
-    for (const file of listModules(root)) {
-      if (file.startsWith(testPrefix) || file.startsWith(scriptsPrefix)) continue;
-      consumers.push(file);
+    if (existsSync(indexPath)) entries.push(indexPath);
+    const binDir = join(root, 'bin');
+    if (existsSync(binDir)) {
+      for (const name of readdirSync(binDir)) if (String(name).endsWith('.mjs')) entries.push(join(binDir, String(name)));
     }
-    const imported = new Set();
-    for (const file of consumers) {
-      if (!existsSync(file)) continue;
-      for (const spec of collectSpecifiers(toCode(readFileSync(file, 'utf8')))) {
-        if (!spec.startsWith('.')) continue;   // 只看包内相对导入
+    const edgesOf = (file) => {
+      const raw = blankDynamicImports(blankTemplateLiterals(readFileSync(file, 'utf8')));
+      const out = [];
+      for (const spec of collectSpecifiers(toCode(raw))) {
+        if (!spec.startsWith('.')) continue;
         const target = resolve(dirname(file), spec);
-        imported.add(target);
-        imported.add(`${target}.mjs`);
-        imported.add(join(target, 'index.mjs'));
+        out.push(existsSync(target) ? target : `${target}.mjs`, join(target, 'index.mjs'));
       }
+      return out;
+    };
+    const reachable = new Set();
+    const queue = [...entries];
+    const norm = (p) => resolve(p).toLowerCase();   // 大小写不敏感文件系统（CR nit #11：字符串比对会假红）
+    while (queue.length > 0) {
+      const file = queue.pop();
+      const key = resolve(file);
+      if (reachable.has(norm(key))) continue;
+      reachable.add(norm(key));
+      if (!existsSync(key)) continue;
+      for (const next of edgesOf(key)) if (!reachable.has(norm(next))) queue.push(next);
     }
     for (const file of listModules(root)) {
       if (!file.startsWith(srcPrefix)) continue;
       const rel = relative(root, file).split(sep).join('/');
-      if (imported.has(file)) continue;
+      if (reachable.has(norm(file))) continue;
+      // 例外**一律生效**（按相对路径匹配）：包被改名/被复制成夹具时豁免语义不变；
+      // 只有"例外表是否腐烂"（S9_STALE_ALLOWLIST）才限定在本包内求值（CR nit #12）。
       if (Object.hasOwn(S9_CONSUMER_API, rel)) continue;
-      add('S9_UNWIRED_MODULE', `${rel}: 没有任何非测试代码 import 它（"已实现未生效"——写了模块没人用，等于没写）`);
+      add('S9_UNWIRED_MODULE', `${rel}: 从入口（index.js / bin/*.mjs）沿静态 import **不可达**（"已实现未生效"——写了模块没人用，等于没写）`);
     }
   }
 

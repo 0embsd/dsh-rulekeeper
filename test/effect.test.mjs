@@ -14,11 +14,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
-  DEFAULT_EFFECT_GATE, EFFECT_EVENT_CATEGORY, EFFECT_FAILED_MARK, EFFECT_SURFACES, EFFECT_VERIFIED_MARK,
+  DEFAULT_EFFECT_GATE, EFFECT_EVENT_CATEGORY, EFFECT_FAILED_MARK, EFFECT_VERIFIED_MARK,
   applyActivation, effectInjectPlan, effectPlan, normalizeBinding, parseCarrier, planActivation,
   ruleBindings, verifyBinding,
 } from '../src/effect.mjs';
@@ -79,7 +79,17 @@ function scene(label, { withRules = true, patterns = ['docs/x.md'] } = {}) {
 }
 
 function binding(rule, carrier, extra = {}) {
-  return { kind: 'file_untracked_change', rule, carrier, gate: DEFAULT_EFFECT_GATE, ...extra };
+  // `patterns` = 这条绑定**声明的封闭面**（反事实只摘这些；缺了就 fail-closed —— 见 verifyBinding）
+  return { kind: 'file_untracked_change', rule, carrier, gate: DEFAULT_EFFECT_GATE, patterns: [carrier], ...extra };
+}
+
+/** 给落点补一份"该载体已留证且未改"的快照记录（稳态现场，CR major #5 的复现条件） */
+function snapshotCarrier(landing, projectRoot, rel) {
+  const abs = join(projectRoot, rel);
+  const sha = sha256File(abs);
+  mkdirSync(join(landing, 'snapshots'), { recursive: true });
+  const row = { schema: 1, ts: '2026-09-19T00:00:00.000Z', path: rel, sha256_before: sha, sha256_after: sha, backup: `backups/${rel.replace(/\//g, '_')}.bak`, why: 'test' };
+  writeFileSync(join(landing, 'snapshots', 'index.jsonl'), `${JSON.stringify(row)}\n`, 'utf8');
 }
 
 /** 往落点写一条提案（四要件齐备） */
@@ -207,14 +217,58 @@ test('LF-A40 verifyBinding 红态：缺 carrier => EFFECT_VERIFY_UNCARRIED（凭
   assert.equal(report.findings[0].code, 'EFFECT_VERIFY_UNCARRIED');
 });
 
-test('LF-A40 verifyBinding 红态：摘掉绑定后仍判红 => EFFECT_CHECK_NOT_THE_STOPPER（挂名生效）', () => {
-  const { projectRoot, landing } = scene('a40-stopper');
-  // 现场：快照索引里有坏行 -> 与保护面无关的发现恒在，摘掉绑定也照样判红
+test('LF-A40 verifyBinding 红态：摘掉绑定声明的模式后仍判红 => EFFECT_CHECK_NOT_THE_STOPPER（挂名生效）', () => {
+  // 现场：载体**本来就被别的宽 glob** 拦着（docs/**），本条绑定只声明了 docs/x.md ⇒ 摘掉它照样红
+  const { projectRoot, landing } = scene('a40-stopper', { patterns: ['docs/**', 'docs/x.md'] });
+  const report = verifyBinding({ landingDir: landing, projectRoot, binding: binding('FACT-WRITING', 'docs/x.md') });
+  assert.equal(report.ok, false);
+  assert.ok(report.findings.some((f) => f.code === 'EFFECT_CHECK_NOT_THE_STOPPER'), JSON.stringify(report.findings));
+});
+
+test('LF-A40 verifyBinding 红态：落点证据基座坏（坏索引）=> EFFECT_VERIFY_LANDING_DIRTY（不冒充判据问题）', () => {
+  const { projectRoot, landing } = scene('a40-dirty');
   mkdirSync(join(landing, 'snapshots'), { recursive: true });
   writeFileSync(join(landing, 'snapshots', 'index.jsonl'), '{not json at all\n', 'utf8');
   const report = verifyBinding({ landingDir: landing, projectRoot, binding: binding('FACT-WRITING', 'docs/x.md') });
   assert.equal(report.ok, false);
-  assert.ok(report.findings.some((f) => f.code === 'EFFECT_CHECK_NOT_THE_STOPPER'), JSON.stringify(report.findings));
+  assert.equal(report.findings[0].code, 'EFFECT_VERIFY_LANDING_DIRTY', JSON.stringify(report.findings));
+});
+
+test('LF-A40 verifyBinding 红态：落点 config 不可读 => EFFECT_VERIFY_LANDING_DIRTY（fail-closed，禁假绿）', () => {
+  const { projectRoot, landing } = scene('a40-dirtycfg');
+  writeFileSync(join(landing, 'config.json'), '{"schema": 1, "mode": "obs', 'utf8');
+  const report = verifyBinding({ landingDir: landing, projectRoot, binding: binding('FACT-WRITING', 'docs/x.md') });
+  assert.equal(report.ok, false);
+  assert.equal(report.findings[0].code, 'EFFECT_VERIFY_LANDING_DIRTY', JSON.stringify(report.findings));
+});
+
+test('LF-A40 verifyBinding 红态：kind 不是 file_untracked_change => EFFECT_KIND_UNSUPPORTED（禁拿文件门禁糊过去）', () => {
+  const { projectRoot, landing } = scene('a40-kind');
+  const report = verifyBinding({ landingDir: landing, projectRoot, binding: { ...binding('FACT-WRITING', 'docs/x.md'), kind: 'output_shape' } });
+  assert.equal(report.ok, false);
+  assert.equal(report.findings[0].code, 'EFFECT_KIND_UNSUPPORTED');
+});
+
+test('LF-A40 verifyBinding：绑定没声明 patterns => EFFECT_COUNTERFACTUAL_UNDECLARED（不可隔离即 fail-closed）', () => {
+  const { projectRoot, landing } = scene('a40-nopat');
+  const b = binding('FACT-WRITING', 'docs/x.md');
+  delete b.patterns;
+  const report = verifyBinding({ landingDir: landing, projectRoot, binding: b });
+  assert.equal(report.ok, false);
+  assert.equal(report.findings[0].code, 'EFFECT_COUNTERFACTUAL_UNDECLARED');
+});
+
+test('LF-A40 verifyBinding：**稳态现场**（载体已留证且未改）也必须可复现通过（违规样本是构造出来的）', () => {
+  // 来历（独立 CR major #5）：旧实现拿真实落点当样本 ⇒ 已留证未改时门禁判 pass ⇒ 命中红永远不可能过，
+  // verified 变成一次性状态、README/RUNBOOK 承诺的"重跑 verify 得 exit=0"做不到。
+  const { projectRoot, landing } = scene('a40-steady');
+  snapshotCarrier(landing, projectRoot, 'docs/x.md');
+  const report = verifyBinding({ landingDir: landing, projectRoot, binding: binding('FACT-WRITING', 'docs/x.md'), falsePositive: 'path:README.md' });
+  assert.equal(report.ok, true, JSON.stringify(report.findings));
+  assert.ok(report.cases.every((c) => c.ok === true), JSON.stringify(report.cases));
+  // 第二次跑仍然通过（可重复，而不是"消费掉现场"）
+  const again = verifyBinding({ landingDir: landing, projectRoot, binding: binding('FACT-WRITING', 'docs/x.md'), falsePositive: 'path:README.md' });
+  assert.equal(again.ok, true, JSON.stringify(again.findings));
 });
 
 test('LF-A40 verifyBinding 红态：误报面样本被判红 => EFFECT_FALSE_POSITIVE', () => {
@@ -312,6 +366,33 @@ test('LF-A50 applyActivation 路径穿越防线：含 ../ 或分隔符的提案 
   assert.equal(cli.rc, RC.USAGE, 'CLI 侧按用法错误处置（exit=2）');
 });
 
+test('LF-A50 applyActivation：落点没有 rules.json 时报错，不得发明 project:"unknown" 的规则包（CR nit #15）', () => {
+  const { landing } = scene('a50-norules', { withRules: false });
+  seedProposal(landing, 'FACT-WRITING');
+  const out = applyActivation({ landingDir: landing, proposalId: 'P-20260919-000000-aaaaaa', by: 'human', apply: true });
+  assert.equal(out.ok, false);
+  assert.equal(out.code, 'EFFECT_RULES_MISSING');
+  assert.equal(existsSync(join(landing, 'rules.json')), false, '不得凭空造出哨兵值的规则包');
+});
+
+test('LF-A50 applyActivation 第二条回滚路径：提案状态写回失败 => rules.json 逐字节还原（CR major #9）', () => {
+  const { landing } = scene('a50-rollback2');
+  seedProposal(landing, 'FACT-WRITING');
+  const before = sha256File(join(landing, 'rules.json'));
+  // 让提案文件"写入即失败"：把 proposals 目录里的文件锁成只读（Windows 上 renameSync 会 EPERM）
+  const pf = join(landing, 'proposals', 'P-20260919-000000-aaaaaa.json');
+  chmodSync(pf, 0o444);
+  try {
+    const out = applyActivation({ landingDir: landing, proposalId: 'P-20260919-000000-aaaaaa', by: 'human', apply: true });
+    if (out.ok === true) return; // 平台/权限位不生效时如实跳过（不假装测过）
+    assert.equal(out.code, 'EFFECT_PROPOSAL_STATUS_FAILED', JSON.stringify(out));
+    assert.equal(sha256File(join(landing, 'rules.json')), before, '提案状态写失败必须回滚 rules.json');
+    assert.equal(JSON.parse(readFileSync(pf, 'utf8')).status, 'proposed');
+  } finally {
+    chmodSync(pf, 0o644);
+  }
+});
+
 // ── LF-A60 生效后自动进化 ───────────────────────────────────────────────────────
 
 test('LF-A60 生效后复发 => evolve 必须产**升级提案**（不得被幂等静默跳过）', () => {
@@ -355,6 +436,19 @@ function qualityFileFor(landing) {
   return p;
 }
 
+test('LF-A60 生效登记行**不算复发**（effect 与 evolve 必须同一口径，CR major #8）', () => {
+  const { landing } = scene('a60-notrecur', { patterns: ['docs/x.md'] });
+  const now = new Date('2026-09-19T12:00:00.000Z');
+  seedProposal(landing, 'FACT-WRITING');
+  const applied = applyActivation({ landingDir: landing, proposalId: 'P-20260919-000000-aaaaaa', by: 'human', apply: true, now });
+  assert.equal(applied.ok, true, applied.message ?? '');
+  // 账本此刻只有那条生效登记行（没有教训行）：effect 与 evolve 都必须看到"零复发"
+  const plan = effectPlan({ landingDir: landing, now: new Date('2026-09-19T13:00:00.000Z') });
+  assert.equal(plan.items[0].recurredAfterActivation, false);
+  rk(['evolve', '--landing', landing, '--rule', 'FACT-WRITING', '--quality', qualityFileFor(landing)]);
+  assert.equal(listProposals(landing).items.length, 1, '生效登记行被当成复发 => 会多出一条提案（口径不一致）');
+});
+
 // ── LF-A70 注入接线 + 插件工具 ───────────────────────────────────────────────────
 
 test('LF-A70 effectInjectPlan：产出注入计划（唯一 id + <untrusted>），且**零落点写入**', () => {
@@ -384,7 +478,6 @@ test('LF-A70 插件面：PLUGIN_TOOLS 必须有 rulekeeper_effect，且默认 ha
   assert.equal(typeof out.ok, 'boolean');
   assert.ok(Array.isArray(out.findings));
   assert.equal(typeof out.reason, 'string');
-  assert.equal(EFFECT_SURFACES.length >= 4, true);
 });
 
 // ── LF-A80 S9 模块接线检查 ──────────────────────────────────────────────────────

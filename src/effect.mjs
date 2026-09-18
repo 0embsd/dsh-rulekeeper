@@ -31,6 +31,7 @@ import { CHECK_KINDS } from './checks.mjs';
 import { CLOSE_KNOWN_GATES, effectiveProtection, reconWrite } from './gate.mjs';
 import { injectPlan } from './inject.mjs';
 import { record as ledgerRecord, readLedger } from './ledger.mjs';
+import { acquireLock, releaseLock } from './lock.mjs';
 import { offGuard } from './mode.mjs';
 import { toPosix } from './platform/paths.mjs';
 import { isSafeId, listProposals, proposalPath, validateProposalQuality } from './proposal.mjs';
@@ -77,6 +78,22 @@ export function parseCarrier(text) {
 }
 
 /**
+ * 载体必须是**项目根相对路径**（对抗性 QA 10 号发现）。
+ * 实证：`path:C:/Users/…/outside.txt` 与 `../../../outside.txt` 都被写进了 `protected_paths` 并"验证通过"——
+ * 既把**机器相关绝对路径**带进 rules.json 与输出（违背"判据输出不含绝对路径/跨机可复现"），
+ * 又让保护面伸到项目之外。判据：拒绝绝对路径（盘符 / 前导 `/` / UNC）与任何 `..` 段。
+ */
+export function isRelativeCarrier(value) {
+  if (typeof value !== 'string' || value.trim() === '') return false;
+  const v = toPosix(value.trim().replace(/^\.\//, ''));
+  if (/^[A-Za-z]:/.test(v)) return false;        // C:/…
+  if (v.startsWith('/')) return false;           // /etc/…
+  if (v.startsWith('//')) return false;          // UNC
+  if (v.split('/').some((seg) => seg === '..')) return false;
+  return true;
+}
+
+/**
  * 误报面载体的**宽松**解析：接受两种口径，避免"同名字段两处口径不一致"。
  *
  * 来历（2026-09-19 实测抓到）：绑定的 `falsePositive` 字段存的是**已解析的路径**（`README.md`），
@@ -110,6 +127,9 @@ export function normalizeBinding(entry) {
     carrier: str(entry.carrier) === null ? null : toPosix(str(entry.carrier).replace(/^\.\//, '')),
     falsePositive: str(entry.falsePositive) === null ? null : toPosix(str(entry.falsePositive).replace(/^\.\//, '')),
     gate: str(entry.gate),
+    patterns: Array.isArray(entry.patterns)
+      ? entry.patterns.filter((p) => typeof p === 'string' && p.trim() !== '').map((p) => toPosix(p.trim().replace(/^\.\//, '')))
+      : null,
     proposal: str(entry.proposal),
     activatedAt: str(entry.activatedAt),
   };
@@ -250,9 +270,14 @@ export function effectPlan(opts = {}) {
     const acts = activations.get(rule) ?? [];
     const vers = verifications.get(rule) ?? [];
     const lastActivation = acts.length === 0 ? null : acts.map((a) => a.ts ?? '').sort().pop();
+    // 验证凭证**必须与绑定对齐**（对抗性 QA 7 号发现）：此前只要 findings.jsonl 里有一行带
+    // `EFFECT_VERIFIED` 就判 verified，**从不比对 target** —— 拿一行指向别的文件的伪造记录即可翻盘。
+    // 现在要求 `target` 恰是某条绑定的 carrier，否则"可核对"这句话就是假的。
+    const carriers = new Set(b.checks.map((c) => c.carrier).filter((c) => typeof c === 'string' && c !== ''));
     // **复发**：只在"生效之后"入账的同 rule 条目才算（生效前踩的坑是提案的来历，不算判据失效）
     const recurred = lastActivation === null ? 0 : (g.lastSeen !== null && g.lastSeen > lastActivation ? 1 : 0);
-    const verified = vers.some((v) => v.passed === true);
+    const verified = vers.some((v) => v.passed === true && v.target !== null && carriers.has(v.target));
+    const targetMismatch = vers.some((v) => v.passed === true && (v.target === null || !carriers.has(v.target)));
     const openProposal = proposals.find((p) => typeof p.rule === 'string' && canonicalRule(p.rule) === rule && p.status === 'proposed') ?? null;
 
     let state;
@@ -280,11 +305,31 @@ export function effectPlan(opts = {}) {
     if (g.count > 0 && state === 'none') {
       findings.push({ code: 'EFFECT_TEXT_ONLY', severity: 'error', rule, message: `${rule}: 账本有 ${g.count} 条但 rules.json 无绑定（只写下来了，没生效）` });
     }
+    // **"登记了却没绑定"**（对抗性 QA 2 号发现，fail-closed）：有生效登记、却没有对应绑定
+    //   —— 可能来自：并发写互相覆盖、绑定被手删、`rk-backup rebuild` 用旧包覆盖。
+    //   此前只查 `g.count > 0`（有教训行）才报 TEXT_ONLY，于是"登记在、绑定没了"这种**最危险的状态**
+    //   反而判 pass（plan 输出 TEXT_ONLY=0 + 全绿）⇒ 现在单列一条 error 级发现。
+    if (acts.length > 0 && b.checks.length === 0 && b.inject.length === 0) {
+      findings.push({ code: 'EFFECT_ACTIVATED_UNBOUND', severity: 'error', rule, message: `${rule}: 有 ${acts.length} 次生效登记但 rules.json 里**没有绑定**（被回滚/被删/被还原覆盖）——体检不得判通过` });
+    }
     if (openProposal !== null) {
       findings.push({ code: 'EFFECT_PENDING_PROPOSAL', severity: 'info', rule, message: `${rule}: 有未决提案 ${openProposal.id}，等人签字后 effect apply` });
     }
     if (state === 'mechanized') {
       findings.push({ code: 'EFFECT_NOT_VERIFIED', severity: 'warn', rule, message: `${rule}: 已绑判据但没跑过 effect verify（无验证凭证）` });
+    }
+    if (targetMismatch && state !== 'mechanized') {
+      findings.push({ code: 'EFFECT_VERIFY_TARGET_MISMATCH', severity: 'warn', rule, message: `${rule}: findings.jsonl 里有"通过"记录，但其 target 与绑定的 carrier（${[...carriers].join(',') || '(无)'}）不一致——不计入 verified` });
+    }
+    // 绑定的来源可审计（对抗性 QA 14 号发现）：绑定里写着 proposal=<id>，就该真的存在且已批准
+    for (const c of b.checks) {
+      if (c.proposal === null) continue;
+      const p = proposals.find((x) => x.id === c.proposal) ?? null;
+      if (p === null) {
+        findings.push({ code: 'EFFECT_BINDING_PROPOSAL_MISSING', severity: 'error', rule, message: `${rule}: 绑定引用的提案 ${c.proposal} **不存在**（绑定来源不可审计）` });
+      } else if (p.status !== 'approved') {
+        findings.push({ code: 'EFFECT_BINDING_PROPOSAL_UNVERIFIED', severity: 'error', rule, message: `${rule}: 绑定引用的提案 ${c.proposal} 状态是 ${p.status}（不是 approved——"写进 rules.json 的东西全部来自已签名批准的提案"这条链断了）` });
+      }
     }
     if (state === 'recurred') {
       findings.push({ code: 'EFFECT_RECURRED_AFTER_ACTIVATION', severity: 'error', rule, message: `${rule}: 生效后（${lastActivation}）又踩了（${g.lastSeen}）——判据没拦住，须升级` });
@@ -320,12 +365,19 @@ export function effectPlan(opts = {}) {
 }
 
 /**
- * 生效验证三项（LF-A40；**驱动真实入口** `reconWrite`，不做纯函数自我验证）。
+ * 生效验证三项（LF-A40；**驱动真实入口** `reconWrite`，判据落在**载体自身**）。
  *
- * ① **命中红**：载体在真实落点上必须被判红（gate write 面 deny）
- * ② **反事实唯一性**：把载体从**有效保护面**里摘掉（临时落点，内存外落盘）后，同一载体**必须转绿**
- *    —— 仍红 ⇒ 拦住它的**不是这条绑定**（是坏索引/别的发现）⇒ `EFFECT_CHECK_NOT_THE_STOPPER`（挂名生效）
- * ③ **误报面绿**：误报面样本在当前保护面下必须**不受保护**（判绿）
+ * 设计要点（v3，2026-09-19 独立 CR 的 blocker #1 与 major #3/#4/#5 全在这里收口）：
+ *  · **判据绑定到载体**：不再用"落点里有任意 finding"当命中（那会让"配置坏了"冒充"判据拦住了"），
+ *    而是取 `reconWrite` 报告里**该 carrier 自己的 verdict** ∈ {unrecorded, nosnapshot, missing-on-disk}。
+ *  · **违规样本是构造出来的**：在派生落点（真实 rules/snapshots 的副本，只把该载体的快照记录摘掉）里跑，
+ *    于是"受保护但没留证"这一形态**任何时刻都能复现**——稳态（已留证未改）下也能重跑，不再是一次性状态。
+ *  · **反事实只摘这条绑定的模式**（`binding.patterns`）：摘完必须**转绿**，否则拦住它的不是这条判据。
+ *    没声明 patterns ⇒ fail-closed（不可隔离）。
+ *  · **落点级发现不冒充判据**：rules/config 不可读 ⇒ `EFFECT_VERIFY_LANDING_DIRTY` 直接判不通过。
+ *
+ * ① 命中红：样本载体必须被判 deny；② 反事实唯一性：摘掉本绑定的模式后必须转 allow；
+ * ③ 误报面绿：误报面样本不得被判 deny；④ 载体/类型检查：没有 carrier、或 kind 不是 `file_untracked_change` ⇒ 不许声称能验证。
  *
  * @param {{landingDir: string, projectRoot: string, binding: object, falsePositive?: string|null}} opts
  */
@@ -338,43 +390,70 @@ export function verifyBinding(opts = {}) {
   if (binding === null) {
     return { ok: false, binding: null, cases, findings: [{ code: 'EFFECT_BINDING_UNREADABLE', message: '绑定条目形状不合法' }] };
   }
-  // ④ 载体检查（**先于判定**：没有载体就不许声称"能验证"）
+  // ④ 类型/载体检查（**先于判定**）：不支持的 kind 不许"用文件写入门禁"糊过去（CR major #2）
+  if (binding.kind !== 'file_untracked_change') {
+    findings.push({ code: 'EFFECT_KIND_UNSUPPORTED', message: `${binding.rule}: 绑定 kind=${binding.kind} 暂不支持验证（本工具只实现 file_untracked_change；其余 kind 必须如实报"未实现"，不得判通过）` });
+    return { ok: false, binding, cases, findings };
+  }
   if (binding.carrier === null) {
     findings.push({ code: 'EFFECT_VERIFY_UNCARRIED', message: `${binding.rule}: 绑定没有 carrier（判据载体与事实必须一一对应，缺载体 = 凭证不足）` });
     return { ok: false, binding, cases, findings };
   }
+  if (!Array.isArray(binding.patterns) || binding.patterns.length === 0) {
+    findings.push({ code: 'EFFECT_COUNTERFACTUAL_UNDECLARED', message: `${binding.rule}: 绑定未声明 patterns（无法只摘掉"这一条绑定带来"的拦截 ⇒ 反事实不可隔离，fail-closed）` });
+    return { ok: false, binding, cases, findings };
+  }
   const carrier = binding.carrier;
 
-  // ① 命中红
-  const hit = reconWrite({ projectRoot, landingDir, files: [carrier], phase: 'close' });
-  const hitCodes = (hit.findings ?? []).map((f) => f.code);
-  const hitOk = hit.ok === false;
-  cases.push({ name: '命中红', expect: 'deny', got: hitOk ? 'deny' : 'allow', ok: hitOk, codes: hitCodes });
-  if (!hitOk) findings.push({ code: 'EFFECT_VERIFY_NOT_HIT', message: `${binding.rule}: 载体 ${carrier} 在真实落点上**没被判红**（判据没拦住）` });
-
-  // ② 反事实唯一性（临时落点：有效保护面里去掉覆盖该载体的模式）
-  const counter = counterfactualRecon({ landingDir, projectRoot, carrier });
-  cases.push({ name: '反事实唯一性', expect: 'allow', got: counter.ok === true ? 'allow' : 'deny', ok: counter.ok === true, codes: (counter.findings ?? []).map((f) => f.code) });
-  if (counter.ok !== true) {
-    findings.push({
-      code: 'EFFECT_CHECK_NOT_THE_STOPPER',
-      message: `${binding.rule}: 摘掉绑定后载体 ${carrier} **仍然判红** ⇒ 拦住它的不是这条判据（挂名生效）；残留发现：${(counter.findings ?? []).map((f) => f.code).join(',') || '(none)'}`,
-    });
+  // 派生落点 A（完整保护面）：违规样本 = 该载体"受保护但没留证"
+  const treatment = buildSampleLanding({ landingDir, carrier, dropPatterns: [] });
+  if (treatment.ok !== true) {
+    return { ok: false, binding, cases, findings: [{ code: treatment.code, message: `${binding.rule}: ${treatment.reason}` }] };
   }
+  const control = buildSampleLanding({ landingDir, carrier, dropPatterns: binding.patterns });
+  try {
+    // ① 命中红（judge 落在载体自身）
+    const t = reconWrite({ projectRoot, landingDir: treatment.dir, files: [carrier], phase: 'close' });
+    const tv = carrierVerdictOf(t, carrier);
+    const hitOk = DENY_VERDICTS.has(tv);
+    cases.push({ name: '命中红', expect: 'deny', got: hitOk ? 'deny' : 'allow', ok: hitOk, codes: [`carrier=${tv}`] });
+    if (!hitOk) findings.push({ code: 'EFFECT_VERIFY_NOT_HIT', message: `${binding.rule}: 载体 ${carrier} 在**构造的违规样本**上没被判红（carrier verdict=${tv}）——判据没拦住它` });
 
-  // ③ 误报面绿（advisory：误报面没有可用载体时只提示，不阻断——它是"面"的描述，常是自由文本）
-  const fpText = typeof opts.falsePositive === 'string' && opts.falsePositive.trim() !== ''
-    ? opts.falsePositive
-    : (binding.falsePositive ?? '');
-  if (fpText !== '') {
-    const parsed = carrierPathOf(fpText);
-    if (parsed.path === null) {
-      findings.push({ code: 'EFFECT_FALSE_POSITIVE_UNCARRIED', message: `${binding.rule}: 误报面没有可用载体（既非 path: 标记、也不像相对路径），跳过绿态用例（${parsed.reason}）` });
+    // ② 反事实唯一性（只摘本绑定声明的模式）
+    if (control.ok !== true) {
+      findings.push({ code: control.code, message: `${binding.rule}: 反事实落点构造失败——${control.reason}` });
     } else {
-      const fp = reconWrite({ projectRoot, landingDir, files: [parsed.path], phase: 'close' });
-      const fpOk = fp.ok === true;
-      cases.push({ name: '误报面绿', expect: 'allow', got: fpOk ? 'allow' : 'deny', ok: fpOk, codes: (fp.findings ?? []).map((f) => f.code) });
-      if (!fpOk) findings.push({ code: 'EFFECT_FALSE_POSITIVE', message: `${binding.rule}: 误报面样本 ${parsed.path} 被判红（误报）` });
+      const c = reconWrite({ projectRoot, landingDir: control.dir, files: [carrier], phase: 'close' });
+      const cv = carrierVerdictOf(c, carrier);
+      const ctrlOk = !DENY_VERDICTS.has(cv);
+      cases.push({ name: '反事实唯一性', expect: 'allow', got: ctrlOk ? 'allow' : 'deny', ok: ctrlOk, codes: [`carrier=${cv}`] });
+      if (!ctrlOk) {
+        findings.push({
+          code: 'EFFECT_CHECK_NOT_THE_STOPPER',
+          message: `${binding.rule}: 摘掉本绑定声明的模式（${binding.patterns.join(', ')}）后载体 ${carrier} **仍被判红**（carrier verdict=${cv}）⇒ 拦住它的不是这条判据（挂名生效）`,
+        });
+      }
+    }
+
+    // ③ 误报面绿（advisory：误报面没有可用载体时只提示，不阻断）
+    const fpText = typeof opts.falsePositive === 'string' && opts.falsePositive.trim() !== ''
+      ? opts.falsePositive
+      : (binding.falsePositive ?? '');
+    if (fpText !== '') {
+      const parsed = carrierPathOf(fpText);
+      if (parsed.path === null) {
+        findings.push({ code: 'EFFECT_FALSE_POSITIVE_UNCARRIED', message: `${binding.rule}: 误报面没有可用载体（既非 path: 标记、也不像相对路径），跳过绿态用例（${parsed.reason}）` });
+      } else {
+        const fp = reconWrite({ projectRoot, landingDir: treatment.dir, files: [parsed.path], phase: 'close' });
+        const fv = carrierVerdictOf(fp, parsed.path);
+        const fpOk = !DENY_VERDICTS.has(fv);
+        cases.push({ name: '误报面绿', expect: 'allow', got: fpOk ? 'allow' : 'deny', ok: fpOk, codes: [`carrier=${fv}`] });
+        if (!fpOk) findings.push({ code: 'EFFECT_FALSE_POSITIVE', message: `${binding.rule}: 误报面样本 ${parsed.path} 被判红（误报；carrier verdict=${fv}）` });
+      }
+    }
+  } finally {
+    for (const d of [treatment.dir, control.dir]) {
+      if (typeof d === 'string' && existsSync(d)) rmSync(d, { recursive: true, force: true });
     }
   }
 
@@ -382,37 +461,69 @@ export function verifyBinding(opts = {}) {
   return { ok, binding, cases, findings };
 }
 
-/**
- * 反事实：临时落点里把载体从**有效保护面**摘掉，跑同一个 `reconWrite`（真实入口）。
- * **必须保住真实落点的证据基座**（`snapshots/index.jsonl` 等）：只改保护面、不改现场，
- * 否则"摘掉后判绿"可能只是因为我们把坏索引也一起丢了 ⇒ 假绿（本函数第一版就踩了这个坑）。
- */
-function counterfactualRecon({ landingDir, projectRoot, carrier }) {
-  const protection = effectiveProtection(landingDir);
-  const key = carrier.toLowerCase();
-  const keep = protection.patterns.filter((p) => {
-    const cleaned = String(p).trim().replace(/^\.\//, '');
-    return !patternHits(cleaned, key);
-  });
-  const tmp = mkdtempSync(join(tmpdir(), 'rk-effect-cf-'));
-  try {
-    for (const rel of ['rules.json', join('snapshots', 'index.jsonl')]) {
-      const src = join(landingDir, rel);
-      if (!existsSync(src)) continue;
-      mkdirSync(dirname(join(tmp, rel)), { recursive: true });
-      copyFileSync(src, join(tmp, rel));
-    }
-    // 用 config.json 承载"摘掉后的有效保护面"（effectiveConfig 中 config 优先）——保证反事实改的是**生效面**
-    writeFileSync(join(tmp, 'config.json'), `${JSON.stringify({ schema: SCHEMA_VERSION, mode: protection.mode === 'off' ? 'off' : (protection.mode ?? 'observe'), protected_paths: keep }, null, 2)}\n`, 'utf8');
-    return reconWrite({ projectRoot, landingDir: tmp, files: [carrier], phase: 'close' });
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
+/** 门禁报告里**该载体自己**的判定（找不到 = 不在保护面）——"命中红"判据的唯一落点 */
+export function carrierVerdictOf(report, carrier) {
+  const key = toPosix(String(carrier).toLowerCase());
+  const hit = (report?.checked ?? []).find((c) => toPosix(String(c.path).toLowerCase()) === key);
+  return hit === undefined ? 'unprotected' : String(hit.verdict);
 }
 
-/** 保护面模式是否命中某个 pathKey（复用 rules.mjs 的 globToRegExp 语义，单点不复制） */
-function patternHits(pattern, pathKeyValue) {
-  return isProtected(pathKeyValue, { protected_paths: [pattern] }, { projectRoot: process.cwd() }).protected === true;
+/** 会被判"改过但没留证"的 verdict（命中红 = verdict ∈ 此集合） */
+export const DENY_VERDICTS = new Set(['unrecorded', 'nosnapshot', 'missing-on-disk']);
+
+/**
+ * 构造**违规样本落点**：真实落点的副本（rules.json 原样 + snapshots/index.jsonl 摘掉该载体记录 +
+ * config.json 承载"要用的保护面"）。`dropPatterns=[]` ⇒ 完整保护面（治疗组）；给模式 ⇒ 摘掉它们（对照组）。
+ *
+ * 为什么必须构造（独立 CR major #5）：真实稳态下载体已留证且未改 ⇒ 门禁判 pass ⇒ "命中红"永远无法通过、
+ * `verified` 变成**一次性**状态（README/RUNBOOK 承诺的"重跑 verify 得 exit=0"在健康仓库里做不到）。
+ * 为什么规则/配置不可读要 fail-closed（QA #3）：否则坏配置的那条 deny 会在副本里被"洗掉"，两边都"符合预期"。
+ */
+function buildSampleLanding({ landingDir, carrier, dropPatterns }) {
+  const protection = effectiveProtection(landingDir);
+  const unreadable = (protection.findings ?? []).filter((f) => f.code === 'GATE_WRITE_CONFIG_UNREADABLE' || f.code === 'GATE_WRITE_RULES_UNREADABLE');
+  if (unreadable.length > 0) {
+    return { ok: false, code: 'EFFECT_VERIFY_LANDING_DIRTY', reason: `落点自身配置不可读（${unreadable.map((f) => f.code).join(',')}）——判定不可信，fail-closed` };
+  }
+  // 证据基座不完整同样判"落点脏"：此时"没记录"与"记录读不出"不可区分（与 checks.mjs 同口径），
+  // 旧实现会把这类**落点级**发现算进"命中红/反事实"，把"判据没生效"的帽子扣在没问题的绑定上（CR major #4）。
+  const idxHealth = readLines(join(landingDir, 'snapshots', 'index.jsonl'));
+  if ((idxHealth.badLines ?? 0) > 0 || (idxHealth.oversized ?? 0) > 0 || idxHealth.truncatedTail === true) {
+    return { ok: false, code: 'EFFECT_VERIFY_LANDING_DIRTY', reason: `快照索引基座不完整（badLines=${idxHealth.badLines ?? 0} oversized=${idxHealth.oversized ?? 0} truncatedTail=${idxHealth.truncatedTail === true}）——判定不可信，fail-closed` };
+  }
+  const tmp = mkdtempSync(join(tmpdir(), 'rk-effect-sample-'));
+  mkdirSync(join(tmp, 'snapshots'), { recursive: true });
+  const rulesSrc = join(landingDir, 'rules.json');
+  if (existsSync(rulesSrc)) copyFileSync(rulesSrc, join(tmp, 'rules.json'));
+  const idxSrc = join(landingDir, 'snapshots', 'index.jsonl');
+  if (existsSync(idxSrc)) {
+    const key = toPosix(String(carrier).toLowerCase());
+    const kept = readFileSync(idxSrc, 'utf8').split('\n').filter((l) => l.trim() !== '').filter((l) => {
+      try {
+        const row = JSON.parse(l);
+        return !(row !== null && typeof row === 'object' && typeof row.path === 'string' && toPosix(row.path.toLowerCase()) === key);
+      } catch {
+        return true;   // 坏行原样保留（**不替落点洗手**：坏索引该继续被看见）
+      }
+    });
+    writeFileSync(join(tmp, 'snapshots', 'index.jsonl'), kept.length === 0 ? '' : `${kept.join('\n')}\n`, 'utf8');
+  }
+  const cfgSrc = join(landingDir, 'config.json');
+  let cfg = {};
+  if (existsSync(cfgSrc)) {
+    try { cfg = JSON.parse(readFileSync(cfgSrc, 'utf8')) ?? {}; } catch { cfg = {}; }
+  }
+  const norm = (p) => toPosix(String(p).trim().replace(/^\.\//, '').toLowerCase());
+  const drop = new Set((dropPatterns ?? []).map(norm));
+  const keep = (Array.isArray(protection.patterns) ? protection.patterns : []).filter((p) => !drop.has(norm(p)));
+  writeFileSync(join(tmp, 'config.json'), `${JSON.stringify({ schema: SCHEMA_VERSION, mode: typeof cfg.mode === 'string' ? cfg.mode : (protection.mode ?? 'observe'), protected_paths: keep }, null, 2)}\n`, 'utf8');
+  return { ok: true, dir: tmp, patterns: keep };
+}
+
+/** 保护面模式是否命中某个 pathKey（复用 rules.mjs 的 globToRegExp 语义，单点不复制）
+ *  `projectRoot` 必须由调用方传入（CR major #4：此前写死 `process.cwd()`，**绝对载体**下永不匹配 ⇒ 假红） */
+function patternHits(pattern, pathKeyValue, projectRoot) {
+  return isProtected(pathKeyValue, { protected_paths: [pattern] }, { projectRoot: projectRoot ?? process.cwd() }).protected === true;
 }
 
 /**
@@ -437,10 +548,12 @@ export function planActivation(opts = {}) {
   const rule = canonicalRule(proposal.rule);
   const carriers = [];
   const ce = parseCarrier(proposal.counterExample);
-  if (ce.kind === 'path') carriers.push(ce.value);
-  else problems.push(`counterExample 缺 path: 载体（${ce.reason}）`);
+  if (ce.kind === 'path') {
+    if (!isRelativeCarrier(ce.value)) problems.push(`counterExample 的载体必须是**项目根相对路径**（收到 ${ce.value}：绝对路径或 .. 段会把保护面伸到项目之外，且不可跨机复现）`);
+    else carriers.push(ce.value);
+  } else problems.push(`counterExample 缺 path: 载体（${ce.reason}）`);
   const fp = parseCarrier(proposal.falsePositiveSurface);
-  const falsePositive = fp.kind === 'path' ? fp.value : null;
+  const falsePositive = fp.kind === 'path' && isRelativeCarrier(fp.value) ? fp.value : null;
   if (problems.length > 0) return { ok: false, findings: problems.map((p) => ({ code: 'EFFECT_VERIFY_UNCARRIED', message: p })), candidate: null, additions: null };
 
   const patterns = Array.isArray(opts.patterns) && opts.patterns.length > 0
@@ -450,12 +563,24 @@ export function planActivation(opts = {}) {
   const before = loaded.rulesResult.rules ?? { schema: SCHEMA_VERSION, project: 'unknown', protected_paths: [], gates: [], checks: [], inject: [] };
   const existing = new Set((Array.isArray(before.protected_paths) ? before.protected_paths : []).map((p) => String(p)));
   const addPatterns = patterns.filter((p) => !existing.has(p));
+  // 覆盖该 carrier 的**既有**保护面模式（本次没新增时，靠它把"谁在拦"写进绑定）
+  const protection = effectiveProtection(landingDir);
+  const key = carriers[0].toLowerCase();
+  const covering = protection.patterns
+    .map((p) => toPosix(String(p).trim().replace(/^\.\//, '')))
+    .filter((p) => p !== '' && patternHits(p, key, opts.projectRoot ?? process.cwd()));
+  const declaredPatterns = addPatterns.length > 0 ? addPatterns : covering;
   const binding = {
     kind: 'file_untracked_change',
     rule,
     carrier: carriers[0],
     falsePositive,
     gate,
+    // `patterns` = **实际覆盖 carrier 的保护面模式**（新增的优先；本次没新增就用既有覆盖它的那条）。
+    // 反事实验证只摘这些模式 ⇒ 若摘完仍判红，说明拦住它的是**别的**东西（挂名绑定，必须报红）。
+    // 若既不新增、也没有任何既有模式覆盖该 carrier，则 patterns=[] ⇒ 验证判 `EFFECT_COUNTERFACTUAL_UNDECLARED`
+    // （fail-closed：没有可隔离的拦截，就不许声称"这条判据拦住了它"）。
+    patterns: declaredPatterns,
     proposal: proposal.id ?? null,
     activatedAt: now.toISOString(),
   };
@@ -515,6 +640,11 @@ export function applyActivation(opts = {}) {
   }
   const planned = planActivation({ landingDir, proposal, patterns: opts.patterns, gate: opts.gate, now });
   if (planned.ok !== true) return fail('EFFECT_PLAN_UNQUALIFIED', planned.findings.map((f) => f.message).join('；'), { findings: planned.findings });
+  // **不许凭空发明规则包**（独立 CR nit #15）：落点没有 rules.json 时，旧实现会用 `project:'unknown'` 兜底
+  // 造出一份 —— 而 `project` 是"双本（项目级/用户级）"的判别依据，哨兵值会把落点身份冲掉。
+  if (!existsSync(join(landingDir, 'rules.json'))) {
+    return fail('EFFECT_RULES_MISSING', `落点没有 rules.json（先跑 dsh-rulekeeper init 建立规则包；本命令不发明 sentinel 值）: ${toPosix(join(landingDir, 'rules.json'))}`);
+  }
 
   const rulesFile = join(landingDir, 'rules.json');
   const beforeSha = existsSync(rulesFile) ? sha256File(rulesFile) : null;
@@ -526,84 +656,100 @@ export function applyActivation(opts = {}) {
     };
   }
 
-  // ① 备份（缺文件时不备份：baseline 用 null 表示"新建"）
-  let backupPath = null;
-  if (existsSync(rulesFile)) {
-    const b = backupFile(rulesFile, { landingDir, now });
-    if (b.ok !== true) return fail('EFFECT_BACKUP_FAILED', `备份失败，未动 rules.json：${b.reason}`);
-    backupPath = b.path;
-    steps.push(`backup ${toPosix(backupPath)}`);
-  }
-
-  // ② 写临时件 + 回读校验（**先校验临时件**，通过才替换——"草稿产前用目标工具自己的校验器验形状"）
-  const tmp = `${rulesFile}.tmp-${randomBytes(3).toString('hex')}`;
+  // ── 跨进程互斥（对抗性 QA 1 号发现，2026-09-19）────────────────────────────────
+  // 两个 `apply` 并发时，各自"读 rules.json → 改 → 原子替换"会互相覆盖：**两者都报成功**，
+  // 而其中一次生效登记凭空消失（QA 实测：ledger 有 2 条生效登记、rules.json 只剩 1 条绑定、plan 仍报 pass）。
+  // LF-170 的 `lock.mjs` 本就是为此存在（账本侧一直在用），写通路此前漏用了它。
+  const lock = acquireLock(join(landingDir, 'rules.json.lock'));
+  if (lock.ok !== true) return fail('EFFECT_LOCK_BUSY', `未能取得 rules.json 写锁（另一处正在写同一落点？）: ${lock.reason}`);
   try {
-    writeFileSync(tmp, text, 'utf8');
-  } catch (err) {
-    return fail('EFFECT_WRITE_FAILED', `写临时件失败: ${err?.code ?? 'ERR'}: ${err?.message ?? ''}`);
-  }
-  const checked = readBackValidate(tmp, planned.candidate);
-  if (checked.ok !== true) {
-    rmSync(tmp, { force: true });
-    return fail('EFFECT_TMP_INVALID', `临时件校验不通过（未替换生效文件）: ${checked.reason}`);
-  }
-  const afterSha = sha256File(tmp);
-  if (beforeSha !== null && afterSha === beforeSha) {
-    rmSync(tmp, { force: true });
-    return fail('EFFECT_NO_CHANGE', '候选内容与现有 rules.json 逐字节相同（没有新增绑定）');
+    return doWrite();
+  } finally {
+    releaseLock(lock);
   }
 
-  // ③ 原子替换 + ④ 回读复核
-  try {
-    renameSync(tmp, rulesFile);
-  } catch (err) {
-    rmSync(tmp, { force: true });
-    return fail('EFFECT_RENAME_FAILED', `原子替换失败（原文件未改）: ${err?.code ?? 'ERR'}: ${err?.message ?? ''}`);
-  }
-  steps.push(`replace ${toPosix(rulesFile)}`);
-  const reread = readBackValidate(rulesFile, planned.candidate);
-  // 测试缝（与 cli.mjs 的 `_inject`、plugin 的 `faultInjection` 同族）：强制走"写后回读不一致"分支，
-  // 用来实测**回滚**真的把字节还原了（否则回滚路径永远没人跑过 = 假安全感）。
-  const forcedMismatch = opts._inject?.failAfterReplace === true;
-  if (forcedMismatch || reread.ok !== true || sha256File(rulesFile) !== afterSha) {
-    const rolled = rollback(rulesFile, backupPath);
-    return fail('EFFECT_VERIFY_AFTER_WRITE', `写后回读不一致（已回滚=${rolled.ok}）: ${forcedMismatch ? '测试缝强制不一致' : (reread.reason ?? 'sha256 不符')}`, { rolledBack: rolled.ok === true, restoredSha: existsSync(rulesFile) ? sha256File(rulesFile) : null });
-  }
+  /** 真正的写路径（**只在持锁时调用**）：备份 → 写临时件 → 回读校验 → 原子替换 → 回读复核 → 提案/账本 */
+  function doWrite() {
+    // ① 备份（缺文件时不备份：baseline 用 null 表示"新建"）
+    let backupPath = null;
+    if (existsSync(rulesFile)) {
+      const b = backupFile(rulesFile, { landingDir, now });
+      if (b.ok !== true) return fail('EFFECT_BACKUP_FAILED', `备份失败，未动 rules.json：${b.reason}`);
+      backupPath = b.path;
+      steps.push(`backup ${toPosix(backupPath)}`);
+    }
 
-  // ⑤ 提案状态 → approved（**只改 status 一个键**，形状不变；失败也要回滚 rules.json）
-  const approved = writeProposalStatus(proposalFile, proposal);
-  if (approved.ok !== true) {
-    const rolled = rollback(rulesFile, backupPath);
-    return fail('EFFECT_PROPOSAL_STATUS_FAILED', `提案状态写回失败（rules.json 已回滚=${rolled.ok}）: ${approved.reason}`);
+    // ② 写临时件 + 回读校验（**先校验临时件**，通过才替换——"草稿产前用目标工具自己的校验器验形状"）
+    const tmp = `${rulesFile}.tmp-${randomBytes(3).toString('hex')}`;
+    try {
+      writeFileSync(tmp, text, 'utf8');
+    } catch (err) {
+      return fail('EFFECT_WRITE_FAILED', `写临时件失败: ${err?.code ?? 'ERR'}: ${err?.message ?? ''}`);
+    }
+    const checked = readBackValidate(tmp, planned.candidate);
+    if (checked.ok !== true) {
+      rmSync(tmp, { force: true });
+      return fail('EFFECT_TMP_INVALID', `临时件校验不通过（未替换生效文件）: ${checked.reason}`);
+    }
+    const afterSha = sha256File(tmp);
+    if (beforeSha !== null && afterSha === beforeSha) {
+      rmSync(tmp, { force: true });
+      return fail('EFFECT_NO_CHANGE', '候选内容与现有 rules.json 逐字节相同（没有新增绑定）');
+    }
+
+    // ③ 原子替换 + ④ 回读复核
+    try {
+      renameSync(tmp, rulesFile);
+    } catch (err) {
+      rmSync(tmp, { force: true });
+      return fail('EFFECT_RENAME_FAILED', `原子替换失败（原文件未改）: ${err?.code ?? 'ERR'}: ${err?.message ?? ''}`);
+    }
+    steps.push(`replace ${toPosix(rulesFile)}`);
+    const reread = readBackValidate(rulesFile, planned.candidate);
+    // 测试缝（与 cli.mjs 的 `_inject`、plugin 的 `faultInjection` 同族）：强制走"写后回读不一致"分支，
+    // 用来实测**回滚**真的把字节还原了（否则回滚路径永远没人跑过 = 假安全感）。
+    const forcedMismatch = opts._inject?.failAfterReplace === true;
+    if (forcedMismatch || reread.ok !== true || sha256File(rulesFile) !== afterSha) {
+      const rolled = rollback(rulesFile, backupPath);
+      return fail('EFFECT_VERIFY_AFTER_WRITE', `写后回读不一致（已回滚=${rolled.ok}）: ${forcedMismatch ? '测试缝强制不一致' : (reread.reason ?? 'sha256 不符')}`, { rolledBack: rolled.ok === true, restoredSha: existsSync(rulesFile) ? sha256File(rulesFile) : null });
+    }
+
+    // ⑤ 提案状态 → approved（**只改 status 一个键**，形状不变；失败也要回滚 rules.json）
+    const approved = writeProposalStatus(proposalFile, proposal);
+    if (approved.ok !== true) {
+      const rolled = rollback(rulesFile, backupPath);
+      return fail('EFFECT_PROPOSAL_STATUS_FAILED', `提案状态写回失败（rules.json 已回滚=${rolled.ok}）: ${approved.reason}`);
+    }
+    steps.push(`proposal ${opts.proposalId} -> approved`);
+
+    // ⑥ 生效登记（账本事件行；`record` 自带脱敏 + off 档零副作用）
+    const logged = ledgerRecord({
+      rule: planned.rule,
+      category: EFFECT_EVENT_CATEGORY,
+      problem: `EFFECT_ACTIVATE rule=${planned.rule} proposal=${opts.proposalId} patterns=${planned.additions.patterns.length} gate=${planned.gate}`,
+      root_cause: '入账未生效：生效面此前没有绑定（rules.json 的 checks 无消费者）',
+      solution: `protected_paths += [${planned.additions.patterns.join(', ')}]；checks += [carrier=${planned.additions.binding.carrier}]`,
+      mechanism: 'rules.json',
+      evidence: [toPosix(rulesFile), ...(backupPath === null ? [] : [toPosix(backupPath)])],
+    }, { landingDir, now });
+    steps.push(`ledger ${logged.ok === true ? (logged.entry?.id ?? 'ok') : `FAILED(${logged.reason})`}`);
+    // ⑦ 回读复核（锁内最后一件事）：候选的 mode 必须与落点真实 mode 一致
+    //    （`record` 在 mode=off 时会**零副作用**跳过 —— 那不是失败，但必须如实告知）
+    return {
+      ok: true,
+      applied: true,
+      dryRun: false,
+      rule: planned.rule,
+      proposalId: opts.proposalId,
+      additions: planned.additions,
+      beforeSha,
+      afterSha,
+      backup: backupPath === null ? null : toPosix(backupPath),
+      ledger: logged.ok === true ? (logged.entry?.id ?? null) : null,
+      ledgerWarning: logged.ok === true ? null : logged.reason,
+      steps,
+    };
   }
-  steps.push(`proposal ${opts.proposalId} -> approved`);
-
-  // ⑥ 生效登记（账本事件行；`record` 自带脱敏 + off 档零副作用）
-  const logged = ledgerRecord({
-    rule: planned.rule,
-    category: EFFECT_EVENT_CATEGORY,
-    problem: `EFFECT_ACTIVATE rule=${planned.rule} proposal=${opts.proposalId} patterns=${planned.additions.patterns.length} gate=${planned.gate}`,
-    root_cause: '入账未生效：生效面此前没有绑定（rules.json 的 checks 无消费者）',
-    solution: `protected_paths += [${planned.additions.patterns.join(', ')}]；checks += [carrier=${planned.additions.binding.carrier}]`,
-    mechanism: 'rules.json',
-    evidence: [toPosix(rulesFile), ...(backupPath === null ? [] : [toPosix(backupPath)])],
-  }, { landingDir, now });
-  steps.push(`ledger ${logged.ok === true ? (logged.entry?.id ?? 'ok') : `FAILED(${logged.reason})`}`);
-
-  return {
-    ok: true,
-    applied: true,
-    dryRun: false,
-    rule: planned.rule,
-    proposalId: opts.proposalId,
-    additions: planned.additions,
-    beforeSha,
-    afterSha,
-    backup: backupPath === null ? null : toPosix(backupPath),
-    ledger: logged.ok === true ? (logged.entry?.id ?? null) : null,
-    ledgerWarning: logged.ok === true ? null : logged.reason,
-    steps,
-  };
 }
 
 /** 写后/写前统一校验：能解析 + `validateRules` 过 + 关键字段与候选一致 */
@@ -703,13 +849,6 @@ export function appendVerification(landingDir, { rule, target, ok, evidence = []
   return appendLine(join(landingDir, FINDINGS_FILE), scrubbed.value, {});
 }
 
-/** 供 CLI/自检复用：本模块声明的生效面（每个面都必须有真实消费者） */
-export const EFFECT_SURFACES = Object.freeze([
-  { name: 'plan', consumer: 'bin/rk-effect.mjs' },
-  { name: 'verify', consumer: 'bin/rk-effect.mjs' },
-  { name: 'apply', consumer: 'bin/rk-effect.mjs' },
-  { name: 'inject', consumer: 'bin/rk-effect.mjs' },
-  { name: 'rulekeeper_effect', consumer: 'src/handlers.mjs' },
-]);
-
-export const EFFECT_CHECK_KINDS = Object.freeze([...CHECK_KINDS]);
+// 注（2026-09-19 自审）：本模块此前还导出过 `EFFECT_SURFACES`（"生效面声明表"）与 `EFFECT_CHECK_KINDS`。
+// 二者**没有任何生产消费者**（只有用例读），正是本模块要治的"已实现未生效"形态 —— 自己摆一张
+// 没人读的"接线声明表"等于自欺，故删除：接线事实由 `rk-selfcheck` 的 **S9** 在**调用图**上机械判定。

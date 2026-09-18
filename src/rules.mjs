@@ -84,7 +84,7 @@ export function validateRules(obj) {
 }
 
 /** `checks` 对象条目（生效绑定）的字段表 —— **唯一权威源**，效果代码与测试都读它 */
-export const BINDING_FIELDS = Object.freeze(['kind', 'rule', 'carrier', 'falsePositive', 'gate', 'proposal', 'activatedAt', 'notes']);
+export const BINDING_FIELDS = Object.freeze(['kind', 'rule', 'carrier', 'falsePositive', 'gate', 'patterns', 'proposal', 'activatedAt', 'notes']);
 
 /**
  * 校验一条生效绑定条目。
@@ -108,6 +108,13 @@ export function validateBindingEntry(entry, allowedKinds = ['file_untracked_chan
   }
   if (typeof entry.carrier !== 'string' || entry.carrier.trim() === '') {
     problems.push('生效绑定必须有非空 carrier（判据载体与事实必须一一对应；没有载体就无法验证）');
+  }
+  // `patterns` = **本次生效新增的保护面模式**（反事实验证要靠它"只摘掉这一条绑定带来的拦截"，
+  // 而不是把所有能命中载体的模式一起摘掉——后者会把"原本就被别的 glob 拦着"的挂名绑定判成绿）。
+  if (Object.hasOwn(entry, 'patterns')) {
+    if (!Array.isArray(entry.patterns) || entry.patterns.some((p) => typeof p !== 'string' || p.trim() === '')) {
+      problems.push('生效绑定的 patterns 必须是非空字符串数组（本次生效新增的保护面模式）');
+    }
   }
   for (const optional of ['falsePositive', 'gate', 'proposal', 'activatedAt', 'notes']) {
     if (Object.hasOwn(entry, optional) && entry[optional] !== null && typeof entry[optional] !== 'string') {
