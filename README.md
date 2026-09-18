@@ -96,6 +96,10 @@ rk-effect inject --landing <落点>                       # 把"只写下来了"
 **红线**：`rules.json` 的自动写点只有 `rk-effect apply`，且 `--by auto` 一律拒绝——闸门不可被 AI 直接改；
 写入前过 `validateRules`（草稿先用目标工具自己的校验器验形状），写失败**一个字节都不留**（逐字节回滚）。
 
+> 精确性补记（P1 事实写作律）：上句"只有 `rk-effect apply`"指**生产路径**。全仓另有一处
+> `writeFileSync('rules.json')` 在 `src/stoploss.mjs` 的 `verifyRunbook()` 里 —— 那是它为自己造的
+> **临时工作目录夹具**（`{workdir}/proj/.dsh-ai/rulekeeper/rules.json`），不碰任何真实落点。
+
 **验证三项为什么是三项**（对齐"反向红 + 正对照"）：只有"①命中红"的话，把判据整条删掉也照样全绿——
 **②反事实唯一性**要求"把这个绑定摘掉之后同一载体必须转绿"，才证明拦住它的**确实是这条判据**
 （否则报 `EFFECT_CHECK_NOT_THE_STOPPER`，即挂名生效）。判据载体必须显式写成 `path:<相对路径>`：
