@@ -108,6 +108,10 @@ rk-effect inject --landing <落点>                       # 把"只写下来了"
 **生效之后**：`evolve` 不再对已生效的纪律一律沉默——生效后又复发 ⇒ 产**升级提案**（原档位拦不住）；
 生效后长期零信号 ⇒ `effectPlan` 报 `EFFECT_STALE_NO_SIGNAL`（建议退役，**不自动改规则**）。
 
+**诚实边界（与 `CI_CARRIER_DONE=false` 同族）**：验证凭证 `findings.jsonl` **没有任何签名** ——
+能改台账的人也能把"已验证"写全。故 `verified` 是**可核对**（谁/何时/对哪个载体/跑出什么），
+**不是不可伪造**；真正的防篡改仍在 git 层（pre-commit 真阻断 / CI 门 / 分支保护 + required checks）。
+
 ## 硬约束（不是"最佳实践"，是设计底线）
 
 - **零依赖**：只用 `node:*`（`rk-selfcheck` 的 S4 机械拦裸导入与 `require`）。

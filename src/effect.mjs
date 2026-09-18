@@ -173,7 +173,13 @@ export function activationsFromLanding(landingDir) {
   return out;
 }
 
-/** 验证记录 → `rule -> [record]`（读 findings.jsonl；该文件此前**没有生产者**，本模块是第一个） */
+/** 验证记录 → `rule -> [record]`（读 findings.jsonl；该文件此前**没有生产者**，本模块是第一个）
+ *
+ * **诚实边界（照本仓惯例自曝）**：`findings.jsonl` **没有任何签名**——能改台账的人也能把"已验证"写全。
+ * 故 `verified` 状态是**可核对**（谁、何时、对哪个载体、跑出什么），**不是不可伪造**；
+ * 真正的防篡改在 git 层（pre-commit 真阻断 / CI 门 / 分支保护 + required checks），与本文件无关。
+ * 同族声明见 `src/gate.mjs` 的 `RK_GATE_CI_LEDGER_AUTHENTICATED=false`。
+ */
 export function verificationsFromLanding(landingDir) {
   const out = new Map();
   const read = readLines(join(landingDir, FINDINGS_FILE));
