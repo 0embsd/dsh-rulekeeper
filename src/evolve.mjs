@@ -14,11 +14,12 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
 import { loadConfig } from './config.mjs';
+import { activationsFromLanding } from './effect.mjs';
 import { readLedger } from './ledger.mjs';
 import { canonicalRule } from './ruleid.mjs';
 import {
   PROPOSAL_SOURCES, RECURRENCE_THRESHOLD,
-  buildProposal, proposedRules, validateProposalQuality, writeProposal,
+  buildProposal, listProposals, validateProposalQuality, writeProposal,
 } from './proposal.mjs';
 
 /**
@@ -115,7 +116,19 @@ export function evolve(opts = {}) {
     .filter((c) => wantRule === null || c.rule === wantRule)
     .sort((a, b) => (a.rule < b.rule ? -1 : 1));
 
-  const already = proposedRules(landingDir);
+  /**
+   * 幂等键**细化**（LF-A60，2026-09-19）。此前用的是 `proposedRules()`——它把 `proposed` 与
+   * **`approved`（= 已生效）** 一起当"已有提案"跳过。后果：一条纪律生效之后**又踩了**，
+   * 本该立刻产"升级提案"的时刻被**静默吃掉**（`skipped` 里连痕迹都没有）。
+   * 现在分三档：
+   *   · 有 **未决**（proposed）提案 ⇒ 跳过（幂等，防重复问同一件事）
+   *   · 已 **生效**（approved）且生效后**没再复发** ⇒ 跳过（判据还在守）
+   *   · 已生效且**生效后又复发** ⇒ **继续产新提案**（升级：收紧判据/换机制/提高档位）
+   */
+  const proposalsNow = listProposals(landingDir).items;
+  const openRules = new Set(proposalsNow.filter((p) => p.status === 'proposed').map((p) => canonicalRule(p.rule)));
+  const approvedRules = new Set(proposalsNow.filter((p) => p.status === 'approved').map((p) => canonicalRule(p.rule)));
+  const activations = activationsFromLanding(landingDir);
   const ledgerEntries = entries.length;
 
   for (const candidate of counts) {
@@ -142,10 +155,27 @@ export function evolve(opts = {}) {
       skipped.push({ ...info, reason: 'GATE_ESCALATION_REQUIRES_HUMAN' });
       continue;
     }
-    if (already.has(rule)) {
+    const activationTs = (() => {
+      const list = activations.get(rule) ?? [];
+      return list.length === 0 ? null : list.map((a) => a.ts ?? '').sort().pop();
+    })();
+    const recurredAfterActivation = activationTs !== null && candidate.latestTs !== '' && candidate.latestTs > activationTs;
+    if (openRules.has(rule)) {
       skipped.push({ ...info, reason: 'EXISTING_PROPOSAL' });
-      findings.push({ code: 'EVOLVE_SKIP_EXISTING_PROPOSAL', message: `${rule} 已有未决/已批准提案，跳过（幂等）` });
+      findings.push({ code: 'EVOLVE_SKIP_EXISTING_PROPOSAL', message: `${rule} 已有**未决**提案，跳过（幂等；同一条纪律不重复问）` });
       continue;
+    }
+    if (approvedRules.has(rule) && !recurredAfterActivation) {
+      skipped.push({ ...info, reason: 'ALREADY_ACTIVE' });
+      findings.push({ code: 'EVOLVE_SKIP_ALREADY_ACTIVE', message: `${rule} 已生效（approved）且生效后没再复发，跳过（判据还在守）` });
+      continue;
+    }
+    if (recurredAfterActivation) {
+      // 这是"生效后自动进化"的触发点：判据拦不住 ⇒ 必须升级（产新提案），而不是重复原样提案
+      findings.push({
+        code: 'EFFECT_RECURRED_AFTER_ACTIVATION',
+        message: `${rule} 生效（${activationTs}）之后又复发（${candidate.latestTs}）⇒ 产**升级提案**（判据没拦住，原档位不够）`,
+      });
     }
 
     if (dryRun) {
@@ -161,7 +191,12 @@ export function evolve(opts = {}) {
     proposals.push({ ...info, id: proposal.id, path: written.path, bytes: written.bytes, written: true, proposal });
   }
 
-  const ok = findings.every((f) => f.code === 'EVOLVE_SKIP_EXISTING_PROPOSAL' || f.code === 'EVOLVE_SKIPPED_MODE_OFF');
+  // 只有"真的出问题"才 exit≠0：跳过（幂等）/ off 档 / 生效后复发后**已产升级提案**，都是正常结局
+  const BENIGN = new Set([
+    'EVOLVE_SKIP_EXISTING_PROPOSAL', 'EVOLVE_SKIP_ALREADY_ACTIVE', 'EVOLVE_SKIPPED_MODE_OFF',
+    'EFFECT_RECURRED_AFTER_ACTIVATION',
+  ]);
+  const ok = findings.every((f) => BENIGN.has(f.code));
   return {
     ok, mode, ledgerEntries, ledgerHealth,
     candidates: counts.map((c) => ({ rule: c.rule, count: c.count, variants: [...c.variants].sort(), distinctProblems: c.problems.size })),

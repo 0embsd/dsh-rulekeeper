@@ -166,7 +166,7 @@ test('集成: index.js 默认装载就注入 handlers（apply 注册出来的工
   } finally {
     if (savedHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = savedHome;
   }
-  assert.equal(registered.length, 3, 'apply 应注册三个工具');
+  assert.equal(registered.length, 4, 'apply 应注册四个工具（gate/record/snap/effect）');
   const gateDef = registered.find((d) => d.name === 'rulekeeper_gate');
   const out = await gateDef.execute({ project: f.projectRoot, path: 'AGENTS.md' });
   assert.equal(out.configured, true, '默认装载后必须 configured:true（否则等于没装）');

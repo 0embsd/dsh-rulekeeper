@@ -19,8 +19,10 @@
 import { resolve } from 'node:path';
 
 import { reconWrite } from './gate.mjs';
+import { effectPlan } from './effect.mjs';
 import { record as ledgerRecord } from './ledger.mjs';
 import { resolveProjectLanding } from './platform/paths.mjs';
+import { canonicalRule } from './ruleid.mjs';
 import { takeSnapshot } from './snap.mjs';
 
 /** 从工具入参解析项目根（缺省 = 进程工作目录；调用方给相对路径也按它归一） */
@@ -149,8 +151,38 @@ export function defaultHandlers(opts = {}) {
       path: args.path,
       why: args.why,
     }),
+    // LF-A70（2026-09-19）：**生效体检**（只读）。为什么默认面必须有它：`record` 之后此前无路可走
+    //   （入账 ≠ 生效），用户记完教训无从知道它是否真的拦得住。本 handler 只做**读**判定，
+    //   绝不写 rules.json（写权归人，见 `src/effect.mjs` 的红线）。
+    rulekeeper_effect: (args = {}) => effectOnce({ projectRoot: projectRootOf(args, cwd), rule: args.rule, full: args.json === true }),
+  };
+}
+
+/**
+ * **只读**生效体检（LF-A70）。
+ * @returns {{ok: boolean, reason: string, counts: object, items: object[], findings: string[]}}
+ */
+export function effectOnce({ projectRoot, rule = null, full = false }) {
+  const root = resolve(projectRoot);
+  const landingDir = landingOf(root);
+  const plan = effectPlan({ landingDir, projectRoot: root });
+  const want = typeof rule === 'string' && rule.trim() !== '' ? canonicalRule(rule) : null;
+  const items = want === null ? plan.items : plan.items.filter((i) => i.rule === want);
+  const findings = plan.findings
+    .filter((f) => want === null || f.rule === undefined || f.rule === want)
+    .map((f) => `${f.code}(${f.severity ?? 'warn'}): ${f.message}`);
+  const errors = plan.findings.filter((f) => f.severity === 'error').length;
+  const textOnly = plan.findings.filter((f) => f.code === 'EFFECT_TEXT_ONLY').length;
+  const summary = items.map((i) => `${i.rule}=${i.state}${i.recurredAfterActivation ? '(复发!)' : ''}`).join(' ');
+  return {
+    ok: plan.ok === true,
+    reason: `生效体检：${items.length} 条纪律｜error 级 ${errors} 条｜只写下来了 ${textOnly} 条｜${summary || '(无)'}`,
+    counts: plan.counts,
+    items: full ? items : items.slice(0, 20),
+    findings,
+    landing: landingDir,
   };
 }
 
 /** 宿主侧固定使用的工具名（与 `PLUGIN_TOOLS` 同一命名空间） */
-export const HANDLER_TOOL_NAMES = Object.freeze(['rulekeeper_gate', 'rulekeeper_record', 'rulekeeper_snap']);
+export const HANDLER_TOOL_NAMES = Object.freeze(['rulekeeper_gate', 'rulekeeper_record', 'rulekeeper_snap', 'rulekeeper_effect']);

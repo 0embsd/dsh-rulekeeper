@@ -42,7 +42,7 @@
 | `project` | string | 是 |  |  | 双本（项目级/用户级）的判别依据（Q3） |
 | `protected_paths` | array | 是 |  |  | 受保护路径；由 rules.isProtected() **单点**判定 |
 | `gates` | array | 是 |  |  | gateName / 凭证路径 / 严格档 |
-| `checks` | array | 是 |  |  | 三种可机检类型（见下） |
+| `checks` | array | 是 |  |  | 三种可机检类型（见下）；条目可为裸字符串（旧形态）或**生效绑定对象** `{kind, rule, carrier, falsePositive?, gate?, proposal?, activatedAt?, notes?}`（LF-A*：把"哪条纪律靠哪个判据拦"变成可机检数据，无 carrier 即无法验证） |
 | `inject` | array | 是 |  |  | 注入模板（白名单字段） |
 
 ### `snapshots/index.jsonl`

@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { assertGreen, assertRed, RedAssertionError } from './helpers/red.mjs';
@@ -93,6 +93,9 @@ test('fixture：imports-bad → 红 S4_BARE_IMPORT + S4_CJS_REQUIRE', () => {
 test('fixture：imports-ok → 绿；且扫描器对干扰项不误报', () => {
   const s = staged();
   writeFileSync(join(s.pkg, 'src', 'probe-imports-ok.mjs'), readFixture('imports-ok.mjs.txt'), 'utf8');
+  // S9（模块接线检查）落地后：往 src/ 丢一个**没人 import** 的模块本身就是违规，
+  // 故探针必须接上线——否则本用例测的就不是"S4 扫描器不误报"而是"S9 白名单"。
+  appendFileSync(join(s.pkg, 'src', 'cli.mjs'), "import './probe-imports-ok.mjs';\n", 'utf8');
   assertGreen(s.run, { want: 'RK_SELFCHECK_RESULT=pass', name: 'imports-ok' });
   const specs = collectSpecifiers(toCode(readFixture('imports-ok.mjs.txt')));
   assert.deepEqual(specs.sort(), ['./config.mjs', './renamed.mjs', 'node:fs']);

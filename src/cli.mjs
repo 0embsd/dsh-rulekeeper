@@ -31,6 +31,10 @@ import {
   simulateOtherSide, structuralChecks, verifyComparator, windowsByteIdentical,
 } from './crossplat.mjs';
 import { doctor, doctorExitCode } from './doctor.mjs';
+import {
+  DEFAULT_STALE_DAYS, EFFECT_STATES, appendVerification, applyActivation,
+  effectInjectPlan, effectPlan, parseCarrier, ruleBindings, verifyBinding,
+} from './effect.mjs';
 import { importLedger } from './importer.mjs';
 import { landingFingerprint, migrateLanding, planMigration } from './migrate.mjs';
 import { query as queryLedger, readLedger, record, summary as ledgerSummary } from './ledger.mjs';
@@ -44,7 +48,7 @@ import {
 } from './rules.mjs';
 import { UsageError, resolveNow, stamp } from './platform/clock.mjs';
 import { dshHome, LANDING_DIRNAME, LANDING_REL, pathKey, resolveProjectLanding, toPosix } from './platform/paths.mjs';
-import { jsonStable, line, resultLine, sortCodePoints, write as stdWrite, writeErr as stdWriteErr } from './platform/out.mjs';
+import { escapeControl, jsonStable, line, resultLine, sortCodePoints, write as stdWrite, writeErr as stdWriteErr } from './platform/out.mjs';
 import { checkSkeleton } from './selfcheck.mjs';
 import { readMode } from './mode.mjs';
 import {
@@ -192,7 +196,7 @@ export const USAGE_RULEKEEPER = `dsh-rulekeeper 0.1.0
   dsh-rulekeeper --help
 退出码: 0 成功 / 2 用法错误 / 1 运行失败 / 5 该能力尚未实现（见 src/rc.mjs 契约表）`;
 
-export const SUBCOMMANDS = Object.freeze(['init', 'check', 'snap', 'record', 'rules', 'evolve', 'report', 'gate', 'redact', 'migrate']);
+export const SUBCOMMANDS = Object.freeze(['init', 'check', 'snap', 'record', 'rules', 'evolve', 'report', 'gate', 'redact', 'migrate', 'effect']);
 
 export const USAGE_SELFCHECK = `用法: rk-selfcheck --root <dsh-rulekeeper 包根> [--project <项目根>] [--json]
 退出码: 0 通过 / 1 有违规 / 2 用法错误`;
@@ -259,6 +263,21 @@ export const USAGE_LEDGER = `用法:
   rk-ledger dedupe  --landing <落点> [--json]
   rk-ledger families --landing <落点> --expect <RULE>=<id,id,...>   （校验同族条目归同 rule）
 退出码: 0 成功 / 1 失败（导入写入失败 / families 不符） / 2 用法错误`;
+
+export const USAGE_EFFECT = `用法:
+  rk-effect plan   --landing <落点> [--project <项目根>] [--now <ISO>] [--stale-days n] [--json]
+  rk-effect verify --landing <落点> [--project <项目根>] [--proposal <id>] [--all] [--now <ISO>] [--json]
+  rk-effect apply  --landing <落点> --proposal <id> --by human [--pattern <glob>]... [--gate <机制>] [--apply] [--project <项目根>] [--now <ISO>] [--json]
+  rk-effect inject --landing <落点> [--max-per-session n] [--now <ISO>] [--json]
+  （亦可用 dsh-rulekeeper effect <子命令>，两者同实现）
+说明: **入账 ≠ 生效**（LF-A*，2026-09-19）。四个动作：
+      plan   = 只读体检：每条纪律的生效状态（none/injected/mechanized/verified/recurred）+ findings；
+               有 error 级 finding（如只写下来了 EFFECT_TEXT_ONLY、绑定空转 EFFECT_BINDING_UNENFORCED）=> exit 1
+      verify = 生效验证三项（①命中红 ②**反事实唯一性** ③误报面绿）；缺载体一律判"凭证不足"（EFFECT_VERIFY_UNCARRIED）
+      apply  = **唯一**能写 rules.json 的通路：默认 dry-run，--apply 才落盘；**必须 --by human**
+               （--by auto 一律拒绝——闸门不可被 AI 直接改）；写前备份 + 写后回读 + 失败逐字节回滚
+      inject = 把"只写下来了"的纪律经注入面变成会话提醒（纯计算，零落点写入）
+退出码: 0 通过 / 1 判定不合格（或被闸门拒绝/回滚） / 2 用法错误`;
 
 export const USAGE_RULES = `用法:
   rk-rules check        --rules <rules.json> [--project <项目根>]
@@ -1257,6 +1276,7 @@ export const SUB_USAGE = Object.freeze({
     + '      提案四要件（LF-295）缺一即失败；--escalate-gate 属"升门禁"，必须 --source human。\n'
     + '退出码: 0 无 error 级问题 / 1 有不合格提案或被闸门拒绝 / 2 用法错误',
   report: '用法: dsh-rulekeeper report --landing <落点> [--project <项目根>] [--now <ISO>] [--json]\n退出码: 0 成功 / 1 读失败 / 2 用法错误',
+  effect: USAGE_EFFECT,
   gate: USAGE_GATE,
   stoploss: USAGE_STOP_LOSS,
   migrate: USAGE_MIGRATE,
@@ -2147,6 +2167,7 @@ export function runRulekeeperSub(command, argv, io = defaultIo(), env = process.
     case 'gate': return runGate(argv, io, env);
     case 'redact': return runRedact(argv, io, env);
     case 'evolve': return runCliEvolve(argv, io, env);
+    case 'effect': return runCliEffect(argv, io, env);
     case 'migrate': return runMigrate(argv, io, env);
     default:
       io.err(`dsh-rulekeeper: 未知子命令 "${command}"\n`);
@@ -2328,6 +2349,180 @@ function runCliCheck(argv, io, env) {
   const rc = doctorExitCode(docReport, parsed.flags.strict === true);
   io.out(resultLine('CHECK', rc === 0));
   return rc === 0 ? RC.OK : RC.FAIL;
+}
+
+/** 落点父目录里推断项目根（`<项目>/.dsh-ai/rulekeeper` 形态）；推不出则退回 cwd */
+function projectRootOfLanding(landing) {
+  const parts = String(landing).split(/[\\/]/).filter((s) => s !== '');
+  if (parts.length >= 2 && parts[parts.length - 2] === '.dsh-ai') {
+    const guess = resolve(parts.slice(0, -2).join('/'));
+    if (existsSync(guess)) return guess;
+  }
+  return process.cwd();
+}
+
+/**
+ * `dsh-rulekeeper effect <plan|verify|apply|inject>`（LF-A* **生效闭环**）。
+ *
+ * rc 契约（沿用既有数值，不新增码——§9.8 契约变更纪律）：
+ *   0 = 通过（plan 无 error 级 finding / verify 全过 / apply 成功或 dry-run 通过 / inject 计划产出）
+ *   1 = **判定不合格**（只写下来了、绑定空转、验证未过、被闸门拒绝并回滚）
+ *   2 = 用法错误（缺子命令/未知参数/缺 --by/--by 取值非法/--proposal 不存在）
+ */
+function runCliEffect(argv, io, env) {
+  const EFFECT_SUBS = ['plan', 'verify', 'apply', 'inject'];
+  const sub = argv[0] ?? null;
+  if (sub === null || !EFFECT_SUBS.includes(sub)) {
+    io.err(`dsh-rulekeeper effect: 需要子命令（${EFFECT_SUBS.join('|')}）\n${USAGE_EFFECT}\n`);
+    return RC.USAGE;
+  }
+  const parsed = parseSub('effect', argv.slice(1), {
+    '--landing': 'string', '--project': 'string', '--now': 'string', '--stale-days': 'string',
+    '--proposal': 'string', '--all': 'boolean', '--by': 'string', '--apply': 'boolean',
+    '--pattern': 'string[]', '--gate': 'string', '--max-per-session': 'string', '--json': 'boolean',
+  }, io);
+  if (parsed.error !== null) return parsed.error;
+  const flags = parsed.flags;
+  const target = resolveLanding('effect', flags, io);
+  if (target.error !== null) return target.error;
+  const landing = target.landing;
+  const projectRoot = flags.project === undefined ? projectRootOfLanding(landing) : resolve(flags.project);
+  const now = flags.now === undefined ? new Date() : new Date(flags.now);
+  if (Number.isNaN(now.getTime())) {
+    io.err(`dsh-rulekeeper effect: --now 不是合法时间: ${flags.now}\n`);
+    return RC.USAGE;
+  }
+  const intFlag = (key, fallback) => {
+    if (flags[key] === undefined) return fallback;
+    if (!/^\d+$/.test(flags[key])) return null;
+    return Number(flags[key]);
+  };
+  const staleDays = intFlag('stale-days', DEFAULT_STALE_DAYS);
+  const maxPerSession = intFlag('max-per-session', 5);
+  if (staleDays === null || maxPerSession === null) {
+    io.err('dsh-rulekeeper effect: --stale-days / --max-per-session 需要非负整数\n');
+    return RC.USAGE;
+  }
+
+  if (sub === 'plan') {
+    const plan = effectPlan({ landingDir: landing, projectRoot, now, staleDays });
+    if (flags.json === true) {
+      io.out(jsonStable(plan));
+    } else {
+      io.out(line(`RK_EFFECT_RULES=${plan.items.length}`));
+      for (const s of EFFECT_STATES) io.out(line(`RK_EFFECT_${s.toUpperCase()}=${plan.counts[s] ?? 0}`));
+      io.out(line(`RK_EFFECT_TEXT_ONLY=${plan.findings.filter((f) => f.code === 'EFFECT_TEXT_ONLY').length}`));
+      io.out(line(`RK_EFFECT_UNENFORCED=${plan.findings.filter((f) => f.code === 'EFFECT_BINDING_UNENFORCED').length}`));
+      io.out(line(`RK_EFFECT_UNVERIFIED=${plan.findings.filter((f) => f.code === 'EFFECT_NOT_VERIFIED').length}`));
+      io.out(line(`RK_EFFECT_RECURRED_AFTER=${plan.findings.filter((f) => f.code === 'EFFECT_RECURRED_AFTER_ACTIVATION').length}`));
+      for (const f of plan.findings) io.out(line(`FINDING ${f.code} ${f.severity ?? 'warn'} ${f.rule ?? '-'} ${f.message}`));
+    }
+    io.out(resultLine('EFFECT', plan.ok === true));
+    return plan.ok === true ? RC.OK : RC.FAIL;
+  }
+
+  if (sub === 'verify') {
+    const rules = loadLandingRules(landing).rulesResult.rules;
+    const bindings = ruleBindings(rules);
+    let entries = [];
+    for (const [rule, b] of bindings) for (const c of b.checks) entries.push({ rule, binding: c });
+    if (flags.proposal !== undefined) {
+      const pf = join(landing, 'proposals', `${flags.proposal}.json`);
+      if (!existsSync(pf)) {
+        io.err(`dsh-rulekeeper effect verify: 提案不存在: ${toPosix(pf)}\n`);
+        return RC.USAGE;
+      }
+      let proposal;
+      try {
+        proposal = JSON.parse(readFileSync(pf, 'utf8'));
+      } catch (err) {
+        io.err(`dsh-rulekeeper effect verify: 提案不是合法 JSON: ${err?.message ?? String(err)}\n`);
+        return RC.USAGE;
+      }
+      const want = canonicalRule(proposal.rule);
+      const fromProposal = parseCarrier(proposal.falsePositiveSurface);
+      entries = entries.filter((e) => e.rule === want);
+      for (const e of entries) {
+        if (e.binding.falsePositive === null && fromProposal.kind === 'path') e.binding.falsePositive = fromProposal.value;
+      }
+    }
+    if (entries.length === 0) {
+      io.out(line('RK_EFFECT_VERIFY_NONE=1'));
+      io.out(line('FINDING EFFECT_NO_BINDING error - 没有任何 checks 生效绑定可验证（先 effect apply 把人签字的提案落成绑定）'));
+      io.out(resultLine('EFFECT_VERIFY', false));
+      return RC.FAIL;
+    }
+    let passed = 0;
+    let failed = 0;
+    for (const e of entries) {
+      const report = verifyBinding({ landingDir: landing, projectRoot, binding: e.binding, falsePositive: e.binding.falsePositive });
+      for (const c of report.cases) io.out(line(`RK_EFFECT_CASE rule=${e.rule} name=${c.name} expect=${c.expect} got=${c.got} ok=${c.ok}`));
+      for (const f of report.findings) io.out(line(`FINDING ${f.code} error ${e.rule} ${f.message}`));
+      const wrote = appendVerification(landing, {
+        rule: e.rule, target: e.binding.carrier ?? '', ok: report.ok,
+        evidence: [`carrier=${e.binding.carrier ?? '(none)'}`, `gate=${e.binding.gate ?? '(none)'}`], now,
+      });
+      io.out(line(`RK_EFFECT_VERIFY_RULE=${e.rule} RESULT=${report.ok === true ? 'pass' : 'fail'} EVIDENCE=${wrote.ok === true ? 'written' : `skipped(${wrote.reason ?? ''})`}`));
+      if (report.ok === true) passed += 1; else failed += 1;
+    }
+    io.out(line(`RK_EFFECT_VERIFY_PASSED=${passed} FAILED=${failed}`));
+    io.out(resultLine('EFFECT_VERIFY', failed === 0));
+    return failed === 0 ? RC.OK : RC.FAIL;
+  }
+
+  if (sub === 'apply') {
+    if (flags.proposal === undefined) {
+      io.err(`dsh-rulekeeper effect apply: 需要 --proposal <id>\n${USAGE_EFFECT}\n`);
+      return RC.USAGE;
+    }
+    if (flags.by === undefined) {
+      // **缺 --by 就是用法错误**（不许有默认值）：默认成 human 等于把"人签字"这条红线做成摆设
+      io.err(`dsh-rulekeeper effect apply: 需要 --by human（rules.json 只能由人签字写入；没有默认值）\n${USAGE_EFFECT}\n`);
+      return RC.USAGE;
+    }
+    if (!['human', 'auto'].includes(flags.by)) {
+      io.err(`dsh-rulekeeper effect apply: --by 只能是 human|auto（收到 ${JSON.stringify(flags.by)}）\n`);
+      return RC.USAGE;
+    }
+    const out = applyActivation({
+      landingDir: landing, projectRoot, proposalId: flags.proposal, by: flags.by,
+      patterns: Array.isArray(flags.pattern) ? flags.pattern : undefined,
+      gate: flags.gate, apply: flags.apply === true, now,
+    });
+    if (out.ok !== true) {
+      io.out(line(`RK_EFFECT_APPLY_CODE=${out.code}`));
+      if (out.rolledBack === true) io.out(line(`RK_EFFECT_APPLY_ROLLED_BACK=1 RESTORED_SHA=${out.restoredSha ?? '(none)'}`));
+      io.err(`dsh-rulekeeper effect apply: ${out.code}: ${out.message}\n`);
+      io.out(resultLine('EFFECT_APPLY', false));
+      return RC.FAIL;
+    }
+    io.out(line(`RK_EFFECT_APPLY_RULE=${out.rule} DRYRUN=${out.applied === true ? 0 : 1}`));
+    io.out(line(`RK_EFFECT_APPLY_PATTERNS=${(out.additions?.patterns ?? []).join(',') || '(none)'}`));
+    io.out(line(`RK_EFFECT_APPLY_CARRIER=${out.additions?.binding?.carrier ?? '(none)'} GATE=${out.additions?.binding?.gate ?? '(none)'}`));
+    io.out(line(`RK_EFFECT_APPLY_SHA_BEFORE=${out.beforeSha ?? '(new)'} AFTER=${out.afterSha}`));
+    if (out.applied === true) {
+      io.out(line(`RK_EFFECT_APPLY_BACKUP=${out.backup ?? '(none)'}`));
+      io.out(line(`RK_EFFECT_APPLY_LEDGER=${out.ledger ?? '(none)'}${out.ledgerWarning === null || out.ledgerWarning === undefined ? '' : ` WARNING=${out.ledgerWarning}`}`));
+    }
+    for (const s of out.steps ?? []) io.out(line(`STEP ${s}`));
+    io.out(resultLine('EFFECT_APPLY', true));
+    return RC.OK;
+  }
+
+  // inject
+  const plan = effectInjectPlan({ landingDir: landing, now, maxPerSession });
+  if (flags.json === true) {
+    io.out(jsonStable(plan));
+  } else {
+    io.out(line(`RK_EFFECT_INJECT_CANDIDATES=${plan.candidates ?? 0} APPENDED=${plan.appended.length} DROPPED=${plan.dropped.length} LEDGER_ONLY=${plan.ledgerOnly.length}`));
+    for (const m of plan.appended) {
+      io.out(line(`RK_EFFECT_INJECT id=${m.id} chars=${m.chars} anchor=${escapeControl(m.anchor ?? '')}`));
+      io.out(line(m.text));
+    }
+    for (const f of plan.findings) io.out(line(`FINDING ${f.code} warn - ${f.message}`));
+  }
+  io.out(resultLine('EFFECT_INJECT', plan.ok === true));
+  return plan.ok === true ? RC.OK : RC.FAIL;
 }
 
 function runCliRecord(argv, io, env) {

@@ -18,7 +18,7 @@
 // 修复后扫描器自带正反回归用例（test/skeleton.test.mjs 的"仪器回归"用例，含正对照）。
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { CONFIG_FILE, landingDirs, validateConfig } from './config.mjs';
 
 const ALLOWED_PREFIXES = ['node:', './', '../', 'file:'];
@@ -107,6 +107,16 @@ export function toCode(src, opts = {}) {
   }
   return out;
 }
+
+/**
+ * S9 **例外表**：属"消费者注入面"的模块（默认面刻意不接线，见 `index.js` 的行为边界说明）。
+ * 反向约束：表里每一项都必须是真实存在的文件，否则 `S9_STALE_ALLOWLIST` 判红。
+ */
+export const S9_CONSUMER_API = Object.freeze({
+  'src/guard.mjs': 'LF-410 软拦/硬拦选型：真正的 deny 由消费者用 ctx.tools.guard() 注入（默认零拦截是刻意的）',
+  'src/observer.mjs': 'LF-440 观察者清点：由消费者按需注册观察者，默认面不订阅',
+  'src/autorecord.mjs': 'LF-420 自动记录：由消费者按需接 tools/result，默认面不写',
+});
 
 function listModules(root) {
   const out = [];
@@ -366,6 +376,55 @@ export function checkSkeleton(root, opts = {}) {
         add('S8_INTERNAL_LEAK', `${rel}: 出现${why}「${m[0]}」（公开仓不得暴露内部标识/本地路径/基础设施信息）`);
         break;   // 每个文件每类只报一次，避免刷屏
       }
+    }
+  }
+
+  // ── S9 **模块接线检查**（"已实现未生效"的机械门禁，LF-A80；2026-09-19）
+  //
+  // 来历（老板当场指出）：`src/inject.mjs` 是 LF-430 的完整实现（追加语义 / 唯一 id / 预算 / 白名单模板，
+  //   自带整套用例且全绿），**却没有任何代码路径会调用它** —— 写完了、测过了、装上了，就是没用。
+  //   同族形态还有：`rules.json` 的 `checks`/`gates`/`inject` 三个数组**没有任何消费者**、
+  //   `findings.jsonl` **没有任何生产者**（数据契约冻结了，实现却没接上）。
+  //   **用例全绿抓不出这类问题**（用例只证明函数本身对），必须以**调用图**为判据。
+  // 判据：`src/**/*.mjs` 必须被 `index.js` / `bin/*.mjs` / 另一个 `src/*.mjs` import 到（test/ 与 scripts/ 不算消费者）。
+  //
+  // **例外表**（S9_CONSUMER_API）：有三个模块是"**消费者注入面**"——默认面刻意不接线
+  //   （`index.js` 的行为边界写着"默认零拦截，要真拦下来必须由消费者改用 ctx.tools.guard()"）。
+  //   允许例外的同时必须有**反向约束**：表里每一项都必须是真实存在的文件（`S9_STALE_ALLOWLIST`），
+  //   否则例外表自己会腐烂成"谁都能被豁免"的后门。
+  {
+    const srcPrefix = join(root, 'src') + sep;
+    for (const rel of Object.keys(S9_CONSUMER_API)) {
+      if (!existsSync(join(root, rel))) {
+        add('S9_STALE_ALLOWLIST', `S9 例外表里的 ${rel} 已不存在（例外必须随文件一起回收，否则表会腐烂）`);
+      }
+    }
+    const consumers = [];
+    const indexPath = join(root, 'index.js');
+    if (existsSync(indexPath)) consumers.push(indexPath);
+    const testPrefix = join(root, 'test') + sep;
+    const scriptsPrefix = join(root, 'scripts') + sep;
+    for (const file of listModules(root)) {
+      if (file.startsWith(testPrefix) || file.startsWith(scriptsPrefix)) continue;
+      consumers.push(file);
+    }
+    const imported = new Set();
+    for (const file of consumers) {
+      if (!existsSync(file)) continue;
+      for (const spec of collectSpecifiers(toCode(readFileSync(file, 'utf8')))) {
+        if (!spec.startsWith('.')) continue;   // 只看包内相对导入
+        const target = resolve(dirname(file), spec);
+        imported.add(target);
+        imported.add(`${target}.mjs`);
+        imported.add(join(target, 'index.mjs'));
+      }
+    }
+    for (const file of listModules(root)) {
+      if (!file.startsWith(srcPrefix)) continue;
+      const rel = relative(root, file).split(sep).join('/');
+      if (imported.has(file)) continue;
+      if (Object.hasOwn(S9_CONSUMER_API, rel)) continue;
+      add('S9_UNWIRED_MODULE', `${rel}: 没有任何非测试代码 import 它（"已实现未生效"——写了模块没人用，等于没写）`);
     }
   }
 

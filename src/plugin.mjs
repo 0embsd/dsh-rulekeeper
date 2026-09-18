@@ -39,6 +39,10 @@ export const PLUGIN_TOOLS = Object.freeze([
   { name: `${TOOL_PREFIX}gate`, event: 'tools/pre-execute', summary: '门禁判定（只读给出 allow/deny；默认不阻断——要硬阻断需消费者改用 ctx.tools.guard）' },
   { name: `${TOOL_PREFIX}record`, event: 'tools/post-execute', summary: '把这次执行的结果写成取证台账行（追加到落点的 ledger.jsonl）' },
   { name: `${TOOL_PREFIX}snap`, event: 'tools/result', summary: '快照/回滚入口（pre-image 留证：备份 + 回读校验 + 索引登记）' },
+  // LF-A70（2026-09-19）：**生效体检**。为什么必须有这一件工具：`rulekeeper_record` 把教训写进账本之后，
+  //   此前**没有任何手段**能回答"这条记下来的纪律到底生效了没"——工具面到此为止（入账 ≠ 生效）。
+  //   本工具是 `effectPlan` 的只读出口（只读 = 不写 rules.json，红线不动）。
+  { name: `${TOOL_PREFIX}effect`, event: 'tools/result', summary: '生效体检（只读）：每条纪律的生效状态 none/injected/mechanized/verified/recurred + findings（只写下来了 = EFFECT_TEXT_ONLY）' },
 ]);
 
 /**
@@ -87,6 +91,14 @@ export const TOOL_PARAMETERS = Object.freeze({
       why: { type: 'string' },
     },
     required: ['path'],
+  },
+  [`${TOOL_PREFIX}effect`]: {
+    type: 'object',
+    properties: {
+      project: { type: 'string', description: '项目根（默认进程工作目录）' },
+      rule: { type: 'string', description: '只看这一条纪律（可选；不给则全量体检）' },
+      json: { type: 'boolean', description: '返回完整体检数据（默认只回摘要）' },
+    },
   },
 });
 

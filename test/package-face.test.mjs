@@ -79,7 +79,7 @@ test('green: apply(fakeCtx) 注册的工具全带前缀；无 DSH 的机器如�
   };
   const ret = entry.apply(ctx);
   assert.equal(ret, undefined, 'apply 必须返回 undefined（cordis 只接受 函数/null/thenable/iterable）');
-  assert.equal(registered.length, 3);
+  assert.equal(registered.length, 4, 'PLUGIN_TOOLS 有几件，就注册几件（gate/record/snap/effect）');
   assert.ok(registered.length >= 3, `至少注册 3 个工具，实测 ${registered.length}`);
   for (const d of registered) {
     assert.equal(typeof d.name, 'string', 'definition.name 必须是字符串');

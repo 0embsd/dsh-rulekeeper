@@ -69,10 +69,40 @@ node bin/rk-snap.mjs take --landing <项目>/.dsh-ai/rulekeeper --path AGENTS.md
 node bin/rk-migrate.mjs --project <项目根>
 ```
 
-## 命令面（22 个入口）
+## 命令面（23 个入口）
 
 `dsh-rulekeeper`（init/check/snap/record/rules/evolve/report/gate/redact/migrate）｜`rk-gate`（write/precommit/postcommit/bypass/ci/close/hooks）
-｜`rk-check`｜`rk-snap`｜`rk-ledger`｜`rk-rules`｜`rk-doctor`｜`rk-schema`｜`rk-rc`｜`rk-replay`｜`rk-crossplat`｜`rk-selfcheck`｜`rk-shard`｜`rk-baseline`｜`rk-backup`｜`rk-log`｜`rk-env`｜`rk-migrate`｜`rk-redact`｜`rk-stop-loss`｜`rk-shell-revert`｜`rk-dshcompat`
+｜`rk-check`｜`rk-snap`｜`rk-ledger`｜`rk-rules`｜`rk-doctor`｜`rk-schema`｜`rk-rc`｜`rk-replay`｜`rk-crossplat`｜`rk-selfcheck`｜`rk-shard`｜`rk-baseline`｜`rk-backup`｜`rk-log`｜`rk-env`｜`rk-migrate`｜`rk-redact`｜`rk-stop-loss`｜`rk-shell-revert`｜`rk-dshcompat`｜`rk-effect`（plan/verify/apply/inject —— 生效闭环，见下节）
+
+## 入账 ≠ 生效（`rk-effect`：生效闭环，2026-09-19）
+
+账本记下一条教训，**只证明它被写下来了**，不证明它拦得住任何东西。此前四个洞：
+
+| 洞 | 现象 | 现在 |
+|---|---|---|
+| ① 没有"生效"的位置 | `rules.json` 的 `checks`/`gates`/`inject` 三个数组**没有任何消费者**（只有 `protected_paths` 活着） | 对象形态条目 = **生效绑定** `{kind, rule, carrier, gate, …}`，由 `rk-effect` 消费 |
+| ② 没有写通路 | `proposals/<id>.json` 的 `status='approved'` **没有生产者**，提案落盘后永远变不成判据 | `rk-effect apply`（**唯一**写 `rules.json` 的通路，**必须 `--by human`**） |
+| ③ 有实现没接线 | `src/inject.mjs`（LF-430 注入）**零消费者**；`findings.jsonl` **零生产者** | `rk-effect inject` 消费注入面；`rk-effect verify` 写验证凭证 |
+| ④ 生效后不回写 | 幂等键把 `approved` 也当"已有提案"跳过 ⇒ **生效后再次复发被静默忽略** | 复发 ⇒ 产**升级提案**（`EFFECT_RECURRED_AFTER_ACTIVATION`）；零信号超期 ⇒ `EFFECT_STALE_NO_SIGNAL` |
+
+```bash
+rk-effect plan   --landing <落点>                       # 只读体检：每条纪律 none/injected/mechanized/verified/recurred
+rk-effect apply  --landing <落点> --proposal <id> --by human            # 默认 dry-run，先看要写什么
+rk-effect apply  --landing <落点> --proposal <id> --by human --apply    # 真写：备份 + 回读 + 失败回滚
+rk-effect verify --landing <落点> --all                 # 三项验证：命中红 / 反事实唯一性 / 误报面绿
+rk-effect inject --landing <落点>                       # 把"只写下来了"的纪律变成会话提醒（纯计算，零落点写入）
+```
+
+**红线**：`rules.json` 的自动写点只有 `rk-effect apply`，且 `--by auto` 一律拒绝——闸门不可被 AI 直接改；
+写入前过 `validateRules`（草稿先用目标工具自己的校验器验形状），写失败**一个字节都不留**（逐字节回滚）。
+
+**验证三项为什么是三项**（对齐"反向红 + 正对照"）：只有"①命中红"的话，把判据整条删掉也照样全绿——
+**②反事实唯一性**要求"把这个绑定摘掉之后同一载体必须转绿"，才证明拦住它的**确实是这条判据**
+（否则报 `EFFECT_CHECK_NOT_THE_STOPPER`，即挂名生效）。判据载体必须显式写成 `path:<相对路径>`：
+没有载体 ⇒ `EFFECT_VERIFY_UNCARRIED`（**凭证不足，禁标"已生效"**）。
+
+**生效之后**：`evolve` 不再对已生效的纪律一律沉默——生效后又复发 ⇒ 产**升级提案**（原档位拦不住）；
+生效后长期零信号 ⇒ `effectPlan` 报 `EFFECT_STALE_NO_SIGNAL`（建议退役，**不自动改规则**）。
 
 ## 硬约束（不是"最佳实践"，是设计底线）
 

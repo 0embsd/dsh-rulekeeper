@@ -7,7 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -116,6 +116,9 @@ test('green: 仪器回归 —— 注释/字符串/模板/正则字面量里的 r
     "export * from './renamed.mjs';",
   ].join('\n') + '\n';
   writeFileSync(probe, tricky, 'utf8');
+  // S9（模块接线检查）落地后：往 src/ 丢一个**没人 import** 的模块本身就是违规 —— 探针必须接上线，
+  // 否则本用例的"全绿"断言会被 S9 撕掉（而它想验的是 S4 不误报，不是 S9 有白名单）。
+  appendFileSync(join(pkg, 'src', 'cli.mjs'), "import './probe-clean.mjs';\n", 'utf8');
   assert.deepEqual(checkSkeleton(pkg, { projectRoot, env }).findings, [], '非代码文本不得触发 S4');
 
   // 正对照 1：真 require('…') 必须报红（否则"不报"只是恒真）

@@ -47,12 +47,74 @@ export function validateRules(obj) {
   if (Array.isArray(obj.checks)) {
     const allowed = ['file_untracked_change', 'output_shape', 'invalid_reference'];
     for (const check of obj.checks) {
-      if (typeof check === 'string' && !allowed.includes(check)) {
-        findings.push({ code: 'RULES_CHECK_UNKNOWN', msg: `未知 check 类型: ${check}（只允许 ${allowed.join('/')}）` });
+      if (typeof check === 'string') {
+        if (!allowed.includes(check)) findings.push({ code: 'RULES_CHECK_UNKNOWN', msg: `未知 check 类型: ${check}（只允许 ${allowed.join('/')}）` });
+        continue;
+      }
+      // 对象形态 = **生效绑定**（LF-A*）：`{kind, rule, carrier, falsePositive?, gate?, proposal?, activatedAt?}`
+      // 为什么必须校验：这一条把"某条纪律由哪个判据拦住、拦的是哪个载体"变成**可机检**的数据；
+      //   形状不校验的话，写错一个键名（如 `career`）会被静默忽略 ⇒ 又是一次"以为配了、其实空转"。
+      for (const problem of validateBindingEntry(check, allowed)) {
+        findings.push({ code: 'RULES_CHECK_BINDING_INVALID', msg: problem });
+      }
+    }
+  }
+  if (Array.isArray(obj.inject)) {
+    for (const item of obj.inject) {
+      if (item === null || typeof item !== 'object' || Array.isArray(item)) continue; // 字符串模板形态留给消费者
+      if (!Object.hasOwn(item, 'rule')) continue;                                    // 无 rule = 旧形态，不强制
+      if (typeof item.rule !== 'string' || item.rule.trim() === '') {
+        findings.push({ code: 'RULES_INJECT_RULE_EMPTY', msg: 'inject 条目的 rule 必须是非空字符串（留空会让绑定无法归属）' });
+      }
+    }
+  }
+  if (Array.isArray(obj.gates)) {
+    for (const item of obj.gates) {
+      if (item === null || typeof item !== 'object' || Array.isArray(item)) continue;
+      if (!Object.hasOwn(item, 'rule')) continue;
+      if (typeof item.rule !== 'string' || item.rule.trim() === '') {
+        findings.push({ code: 'RULES_GATE_RULE_EMPTY', msg: 'gates 条目的 rule 必须是非空字符串' });
+      }
+      if (Object.hasOwn(item, 'gate') && (typeof item.gate !== 'string' || item.gate.trim() === '')) {
+        findings.push({ code: 'RULES_GATE_NAME_EMPTY', msg: 'gates 条目的 gate 必须是非空字符串' });
       }
     }
   }
   return { ok: findings.length === 0, findings };
+}
+
+/** `checks` 对象条目（生效绑定）的字段表 —— **唯一权威源**，效果代码与测试都读它 */
+export const BINDING_FIELDS = Object.freeze(['kind', 'rule', 'carrier', 'falsePositive', 'gate', 'proposal', 'activatedAt', 'notes']);
+
+/**
+ * 校验一条生效绑定条目。
+ * @param {object} entry
+ * @param {string[]} allowedKinds
+ * @returns {string[]} 问题列表（空 = 合法）
+ */
+export function validateBindingEntry(entry, allowedKinds = ['file_untracked_change', 'output_shape', 'invalid_reference']) {
+  const problems = [];
+  if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+    return ['checks 条目只能是字符串（旧形态）或对象（生效绑定）'];
+  }
+  for (const key of Object.keys(entry)) {
+    if (!BINDING_FIELDS.includes(key)) problems.push(`生效绑定出现未知字段 ${key}（拼错会被静默忽略，必须报出来）`);
+  }
+  if (typeof entry.kind !== 'string' || !allowedKinds.includes(entry.kind)) {
+    problems.push(`生效绑定的 kind 必须是 ${allowedKinds.join('/')} 之一（实际 ${JSON.stringify(entry.kind)}）`);
+  }
+  if (typeof entry.rule !== 'string' || entry.rule.trim() === '') {
+    problems.push('生效绑定必须有非空 rule（否则无从判断这条判据属于哪条纪律）');
+  }
+  if (typeof entry.carrier !== 'string' || entry.carrier.trim() === '') {
+    problems.push('生效绑定必须有非空 carrier（判据载体与事实必须一一对应；没有载体就无法验证）');
+  }
+  for (const optional of ['falsePositive', 'gate', 'proposal', 'activatedAt', 'notes']) {
+    if (Object.hasOwn(entry, optional) && entry[optional] !== null && typeof entry[optional] !== 'string') {
+      problems.push(`生效绑定的 ${optional} 必须是字符串或 null`);
+    }
+  }
+  return problems;
 }
 
 export function loadRules(file) {

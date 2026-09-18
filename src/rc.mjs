@@ -39,7 +39,7 @@ export const RC_TABLE = Object.freeze([
     surface: 'cli',
     code: RC.FAIL,
     name: 'FAIL',
-    meaning: '运行失败（落点建立/写盘失败等运行期异常）或**判定为不合格**（如 evolve 的提案缺质量要件/被闸门拒绝、账本不洁、check 判 violation）',
+    meaning: '运行失败（落点建立/写盘失败等运行期异常）或**判定为不合格**（如 evolve 的提案缺质量要件/被闸门拒绝、账本不洁、check 判 violation、**effect 面**：只写下来了/绑定空转/生效验证未过/`apply` 被拒并已回滚）',
     status: 'implemented',
     evidence: { file: 'test/rc.test.mjs', test: 'cli rc=1：init 运行期失败（落点不可创建）' },
   },

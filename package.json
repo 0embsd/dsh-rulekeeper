@@ -43,7 +43,8 @@
   },
   "bin": {
     "dsh-rulekeeper": "./bin/dsh-rulekeeper.mjs",
-    "rk-selfcheck": "./bin/rk-selfcheck.mjs"
+    "rk-selfcheck": "./bin/rk-selfcheck.mjs",
+    "rk-effect": "./bin/rk-effect.mjs"
   },
   "scripts": {
     "test": "node --test",

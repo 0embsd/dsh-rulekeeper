@@ -101,6 +101,14 @@ const STEPS = Object.freeze([
     argv: ['{bin}/rk-doctor.mjs', '--landing', '{landing}', '--strict'],
     assert: 'exit=0；另加 `rk-selfcheck --root {pkg}` exit=0',
   },
+  {
+    id: 'SL-6',
+    title: '入账了却没生效：先体检、再**人签字**落盘、最后三项验证（LF-A*）',
+    trigger: '`rk-effect plan` 报 `EFFECT_TEXT_ONLY`（账本里有、`rules.json` 里没绑定）或 `EFFECT_BINDING_UNENFORCED`（绑了但载体不在保护面 = 空转闸）',
+    argv: ['{bin}/rk-effect.mjs', 'plan', '--landing', '{landing}', '--project', '{repo}'],
+    assert: 'exit=0 且 `RK_EFFECT_TEXT_ONLY=0`；落盘用 `rk-effect apply --proposal <id> --by human --apply`（**`--by auto` 一律拒绝**，写失败逐字节回滚），'
+      + '再由 `rk-effect verify --landing {landing} --project {repo} --all` exit=0 留下验证凭证',
+  },
 ]);
 
 /** 文档里展示的形态：`node <argv…>`（**一句**；占位符保留，便于复制后替换） */
