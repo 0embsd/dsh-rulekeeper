@@ -75,6 +75,27 @@
 | `evidence` | array | 是 |  |  |  |
 | `action` | enum (observe\|deny\|warn) | 是 |  |  |  |
 
+### `usage.json`
+
+- 形态：**json**｜版本字段：`schema`｜用途：**用量遥测**（P0-3，2026-09-19 新增）——回答"这条纪律真的被投递过几次"。
+  来历（L634 的更正结论）：我们此前"只记不用"，根因之一是**没有度量**：既不知道哪条纪律被想起来过，
+  也无法判断该留该淘汰。本文件让"真实投递次数"成为可统计事实（而不是"有人写过绑定"）。
+  上游对照：Hermes Agent 的 `skills/.usage.json`（`tools/skill_usage.py:1-10`）——同一形态本地化。
+
+| 字段 | 类型 | 必填 | 唯一 | 可变 | 说明 |
+|---|---|---|---|---|---|
+| `schema` | number | 是 |  |  |  |
+| `rules` | object | 是 |  |  | 键=规范纪律名；值见下 |
+| `rules.<RULE>.evaluated` | number | 是 |  |  | 投递提供者被**求值**的次数（宿主每轮 prompt assembly 会调） |
+| `rules.<RULE>.emitted` | number | 是 |  |  | 返回**新**文本的次数（≠"模型一定看到"：宿主对相同文本有自己的去重，插件侧观测不到追加结果——如实登记，不臆断） |
+| `rules.<RULE>.lastAt` | iso8601 | 否 |  |  | 最近一次 emitted 时间 |
+| `totalEmitted` | number | 是 |  |  | 全落点累计 emitted |
+
+**写入纪律**：原子写（临时文件 + rename）；读失败/损坏 ⇒ 降级为空账（fail-open，度量失败绝不打断投递）。
+**通道纪律**：投递走宿主 `ctx.systemPrompt.context({name,order,text})`（`name=rulekeeper/reminders`）；
+文本必须**稳定**（宿主按"文本变化"追加）、跨轮状态自持（宿主侧无跨轮去重）、变化最小间隔默认 30 分钟；
+**绝不把动态内容写进 system prompt 正文**。实现与预算的唯一事实源见 `src/deliver.mjs` 的 `deliveryCapability()`。
+
 ### `config.json`
 
 - 形态：**json**｜版本字段：`schema`｜用途：运行时覆盖层（落在两处落点各一份；已存在的**不被覆盖**）

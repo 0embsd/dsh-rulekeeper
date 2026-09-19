@@ -13,6 +13,7 @@ import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeErrorSink, safeListener } from './isolation.mjs';
+import { deliveryCapability, registerDelivery } from './deliver.mjs';
 
 /** 本包根目录（`src/plugin.mjs` 上溯两级）——用于"宿主事件表扫描**排除自身**"（见 `eventTableFromHost`） */
 export const PKG_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -241,7 +242,7 @@ export function bootSelfCheck({ dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_
  *     故报告走 `opts.onReport` + 模块级 `lastApplyReport`，`apply` 返回 `undefined`。
  * 缺契约 → **fail-fast 抛错**（宁可启动失败，也不要"看起来装上了"）。
  */
-export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOOLS, maxFiles = 20000, exclude = [PKG_ROOT], handlers = {}, landingDir = null, appendLine = null, faultInjection = null, onReport = null } = {}) {
+export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOOLS, maxFiles = 20000, exclude = [PKG_ROOT], handlers = {}, landingDir = null, appendLine = null, faultInjection = null, onReport = null, delivery = true, deliveryOptions = {} } = {}) {
   const injectedFault = faultInjection ?? (process.env.RULEKEEPER_FAULT ?? null);
   const faultInjectionMode = injectedFault === 'throw-listener' ? 'throw-listener' : null;
   if (ctx === null || typeof ctx !== 'object') throw new Error('rulekeeper 插件: ctx 非法');
@@ -290,7 +291,31 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
     reportSink = sink;
   }
 
-  const report = { ok: true, registered, boot, subscribed, listenerErrors: reportSink === null ? 0 : reportSink.records.length, errorSink: reportSink };
+  // ── P0-3 提醒投递（LF-A90）────────────────────────────────────────────────
+  // 来历：`effect.mjs` 早就会算"该提醒哪几条纪律"（`effectInjectPlan`），但**没有投递口**，
+  //   于是体检里 `injected` 面永远是 0、提醒只落在落点里等人去读。宿主其实早就开放了通道
+  //   （本机实测：`dsh-base/cordis.patch.yml:465` 与 `dsh-web-app/cordis.patch.yml:16` 都挂了
+  //   `system-prompt` 行；插件侧签名见 `@deepseek-ai/dsh-system-prompt/lib/types/index.d.ts:69-77`）。
+  // 位置：放在报告对象构造**之前**（否则引用未初始化的 `deliveryReg` 会触 TDZ 报错）。
+  // 服务缺失 ⇒ `registerDelivery` 如实返回 `{ok:false, reason}`（**不静默假成功**）。
+  let deliveryReg = { ok: false, reason: 'disabled', name: null };
+  if (delivery === true) {
+    try {
+      const r = registerDelivery(ctx, { landingDir, ...(deliveryOptions ?? {}) });
+      deliveryReg = r.ok === true ? r.report() : { ok: false, reason: r.reason, name: r.name };
+    } catch (error) {
+      // 投递注册失败绝不能让插件树装载失败（fail-open）；如实记录原因。
+      deliveryReg = { ok: false, reason: `register-error:${String((error && error.message) || error)}`, name: null };
+    }
+  }
+
+  const report = {
+    ok: true, registered, boot, subscribed,
+    listenerErrors: reportSink === null ? 0 : reportSink.records.length,
+    errorSink: reportSink,
+    delivery: deliveryReg,
+    deliveryCapability: deliveryCapability(),
+  };
   // **`apply` 的返回值必须符合 cordis 的 effect 规则**（2026-09-15 真装载实测）：
   //   只接受 函数 / null·undefined / thenable / (async)iterable —— 返回**普通对象**会被判
   //   `TypeError: Invalid effect` ⇒ 插件树装载失败、会话起不来。

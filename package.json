@@ -44,10 +44,11 @@
   "bin": {
     "dsh-rulekeeper": "./bin/dsh-rulekeeper.mjs",
     "rk-selfcheck": "./bin/rk-selfcheck.mjs",
-    "rk-effect": "./bin/rk-effect.mjs"
+    "rk-effect": "./bin/rk-effect.mjs",
+    "rk-test": "./bin/rk-test.mjs"
   },
   "scripts": {
-    "test": "node --test",
+    "test": "node ./bin/rk-test.mjs",
     "smoke": "node bin/rk-dshcompat.mjs"
   },
   "engines": {

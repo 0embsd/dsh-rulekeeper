@@ -105,6 +105,10 @@ export function buildInjection({ rule, problem, fields, now = new Date(), rand, 
   const t = renderTemplate({ rule, problem, fields });
   return {
     id: makeMessageId(now, rand),
+    // **必须带 rule**（2026-09-19 补）：消费者（投递适配器/遥测/审计）要回答"这条提醒属于哪条纪律"。
+    // 原先漏了它 ⇒ 投递侧只能拿空值、用量会记成 (unknown)（P0-3 落地时用例实测暴露）。
+    rule: typeof rule === 'string' && rule !== '' ? rule
+      : (fields && typeof fields.rule === 'string' && fields.rule !== '' ? fields.rule : null),
     role: 'user',
     mode: 'append',              // 追加语义（永不替换）
     untrusted: true,
