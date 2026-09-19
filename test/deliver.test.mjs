@@ -180,3 +180,51 @@ test('判据: 能力声明与实现同源（deliveryCapability 反映真实预�
   buildReminderText({ landingDir: landing, now: new Date(TS) });
   assert.equal(readFileSync(join(landing, 'rules.json'), 'utf8'), before, '重复调用不得写入 rules.json');
 });
+
+// ── 落点接线（2026-09-19 修缺口）：装载入口不传 landingDir 时，provider 必须仍能投递 ──
+// 缺口本体：`index.js` 只传 `{dshRoot, handlers}` ⇒ 旧实现每轮 no-landing、静默不投递，
+// 且落点里连 `usage.json` 都不会出现。下面两条把"接线前/接线后"钉成对照。
+
+test('红→绿: 不传 landingDir 且无解析器 ⇒ 如实不投递（landingBound=false，且不写遥测）', () => {
+  const { landing } = freshLanding('deliver-nolanding', {
+    entries: [ledgerEntry({ id: 'L1', ts: TS, rule: 'CAT-CODE' })],
+  });
+  const h = host();
+  const d = registerDelivery(h.ctx, { now: () => new Date(TS) });   // 既不传 landingDir，也不传 resolveLanding
+  assert.equal(d.ok, true, '服务在 ⇒ 注册仍应成功（失败的是"有没有落点"，不是通道）');
+  assert.equal(h.registered[0].text({}), '', '没有落点 ⇒ 必须产出空串（不猜路径）');
+  const rep = d.report();
+  assert.equal(rep.landingBound, false);
+  assert.equal(rep.landingSource, 'none');
+  assert.ok(d.runtime.reasons.includes('no-landing'), `原因要如实记下来（实得 ${JSON.stringify(d.runtime.reasons)}）`);
+  assert.equal(existsSync(join(landing, 'usage.json')), false, '没投递就不该写遥测（别造假命中）');
+});
+
+test('绿: 传 resolveLanding ⇒ provider 真投递，并把**实际投递到的每一条**记进 usage.json', () => {
+  const { landing } = freshLanding('deliver-resolver', {
+    entries: [
+      ledgerEntry({ id: 'A', ts: TS, rule: 'CAT-CODE' }),
+      ledgerEntry({ id: 'B', ts: TS, rule: 'CAT-DOC' }),
+      ledgerEntry({ id: 'C', ts: TS, rule: 'CAT-ENV' }),
+    ],
+  });
+  const h = host();
+  const d = registerDelivery(h.ctx, {
+    resolveLanding: () => ({ dir: landing, source: 'project' }),
+    now: () => new Date(TS),
+  });
+  const text = h.registered[0].text({});
+  assert.ok(text.length > 0, '有落点 + 有话可说 ⇒ 必须产出文本');
+  assert.match(text, /CAT-CODE/);
+  const rep = d.report();
+  assert.equal(rep.landingBound, true);
+  assert.equal(rep.landingSource, 'project');
+  assert.equal(rep.landingDir, landing);
+  // 遥测：一次投递里 3 条都该记（E3 抓出的"只记 rules[0]"缺陷的回归判据）
+  const usage = readUsage(landing);
+  assert.equal(usage.totalEmitted, 3, `单次投递应记满 3 条（实得 ${usage.totalEmitted}）`);
+  assert.ok(usage.rules['CAT-ENV'].emitted >= 1, '最后一条也要记（旧实现只记 rules[0]）');
+  // 第二次求值：文本不变 ⇒ unchanged，不得重复计入 emitted
+  h.registered[0].text({});
+  assert.equal(readUsage(landing).totalEmitted, 3, '同文重放不得重复计数');
+});

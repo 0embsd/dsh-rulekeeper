@@ -155,6 +155,20 @@ rk-effect inject --landing <落点>                       # 把"只写下来了"
 - **服务缺失时如实返回原因**（`delivery.reason=no-systemPrompt-service`），**不静默假成功**；
   注册失败 fail-open（绝不让插件树装载失败）。
 - **`agent/pre-step`（"命中教训全文随现场注入"）尚未接**——本版只做上面的索引/摘要通道。
+  > **更正（2026-09-19，P0-3b 落地）**：已接。全文只在该条目与**本轮消息**相关时才注入（确定性 n-gram
+  > 交集打分，阈值/预算见 `preStepCapability()`），且**只追加不替换**宿主 `decision.messages`。
+- **落点从哪来（P0-3c，2026-09-19 修缺口）**：插件装载入口 `index.js` 只传 `{ dshRoot, handlers }`，
+  **从不传 `landingDir`** ⇒ 此前两条自动通道每轮都拿到 `null`、**静默不投递**（实测：三处落点都没有
+  `usage.json`，而同一时刻 `buildReminderText()` 对真实落点返回 3 条 / 589–842 字符 —— **有话可说却没说**）。
+  修法见 `src/landing.mjs`，顺序固定且**可报**（`landing.source`）：
+  `static`（显式 `landingDir`）→ 现场 `agent.session.header.cwd`（pre-step payload 自带，最准）
+  → `noteAgent()` 记下的最近 cwd（给拿不到 agent 的 `systemPrompt.context` 用）
+  → `ctx.agents` 根 agent 的 cwd（进程刚起也能解析）→ 项目无落点则退**用户级落点** → 都没有则 `null`。
+  取不到时**不投递、不猜路径**，并在 `delivery.reason` / `prestep.landingBound` 上如实暴露
+  （"装上但没生效"不再是一个看不见的状态）。诊断字段：`apply` 报告的 `landing.{dir,source}`、
+  `delivery.{landingBound,landingSource}`、`prestep.{landingBound,landingSource}`。
+  **已知边界（如实登记）**：首轮装配可能早于本轮 `agent/pre-step` ⇒ 会话**第二轮起**才可能有提醒；
+  该边界无法在不重启宿主进程的情况下现场复验（进程内已装载的是旧代码），故本轮凭证只到单元级。
 
 ### 用量遥测 `usage.json`（P0-3 配套）
 

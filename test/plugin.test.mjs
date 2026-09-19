@@ -9,7 +9,7 @@ import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { apply, bootSelfCheck, eventTableFromHost, lastApplyReport, PLUGIN_EVENTS, PLUGIN_TOOLS, TOOL_PREFIX } from '../src/plugin.mjs';
-import { cleanupAll, tempDir } from './helpers/sandbox.mjs';
+import { cleanupAll, freshProjectLanding, ledgerEntry, tempDir } from './helpers/sandbox.mjs';
 
 test.after(cleanupAll);
 
@@ -118,6 +118,62 @@ test('绿: apply 订阅全部 PLUGIN_EVENTS（每个订阅都过 safeListener �
   assert.equal(ret, undefined);
   assert.deepEqual(on.map((x) => x.ev), [...PLUGIN_EVENTS], '订阅的事件必须与 PLUGIN_EVENTS 一致');
   for (const x of on) assert.equal(typeof x.fn, 'function');
+});
+
+// ── 落点接线（2026-09-19 修缺口）：**装载入口不传 landingDir** 时，两条自动通道仍须可用 ──
+// 这条用例是这个缺口的判据本体：旧实现（apply 只把 landingDir 原样传下去）会拿到 null ⇒
+// 投递 provider 恒为空串、pre-step 恒 no-landing，而**任何单测都不红**（因为单测都显式传了 landingDir）。
+
+test('红→绿: apply 不传 landingDir 时，靠宿主 ctx.agents 解析出落点 ⇒ 投递可用', () => {
+  const root = fixtureHost('plugin-landing');
+  const { projectRoot, landing } = freshProjectLanding('plugin-landing-proj', {
+    entries: [ledgerEntry({ id: 'L1', ts: '2026-09-19T00:00:00.000Z', rule: 'CAT-CODE' })],
+  });
+  const registeredCtx = { context: [] };
+  const effects = [];
+  const ctx = {
+    effect: (fn) => { effects.push(fn); fn(); },
+    on: () => {},
+    tools: { register: () => {} },
+    agents: { roots: () => [{ session: { header: { cwd: projectRoot } } }] },
+    systemPrompt: { context: (def) => { registeredCtx.context.push(def); } },
+  };
+  apply(ctx, { dshRoot: root });
+  const rep = lastApplyReport;
+  assert.equal(rep.landing.source, 'project', `落点必须解析出来（实得 ${JSON.stringify(rep.landing)}）`);
+  assert.equal(rep.landing.dir, landing);
+  assert.equal(rep.delivery.landingBound, true, '投递必须绑上落点（旧实现这里是 false）');
+  assert.equal(rep.delivery.landingSource, 'project');
+  const provider = registeredCtx.context.find((d) => d.name === 'rulekeeper/reminders').text;
+  const text = provider({});
+  assert.match(text, /CAT-CODE/, '装载入口不传 landingDir 也必须投得出内容');
+  assert.equal(rep.prestep.landingBound, true, 'pre-step 通道同样要绑上落点');
+});
+
+test('绿: pre-step 事件把"本轮是哪个会话"记下来（systemPrompt.context 拿不到 agent，只能靠它）', async () => {
+  const root = fixtureHost('plugin-note-agent');
+  const { projectRoot } = freshProjectLanding('plugin-note-proj', {
+    entries: [ledgerEntry({ id: 'L1', ts: '2026-09-19T00:00:00.000Z', rule: 'CAT-CODE' })],
+  });
+  const on = [];
+  const defs = [];
+  const ctx = {
+    effect: (fn) => fn(),   // 宿主语义：effect 回调立即执行（注册就发生在这一次）
+    on: (ev, fn) => on.push({ ev, fn }),
+    tools: { register: () => {} },
+    systemPrompt: { context: (def) => { defs.push(def); } },
+  };
+  apply(ctx, { dshRoot: root });   // 既无 landingDir，也无 ctx.agents ⇒ 初始解析不出落点
+  const provider = defs.find((d) => d.name === 'rulekeeper/reminders').text;
+  assert.equal(provider({}), '', '前提：落点未解析出来时投递确实没话说');
+  // 跑一轮 pre-step（宿主真实形态：payload 里带 agent）
+  const prestep = on.find((x) => x.ev === 'agent/pre-step');
+  const agent = { session: { header: { cwd: projectRoot } } };
+  await prestep.fn({ agent, messages: [{ id: 'u', role: 'user', content: '无关话题' }] }, async () => ({ kind: 'enter', messages: [] }));
+  // 关键性质：`systemPrompt.context()` 的 provider **每次求值**都重新解析落点 ⇒ 下一轮起就能投递
+  const text = provider({});
+  assert.match(text, /CAT-CODE/, 'pre-step 记下的会话 cwd 必须让投递通道活过来');
+  assert.equal(lastApplyReport.deliveryCapability.landing.static.includes('landingDir'), true);
 });
 
 test('红态→绿（LF-450 fail-open）: 注入 listener 抛错后订阅回调不抛、落诊断、且**透传上游决策**', async () => {

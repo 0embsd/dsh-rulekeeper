@@ -55,11 +55,37 @@ export function freshLanding(label, { mode = 'observe', entries = [], rules = tr
   const root = tempDir(label);
   const landing = join(root, 'landing');
   mkdirSync(landing, { recursive: true });
+  writeLandingFiles(landing, { mode, entries, rules });
+  return { root, landing };
+}
+
+/**
+ * 造"**项目里**的落点"（`<projectRoot>/.dsh-ai/rulekeeper`）+ 独立 `DSH_HOME`。
+ * 为什么要单独一个助手（2026-09-19）：`landing.mjs` 的解析器判据是"从会话 cwd 推出项目落点"，
+ * 而 `freshLanding` 造的落点**不在项目布局里**（`<tmp>/landing`）⇒ 拿它测解析器等于测不出东西。
+ */
+export function freshProjectLanding(label, { mode = 'observe', entries = [], rules = true, userLanding = false, projectLanding = true } = {}) {
+  const { root, projectRoot, home, env } = freshProject(label);
+  const landing = join(projectRoot, '.dsh-ai', 'rulekeeper');
+  if (projectLanding) {
+    mkdirSync(landing, { recursive: true });
+    writeLandingFiles(landing, { mode, entries, rules });
+  }
+  if (userLanding) {
+    const user = join(home, 'rulekeeper');
+    mkdirSync(user, { recursive: true });
+    writeLandingFiles(user, { mode, entries, rules });
+    return { root, projectRoot, home, env, landing, userLanding: user };
+  }
+  return { root, projectRoot, home, env, landing, userLanding: null };
+}
+
+/** 落点三件套（`freshLanding` / `freshProjectLanding` 共用，避免两处写法漂移） */
+function writeLandingFiles(landing, { mode = 'observe', entries = [], rules = true } = {}) {
   writeFileSync(join(landing, 'config.json'), `${JSON.stringify({ schema: 1, mode }, null, 2)}\n`, 'utf8');
   if (rules) writeFileSync(join(landing, 'rules.json'), readFixture('rules-ok.json'), 'utf8');
   const body = entries.map((e) => JSON.stringify(e)).join('\n');
   writeFileSync(join(landing, 'ledger.jsonl'), entries.length === 0 ? '' : `${body}\n`, 'utf8');
-  return { root, landing };
 }
 
 /** 一条合法账本行（字段取自 LF-120 冻结表；`activation` 是 P0-2 新增的**可选**字段） */

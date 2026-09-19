@@ -77,6 +77,7 @@ export function createDeliveryRuntime({ minIntervalMs = DEFAULT_MIN_INTERVAL_MS 
     emissions: 0,   // "返回了新文本"的次数（≠ 模型一定看到；宿主可能因去重不追加）
     holds: 0,       // 因最小间隔而继续返回上一版的次数
     reasons: [],
+    lastLanding: { dir: null, source: 'unset' }, // 最近一次求值用的落点与来源（诊断"为什么没话说"）
   };
 }
 
@@ -116,6 +117,7 @@ export function nextDelivery({ runtime, built, now }) {
  */
 export function registerDelivery(ctx, {
   landingDir = null,
+  resolveLanding = null,
   order = DEFAULT_ORDER,
   maxRules = DEFAULT_MAX_RULES,
   maxChars = DEFAULT_MAX_CHARS,
@@ -124,11 +126,29 @@ export function registerDelivery(ctx, {
   name = REGISTRY_NAME,
 } = {}) {
   const runtime = createDeliveryRuntime({ minIntervalMs });
+  // 落点解析（2026-09-19 修缺口）：静态 `landingDir` 优先；否则每次求值调 `resolveLanding()`
+  // （插件层传的是 `landing.mjs` 的解析器 —— 没有它，装载入口不传 landingDir 就永远 no-landing）。
+  const pickLanding = () => {
+    if (typeof landingDir === 'string' && landingDir.trim() !== '') return { dir: landingDir, source: 'static' };
+    if (typeof resolveLanding === 'function') {
+      const r = resolveLanding();
+      if (typeof r === 'string' && r.trim() !== '') return { dir: r, source: 'resolver' };
+      if (r !== null && typeof r === 'object' && typeof r.dir === 'string' && r.dir.trim() !== '') {
+        return { dir: r.dir, source: typeof r.source === 'string' ? r.source : 'resolver' };
+      }
+      if (r !== null && typeof r === 'object' && typeof r.source === 'string') return { dir: null, source: r.source };
+      return { dir: null, source: 'resolver-none' };
+    }
+    return { dir: null, source: 'none' };
+  };
+  runtime.lastLanding = pickLanding();
   const report = () => ({
     ok: true,
     name,
     order,
-    landingDir,
+    landingDir: runtime.lastLanding.dir,
+    landingSource: runtime.lastLanding.source,
+    landingBound: runtime.lastLanding.dir !== null,
     evaluations: runtime.evaluations,
     emissions: runtime.emissions,
     holds: runtime.holds,
@@ -146,15 +166,17 @@ export function registerDelivery(ctx, {
 
   const provider = () => {
     try {
-      const built = buildReminderText({ landingDir, now: now(), maxRules, maxChars });
+      const picked = pickLanding();
+      runtime.lastLanding = picked;
+      const built = buildReminderText({ landingDir: picked.dir, now: now(), maxRules, maxChars });
       const step = nextDelivery({ runtime, built, now: now() });
       // E3 推演实验抓出的缺陷（2026-09-19）：原先只记 `built.rules[0]`，而 `maxRules` 默认 3
       // ⇒ 单次投递最多只记 1 条，命中账**系统性少记**（拿它做排序/淘汰时判别力天然偏低）。
       // 现在把这一版**实际投递到的每一条**都记上；`evaluated` 只记一次（它是"提供者被求值"的计数）。
       if (built.rules.length > 0) {
-        bumpUsage(landingDir, { rule: built.rules[0], event: 'evaluated', now: now() });
+        bumpUsage(picked.dir, { rule: built.rules[0], event: 'evaluated', now: now() });
         if (step.emitted) {
-          for (const rule of built.rules) bumpUsage(landingDir, { rule, event: 'emitted', now: now() });
+          for (const rule of built.rules) bumpUsage(picked.dir, { rule, event: 'emitted', now: now() });
         }
       }
       return step.text;
@@ -179,11 +201,16 @@ export function deliveryCapability() {
     maxRules: DEFAULT_MAX_RULES,
     maxChars: DEFAULT_MAX_CHARS,
     minIntervalMs: DEFAULT_MIN_INTERVAL_MS,
+    landing: {
+      static: 'landingDir（显式传入，最高优先）',
+      dynamic: 'resolveLanding()（插件层来自 landing.mjs：现场 agent cwd → 进程内最近 cwd → ctx.agents 根代理人 → 用户级落点兜底）',
+      unresolved: '取不到落点 ⇒ 如实返回空文本并记 reason=no-landing（不猜、不硬编码家目录）',
+    },
     untrustedMarkers: { open: INJECT.open, close: INJECT.close },
     notes: [
       '文本相同 ⇒ 宿主不重复追加（故文本必须稳定）',
       '文本变化 ⇒ 宿主追加；故对"变化"设最小间隔防抖动',
-      'agent/pre-step（全文随现场注入）本版未接',
+      'agent/pre-step（全文随现场注入）**已接**，判据与预算见 preStepCapability()',
       '绝不把动态内容写进 system prompt 正文',
     ],
   };

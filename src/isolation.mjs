@@ -22,15 +22,26 @@ export const ASSEMBLY_DISCLOSURE = '插件面装配 = **每机一次** `link:` �
 /** 声明必须包含的关键短语（机读判据；顺序无关） */
 export const ASSEMBLY_PHRASES = Object.freeze(['每机一次', 'link:', '零配置']);
 
-/** 生成异常落盘器（注入 `appendLine` 便于测试与复用同一写入单点） */
+/** 生成异常落盘器（注入 `appendLine` 便于测试与复用同一写入单点）
+ *
+ * `landingDir` 支持**函数**（2026-09-19）：插件装载时还不知道"当前会话是哪个项目"，
+ * 若在 apply 期就把落点定死成 null，监听器异常日志会**永远不落盘**（同一类"取值面未接线"缺口）。
+ * 传函数 ⇒ 每次写日志时现算；传字符串 ⇒ 仍是原来的固定落点（既有调用方不受影响）。
+ */
 export function makeErrorSink({ landingDir, appendLine, now = () => new Date() } = {}) {
   const records = [];
   const sink = (record) => {
     const row = { schema: 1, ts: now().toISOString(), gate: 'listener-error', ...record };
     records.push(row);
-    if (typeof appendLine === 'function' && typeof landingDir === 'string' && landingDir !== '') {
+    let dir = null;
+    try {
+      dir = typeof landingDir === 'function' ? landingDir() : landingDir;
+    } catch {
+      dir = null; // 解析失败 ⇒ 只留内存记录（fail-open 到底）
+    }
+    if (typeof appendLine === 'function' && typeof dir === 'string' && dir !== '') {
       try {
-        appendLine(join(landingDir, LISTENER_ERRORS_REL), row);
+        appendLine(join(dir, LISTENER_ERRORS_REL), row);
       } catch { /* 日志失败不得影响主流程（fail-open 到底） */ }
     }
     return row;

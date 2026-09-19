@@ -129,15 +129,36 @@ export function latestUserText(messages) {
  */
 export function makePreStepHandler({
   landingDir = null,
+  resolveLanding = null,
   minScore = PRESTEP_MIN_SCORE,
   maxChars = PRESTEP_MAX_CHARS,
   now = () => new Date(),
 } = {}) {
-  const runtime = { evaluations: 0, injections: 0, matchedIds: new Set(), reasons: [] };
+  const runtime = { evaluations: 0, injections: 0, matchedIds: new Set(), reasons: [], lastLanding: { dir: null, source: 'unset' } };
+  // 落点解析（2026-09-19 修缺口）：静态优先；否则**每次事件**用 `resolveLanding(payload)` 现算
+  // —— `agent/pre-step` 的 payload 直接带 `agent`，故这是最准的一条（不受进程内缓存影响）。
+  const pickLanding = (payload) => {
+    if (typeof landingDir === 'string' && landingDir.trim() !== '') return { dir: landingDir, source: 'static' };
+    if (typeof resolveLanding === 'function') {
+      const r = resolveLanding(payload);
+      if (typeof r === 'string' && r.trim() !== '') return { dir: r, source: 'resolver' };
+      if (r !== null && typeof r === 'object' && typeof r.dir === 'string' && r.dir.trim() !== '') {
+        return { dir: r.dir, source: typeof r.source === 'string' ? r.source : 'resolver' };
+      }
+      if (r !== null && typeof r === 'object' && typeof r.source === 'string') return { dir: null, source: r.source };
+      return { dir: null, source: 'resolver-none' };
+    }
+    return { dir: null, source: 'none' };
+  };
+  // 与 deliver.mjs 对称：**装载期先解析一次**，让 `report()` 从第一眼就如实反映"有没有绑上落点"
+  // （否则 apply 报告里恒为 unset，接线是否生效在报告上看不出来）。
+  runtime.lastLanding = pickLanding(null);
   const report = () => ({
     ok: true,
     channel: 'agent/pre-step',
-    landingDir,
+    landingDir: runtime.lastLanding.dir,
+    landingSource: runtime.lastLanding.source,
+    landingBound: runtime.lastLanding.dir !== null,
     minScore,
     maxChars,
     evaluations: runtime.evaluations,
@@ -160,15 +181,18 @@ export function makePreStepHandler({
     }
     try {
       runtime.evaluations += 1;
+      const picked = pickLanding(payload);
+      runtime.lastLanding = picked;
+      if (picked.dir === null) { runtime.reasons.push('no-landing'); return decision; }
       const query = latestUserText(payload && payload.messages) || latestUserText(decision.messages);
       if (query === '') { runtime.reasons.push('no-query'); return decision; }
-      const hit = pickMatch({ landingDir, query, minScore, maxChars });
+      const hit = pickMatch({ landingDir: picked.dir, query, minScore, maxChars });
       if (hit === null) { runtime.reasons.push('no-match'); return decision; }
       if (hit.id !== '' && runtime.matchedIds.has(hit.id)) { runtime.reasons.push('already-injected'); return decision; }
       if (hit.id !== '') runtime.matchedIds.add(hit.id);
       runtime.injections += 1;
       runtime.reasons.push('injected');
-      bumpUsage(landingDir, { rule: hit.rule, event: 'emitted', now: now() });
+      bumpUsage(picked.dir, { rule: hit.rule, event: 'emitted', now: now() });
       // ③ 只**追加**，绝不替换（替换会吃掉用户这一轮输入）
       return {
         ...decision,
@@ -201,6 +225,7 @@ export function preStepCapability() {
     channel: 'agent/pre-step',
     minScore: PRESTEP_MIN_SCORE,
     maxChars: PRESTEP_MAX_CHARS,
+    landing: 'resolveLanding(payload)：payload.agent.session.header.cwd → 项目落点（不存在则退用户级）',
     notes: [
       '只追加、不替换宿主 decision.messages',
       '同一条不重复注入（进程内 seen）',

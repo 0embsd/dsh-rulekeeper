@@ -13,6 +13,7 @@ import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeErrorSink, safeListener } from './isolation.mjs';
+import { landingCapability, createLandingResolver } from './landing.mjs';
 import { deliveryCapability, registerDelivery } from './deliver.mjs';
 import { makePreStepHandler, preStepCapability } from './prestep.mjs';
 
@@ -271,15 +272,23 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
     registered.push(t.name);
   }
 
+  // ── 落点解析（2026-09-19 修缺口）──────────────────────────────────────────
+  // 装载入口 `index.js` 只传 `{dshRoot, handlers}` ⇒ 过去 `landingDir` 恒为 null，两条自动通道
+  // （systemPrompt.context / agent/pre-step）**每轮都 no-landing 静默不投递**（实测三处落点无 usage.json）。
+  // 现在集中到 `createLandingResolver`：静态 > 现场 agent cwd > 进程内最近 cwd > ctx.agents 根代理人 > 用户级兜底。
+  const landing = createLandingResolver(ctx, { staticLanding: landingDir });
+
   // ── 事件监听（LF-450：四插件同场共存）──
   // 每个订阅都用 `safeListener`（LF-460 异常隔离）包一层：**我们抛错也不得打断别人的留痕**（fail-open）。
   // `faultInjection` 是**测试缝**：显式打开时让我们的监听器故意抛错，用来验证"第三方照常留痕"（默认关闭）。
   // P0-3b：pre-step 处理函数（**不在这里订阅**——订阅统一走下面的循环，以满足
   // "订阅集合 == PLUGIN_EVENTS" 与 "每个订阅都过 safeListener" 两条被用例钉死的不变量）。
-  const prestepBuilt = prestep === true ? makePreStepHandler({ landingDir, ...(prestepOptions ?? {}) }) : null;
+  const prestepBuilt = prestep === true
+    ? makePreStepHandler({ resolveLanding: (payload) => landing.describe(payload && payload.agent), ...(prestepOptions ?? {}) })
+    : null;
   const subscribed = [];
   if (typeof ctx.on === 'function') {
-    const sink = makeErrorSink({ landingDir, appendLine });
+    const sink = makeErrorSink({ landingDir: () => landing.resolve(), appendLine });
     for (const ev of events) {
       const listener = safeListener({
         name: `${TOOL_PREFIX}${ev}`,
@@ -289,7 +298,12 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
           // returning undefined made the host read result.kind and blow up (tool layer broke, third-party rows 3 -> 0).
           const next = args[args.length - 1];
           // P0-3b：`agent/pre-step` 走专用处理函数（仍由本 safeListener 包裹 ⇒ 异常隔离与透传不变量不变）
-          if (ev === 'agent/pre-step' && prestepBuilt !== null) return prestepBuilt.handler(args[0], next);
+          if (ev === 'agent/pre-step') {
+            // 记下"这一轮是哪个会话"：`systemPrompt.context()` 的 provider 拿不到 agent，
+            // 靠这里记的 cwd 才能解析出落点（landing.mjs 的第③顺位）。
+            landing.noteAgent(args[0] && args[0].agent);
+            if (prestepBuilt !== null) return prestepBuilt.handler(args[0], next);
+          }
           return typeof next === 'function' ? await next() : undefined;
         },
         onError: async (...args) => {
@@ -315,7 +329,7 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
   let deliveryReg = { ok: false, reason: 'disabled', name: null };
   if (delivery === true) {
     try {
-      const r = registerDelivery(ctx, { landingDir, ...(deliveryOptions ?? {}) });
+      const r = registerDelivery(ctx, { resolveLanding: () => landing.describe(), ...(deliveryOptions ?? {}) });
       deliveryReg = r.ok === true ? r.report() : { ok: false, reason: r.reason, name: r.name };
     } catch (error) {
       // 投递注册失败绝不能让插件树装载失败（fail-open）；如实记录原因。
@@ -336,6 +350,7 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
     ok: true, registered, boot, subscribed,
     listenerErrors: reportSink === null ? 0 : reportSink.records.length,
     errorSink: reportSink,
+    landing: { ...landing.describe(), capability: landingCapability() },
     delivery: deliveryReg,
     deliveryCapability: deliveryCapability(),
     prestep: prestepReg,

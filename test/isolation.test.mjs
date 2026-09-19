@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
@@ -72,6 +72,31 @@ test('判据: 日志写入失败**不得**把异常抛回主流程（fail-open �
   const sink = makeErrorSink({ landingDir: '/definitely/not/writable', appendLine: () => { throw new Error('写盘失败'); } });
   assert.doesNotThrow(() => sink({ listener: 'l', message: 'm' }));
   assert.equal(sink.records.length, 1, '即使写盘失败，记录仍留在内存里');
+});
+
+// 落点可以是**函数**（2026-09-19）：插件装载时还不知道"当前会话是哪个项目"（agent 还没建），
+// 若在 apply 期把落点定死成 null，监听器异常日志会永远不落盘 —— 同一类"取值面未接线"缺口。
+test('判据: landingDir 传函数时**每次写日志现算**（装载期未知会话也能落盘）', () => {
+  const dir = tempDir('iso-log-fn');
+  const landing = join(dir, '.dsh-ai', 'rulekeeper');
+  mkdirSync(join(landing, 'logs'), { recursive: true });
+  let resolved = null;
+  const sink = makeErrorSink({
+    landingDir: () => resolved,
+    appendLine,
+    now: () => new Date('2026-09-15T00:00:00Z'),
+  });
+  sink({ listener: 'before', message: 'no-landing-yet' });            // 解析不出 ⇒ 只留内存，不写盘、不抛
+  assert.equal(existsSync(join(landing, LISTENER_ERRORS_REL)), false, '未解析出落点不得瞎写');
+  resolved = landing;                                                 // 会话确定后
+  sink({ listener: 'after', message: 'now-we-know' });
+  const rows = readFileSync(join(landing, LISTENER_ERRORS_REL), 'utf8').trim().split('\n');
+  assert.equal(rows.length, 1);
+  assert.equal(JSON.parse(rows[0]).listener, 'after');
+  // 解析器自己抛错 ⇒ 同样 fail-open
+  const sink2 = makeErrorSink({ landingDir: () => { throw new Error('resolver boom'); }, appendLine });
+  assert.doesNotThrow(() => sink2({ listener: 'l', message: 'm' }));
+  assert.equal(sink2.records.length, 1);
 });
 
 test('红（清单红态）: 设计单**未写**装配面诚实声明 → 判红（缺哪个短语点名）', () => {

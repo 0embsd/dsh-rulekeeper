@@ -16,8 +16,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { PRESTEP_MAX_CHARS, latestUserText, pickMatch, preStepCapability, registerPreStep, scoreMatch, tokens } from '../src/prestep.mjs';
+import { createLandingResolver } from '../src/landing.mjs';
 import { readUsage } from '../src/usage.mjs';
-import { cleanupAll, freshLanding, ledgerEntry } from './helpers/sandbox.mjs';
+import { cleanupAll, freshLanding, freshProjectLanding, ledgerEntry } from './helpers/sandbox.mjs';
 
 test.after(cleanupAll);
 
@@ -144,4 +145,46 @@ test('判据: 能力声明与实现同源（preStepCapability）', () => {
 test('判据: 缺 ctx.on 时如实返回原因（不静默假成功）', () => {
   assert.equal(registerPreStep(null).reason, 'no-ctx-on');
   assert.equal(registerPreStep({}).reason, 'no-ctx-on');
+});
+
+// ── 落点接线（2026-09-19 修缺口）：payload 里就带 agent ⇒ 现场解析出落点，无需外部注入 ──
+
+test('绿: 无 landingDir，靠 payload.agent.session.header.cwd 现场解析 ⇒ 真注入 + 记遥测', async () => {
+  const { projectRoot, landing } = freshProjectLanding('prestep-resolve', {
+    entries: [ledgerEntry({
+      id: 'L1', ts: TS, rule: 'CAT-CODE',
+      problem: '改动接口后忘了同步契约文档，导致双端漂移',
+      solution: '改接口先改契约再改实现',
+    })],
+  });
+  const h = host();
+  const r = registerPreStep(h.ctx, {
+    resolveLanding: (payload) => createLandingResolver({}).describe(payload && payload.agent),
+  });
+  const listener = h.listeners.get('agent/pre-step');
+  const q = [{ id: 'u', role: 'user', content: '改动接口后忘了同步契约文档怎么办' }];
+  const agent = { session: { header: { cwd: projectRoot } } };
+  const out = await listener({ agent, messages: q }, async () => ({ kind: 'enter', messages: q }));
+  assert.equal(out.messages.length, 2, '现场解析出落点后应当注入');
+  const rep = r.report();
+  assert.equal(rep.landingBound, true);
+  assert.equal(rep.landingSource, 'project');
+  assert.equal(rep.landingDir, landing);
+  assert.ok(readUsage(landing).totalEmitted >= 1, '真注入要记遥测');
+});
+
+test('红→绿: 无落点（无 landingDir 且解析器给不出）⇒ 原样透传 + 如实记 no-landing（不猜、不写遥测）', async () => {
+  const { landing } = landingWithHit();
+  const h = host();
+  const r = registerPreStep(h.ctx, {});
+  const listener = h.listeners.get('agent/pre-step');
+  const q = [{ id: 'u', role: 'user', content: '改动接口后忘了同步契约文档怎么办' }];
+  const d = { kind: 'enter', messages: q };
+  assert.equal(await listener({ messages: q }, async () => d), d, '没有落点 ⇒ 不得改 decision');
+  const rep = r.report();
+  assert.equal(rep.landingBound, false);
+  assert.equal(rep.landingSource, 'none');
+  assert.equal(rep.injections, 0);
+  assert.ok(r.runtime.reasons.includes('no-landing'), `原因要如实记（实得 ${JSON.stringify(r.runtime.reasons)}）`);
+  assert.equal(readUsage(landing).totalEmitted, 0, '没注入就不该有命中记录');
 });
