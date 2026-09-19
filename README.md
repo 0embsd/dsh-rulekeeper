@@ -178,6 +178,13 @@ rk-effect inject --landing <落点>                       # 把"只写下来了"
 - 纪律：原子写（临时文件 + rename）；读失败/损坏 ⇒ 降级为空账（fail-open，度量失败绝不打断投递）。
 - **它不在 SCHEMA.md 的冻结 6 文件里**：`rk-schema` 的冻结单恰好 6 个数据文件（`SCHEMA_FILE_COUNT` 硬校验），
   本文件属**运行态遥测**。⚠ **待决**：是否把它纳入冻结单（要走 §9.8 式契约变更）——当前按"运行态"处理并在此登记。
+- **读数在哪儿看**（2026-09-19 补：此前它**只有写者、没有读者**——唯一的读者是用例，等于"度量没人看 = 没有度量"，
+  与"取值面未接线"同族）：
+  - `rk-effect usage --landing <落点> [--json]`：逐条明细（`RK_EFFECT_USAGE_ROW <RULE> emitted=… evaluated=… lastAt=…`）
+    与三个总数（`RULES` / `EMITTED` / `EVALUATED`）；空账时如实打印"空账：没有任何提醒被投递过"。
+  - `rk-effect plan`：体检里也带 `RK_EFFECT_USAGE_{RULES,EMITTED,EVALUATED}` 与前 3 名（`RK_EFFECT_USAGE_TOP`），
+    ⇒ "投递到底接上没有"从"读代码相信"变成**一眼可读的读数**（本轮实测该行为 `EMITTED=0`，正是它暴露了 P0-3c 的缺口）。
+  - `evaluated` 是判断"量增是否伤召回"的**分母**（求值了却没投递 = `unchanged` / 最小间隔 hold / 无落点）。
 
 ### 生效面口径变更：从"类目层"到"条目层"（P0-2，2026-09-19）
 

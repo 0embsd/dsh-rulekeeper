@@ -93,11 +93,18 @@ export function bumpUsage(landingDir, { rule = null, event, now = new Date() } =
   return { ok: writeUsage(landingDir, usage), usage };
 }
 
-/** 汇总（供体检/CLI 展示）：按 emitted 降序 */
+/** 汇总（供体检/CLI 展示）：按 emitted 降序
+ *
+ * 【2026-09-19 修缺口，教训 L635 同族】`:totalEvaluated` 是本轮补的：此前汇总只有 emitted，
+ * 而"求值了但没投递"（`unchanged` / 最小间隔 hold / 无落点）恰恰是判断"量增是否伤召回"的关键分母。
+ * 更根本的缺口是**这份读数此前没有任何生产消费者**（唯一读它的是用例）——"度量没人看 = 没有度量"。
+ * 消费者已在 `rk-effect plan`（体检行）与 `rk-effect usage`（明细）接上。
+ */
 export function usageSummary(landingDir) {
   const usage = readUsage(landingDir);
   const rows = Object.entries(usage.rules)
     .map(([rule, v]) => ({ rule, ...v }))
     .sort((a, b) => b.emitted - a.emitted || (a.rule < b.rule ? -1 : 1));
-  return { totalEmitted: usage.totalEmitted, rows };
+  const totalEvaluated = rows.reduce((sum, r) => sum + (Number(r.evaluated) || 0), 0);
+  return { totalEmitted: usage.totalEmitted, totalEvaluated, rows };
 }

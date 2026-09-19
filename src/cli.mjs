@@ -42,6 +42,7 @@ import { query as queryLedger, readLedger, record, summary as ledgerSummary } fr
 import { listLogFiles, readEntries, rotateIfNeeded, totalBytes } from './log.mjs';
 import { RC, checkRcTable, renderRcTable } from './rc.mjs';
 import { checkSchema, renderSchemaMarkdown } from './schema.mjs';
+import { USAGE_FILE, usageSummary } from './usage.mjs';
 import { canonicalRule, dedupe, detectRuleDivergence, ruleFragmentation } from './ruleid.mjs';
 import { redactText, redactValue, scanText, selfTestRules, statsOf } from './redact.mjs';
 import {
@@ -270,14 +271,16 @@ export const USAGE_EFFECT = `用法:
   rk-effect verify --landing <落点> [--project <项目根>] [--proposal <id>] [--all] [--now <ISO>] [--json]
   rk-effect apply  --landing <落点> --proposal <id> --by human [--pattern <glob>]... [--gate <机制>] [--apply] [--project <项目根>] [--now <ISO>] [--json]
   rk-effect inject --landing <落点> [--max-per-session n] [--now <ISO>] [--json]
+  rk-effect usage  --landing <落点> [--json]
   （亦可用 dsh-rulekeeper effect <子命令>，两者同实现）
-说明: **入账 ≠ 生效**（LF-A*，2026-09-19）。四个动作：
+说明: **入账 ≠ 生效**（LF-A*，2026-09-19）。五个动作：
       plan   = 只读体检：每条纪律的生效状态（none/injected/mechanized/verified/recurred）+ findings；
                有 error 级 finding（如只写下来了 EFFECT_TEXT_ONLY、绑定空转 EFFECT_BINDING_UNENFORCED）=> exit 1
       verify = 生效验证三项（①命中红 ②**反事实唯一性** ③误报面绿）；缺载体一律判"凭证不足"（EFFECT_VERIFY_UNCARRIED）
       apply  = **唯一**能写 rules.json 的通路：默认 dry-run，--apply 才落盘；**必须 --by human**
                （--by auto 一律拒绝——闸门不可被 AI 直接改）；写前备份 + 写后回读 + 失败逐字节回滚
       inject = 把"只写下来了"的纪律经注入面变成会话提醒（纯计算，零落点写入）
+      usage  = 读**用量遥测**（<落点>/usage.json）：哪几条纪律真被投递过、投递多少次（只读；没投递过就是 0，不造假命中）
 退出码: 0 通过 / 1 判定不合格（或被闸门拒绝/回滚） / 2 用法错误`;
 
 export const USAGE_RULES = `用法:
@@ -2371,7 +2374,7 @@ function projectRootOfLanding(landing) {
  *   2 = 用法错误（缺子命令/未知参数/缺 --by/--by 取值非法/--proposal 不存在）
  */
 function runCliEffect(argv, io, env) {
-  const EFFECT_SUBS = ['plan', 'verify', 'apply', 'inject'];
+  const EFFECT_SUBS = ['plan', 'verify', 'apply', 'inject', 'usage'];
   const sub = argv[0] ?? null;
   if (sub === null || !EFFECT_SUBS.includes(sub)) {
     io.err(`dsh-rulekeeper effect: 需要子命令（${EFFECT_SUBS.join('|')}）\n${USAGE_EFFECT}\n`);
@@ -2405,6 +2408,26 @@ function runCliEffect(argv, io, env) {
     return RC.USAGE;
   }
 
+  if (sub === 'usage') {
+    // P0-3 配套的**读者面**（2026-09-19 修缺口）：此前 `usage.json` 只有写者（deliver/prestep 投递时计数），
+    // 唯一的读者是**用例** ⇒ "度量没人看 = 没有度量"（与 L635"取值面未接线"同族：写得出 ≠ 有人读）。
+    const us = usageSummary(landing);
+    if (flags.json === true) {
+      io.out(jsonStable(us));
+    } else {
+      io.out(line(`RK_EFFECT_USAGE_FILE=${toPosix(join(landing, USAGE_FILE))}`));
+      io.out(line(`RK_EFFECT_USAGE_RULES=${us.rows.length}`));
+      io.out(line(`RK_EFFECT_USAGE_EMITTED=${us.totalEmitted}`));
+      io.out(line(`RK_EFFECT_USAGE_EVALUATED=${us.totalEvaluated}`));
+      for (const r of us.rows) {
+        io.out(line(`RK_EFFECT_USAGE_ROW ${r.rule} emitted=${r.emitted} evaluated=${r.evaluated} lastAt=${r.lastAt ?? '-'}`));
+      }
+      if (us.rows.length === 0) io.out(line('（空账：没有任何提醒被投递过——要么从未装载投递通道，要么落点一直 no-landing）'));
+    }
+    io.out(resultLine('EFFECT_USAGE', true));
+    return RC.OK;
+  }
+
   if (sub === 'plan') {
     const plan = effectPlan({ landingDir: landing, projectRoot, now, staleDays });
     if (flags.json === true) {
@@ -2421,6 +2444,14 @@ function runCliEffect(argv, io, env) {
       const es = plan.entryStats ?? { entries: 0, withActivation: 0, withoutActivation: 0, coverage: 0 };
       io.out(line(`RK_EFFECT_ENTRY_ACTIVATION=${es.withActivation}/${es.entries}`));
       io.out(line(`RK_EFFECT_ENTRY_COVERAGE=${(es.coverage * 100).toFixed(2)}`));
+      // 用量遥测读数（2026-09-19）：体检里必须能直接看到"有没有真的投递过"——
+      // 否则"投递已接线"只能靠读代码相信（本轮实测：三处落点 usage.json 全不存在，
+      // 而体检此前一个字都不提，缺口是靠人肉翻文件才发现的）。
+      const us = usageSummary(landing);
+      io.out(line(`RK_EFFECT_USAGE_RULES=${us.rows.length}`));
+      io.out(line(`RK_EFFECT_USAGE_EMITTED=${us.totalEmitted}`));
+      io.out(line(`RK_EFFECT_USAGE_EVALUATED=${us.totalEvaluated}`));
+      for (const r of us.rows.slice(0, 3)) io.out(line(`RK_EFFECT_USAGE_TOP ${r.rule} emitted=${r.emitted} evaluated=${r.evaluated}`));
       for (const f of plan.findings) io.out(line(`FINDING ${f.code} ${f.severity ?? 'warn'} ${f.rule ?? '-'} ${f.message}`));
     }
     io.out(resultLine('EFFECT', plan.ok === true));
