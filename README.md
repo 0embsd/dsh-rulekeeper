@@ -152,6 +152,23 @@ rk-effect inject --landing <落点>                       # 把"只写下来了"
 - **判据输出不含绝对路径**（跨机可复现）。
 - **公开面零基础设施信息**：S8 扫发布面全量文件，命中"真实 IP / 私钥头 / 云凭据真值 / 私钥文件名 / 本机绝对路径"等即判红。
 
+## 判据自证检查（`rk-selfcheck` S10，2026-09-19）
+
+本包自己有四条纪律（源头见 SKILL §9.17），其中**关于"判据怎么写"的三条**已落成 S10 的结构化不变式
+（跑 `rk-selfcheck` 即生效，不是文档约定）：
+
+| 检查项 | 断言 | 对应纪律 |
+|---|---|---|
+| `S10_AGGREGATE_AS_HIT` | `src/effect.mjs` 不得用聚合布尔（`hit.ok === false`）当命中判据 | 判据必须绑定被测对象自身 |
+| `S10_OBJECT_VERDICT_MISSING` | `src/effect.mjs` 必须存在对象级判定 `carrierVerdictOf(` | 同上 |
+| `S10_SAMPLE_NOT_CONSTRUCTED` | 必须存在 `buildSampleLanding(`（违规样本**构造**出来，不靠现场） | 判据必须可复现 |
+| `S10_SELF_ATTEST_NO_DISCLOSURE` | 发布面带自称型签字 flag ⇒ README 必须同时有自曝（"这是声明、不是签名"） | 自称型控制不是安全边界 |
+| `S9_UNWIRED_MODULE` | `src/**/*.mjs` 必须从入口沿静态 import 可达 | 新模块/导出必须有生产消费者 |
+
+**跨项目用法（用户级落点）**：把纪律登记到用户级落点后，用 `inject` 绑定把它们挂成"软生效面"——
+`rk-effect plan` 会显示 `RK_EFFECT_INJECTED=N`（而不是 `none`），`rk-effect inject` 用**该绑定自己声明的**
+`target/wanted/reason` 生成提醒（`inject` 条目的 `fields` 是**真被消费**的，不是装饰）。
+
 ## 安装到 DSH（两种方式）
 
 本包既是 **CLI**（`node <包目录>/bin/rk-gate.mjs …`），也是 **DSH 插件/bundle**（入口 `index.js` + bundle 补丁 `dsh-rulekeeper.patch.yml`）。

@@ -529,6 +529,32 @@ test('LF-A70 插件面：PLUGIN_TOOLS 必须有 rulekeeper_effect，且默认 ha
   assert.equal(typeof out.reason, 'string');
 });
 
+test('规则 41/42/43 的机械面 S10：本包绿；三向反向红（聚合布尔 / 样本未构造 / 自称无自曝）', async () => {
+  const sandbox = await import('./helpers/sandbox.mjs');
+  const ok = capture((io) => runSelfcheck(['--root', sandbox.PKG_ROOT], io, {}));
+  assert.equal(ok.rc, RC.OK, ok.out + ok.err);
+  const fake = tempDir('s10-red');
+  mkdirSync(join(fake, 'src'), { recursive: true });
+  writeFileSync(join(fake, 'package.json'), `${JSON.stringify({ name: 'probe', type: 'module', engines: { node: '>=22' } })}\n`, 'utf8');
+  // 规则 41：命中判定退回聚合布尔 ⇒ 必红
+  writeFileSync(join(fake, 'src', 'effect.mjs'), 'export const bad = hit.ok === false;\n', 'utf8');
+  let red = capture((io) => runSelfcheck(['--root', fake], io, {}));
+  assert.match(red.out, /S10_AGGREGATE_AS_HIT/, red.out);
+  // 规则 42：样本没被构造 ⇒ 必红；且不退回聚合布尔时不得再报 S10a
+  writeFileSync(join(fake, 'src', 'effect.mjs'), 'export function carrierVerdictOf() { return 1; }\n', 'utf8');
+  red = capture((io) => runSelfcheck(['--root', fake], io, {}));
+  assert.match(red.out, /S10_SAMPLE_NOT_CONSTRUCTED/, red.out);
+  assert.equal(/S10_AGGREGATE_AS_HIT/.test(red.out), false, `不退回聚合布尔时不得再报 S10a: ${red.out}`);
+  // 规则 43：带自称型签字但 README 无自曝 ⇒ 必红；补上自曝 ⇒ 消失
+  writeFileSync(join(fake, 'src', 'cli.mjs'), "export const u = '--by human';\n", 'utf8');
+  writeFileSync(join(fake, 'README.md'), '# probe\n', 'utf8');
+  red = capture((io) => runSelfcheck(['--root', fake], io, {}));
+  assert.match(red.out, /S10_SELF_ATTEST_NO_DISCLOSURE/, red.out);
+  writeFileSync(join(fake, 'README.md'), '# probe\n\n这是**声明**，不是"签名"。\n', 'utf8');
+  red = capture((io) => runSelfcheck(['--root', fake], io, {}));
+  assert.equal(/S10_SELF_ATTEST_NO_DISCLOSURE/.test(red.out), false, `补上自曝后必须消失: ${red.out}`);
+});
+
 // ── LF-A80 S9 模块接线检查 ──────────────────────────────────────────────────────
 
 test('LF-A80 S9：写了模块没人用 -> 必红；真实包 -> 绿', async () => {

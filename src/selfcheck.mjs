@@ -483,5 +483,48 @@ export function checkSkeleton(root, opts = {}) {
     }
   }
 
+  // ── S10 **判据自证检查**（规则 41/42/43 在本包的机械面；2026-09-19）
+  //
+  // 来历：老板把 SKILL §9.17 的四条纪律升格进用户级规则后要求"真拦"，而不是只写在文档里。
+  // 规则 44 已由 S9 机械判定；41/42/43 是**关于"判据怎么写"**的纪律 —— 其可机械化部分不是"风格"，
+  // 而是**本包验证代码里必须存在的结构性事实**：
+  //   S10a（规则 41）命中判定必须落在**载体自身**（`carrierVerdictOf(`），且**不得**退回聚合布尔
+  //        （`hit.ok === false`）—— 那正是独立 CR 抓到的 blocker（L614）。
+  //   S10b（规则 42）违规样本必须**构造**（`buildSampleLanding(`），不得依赖"现场恰好处于违规态"（L615）。
+  //   S10c（规则 43）发布面带**自称型签字** flag ⇒ README 必须同时有**自曝**（"不是签名/声明"）（L616）。
+  //
+  // 只在本包（存在 `src/effect.mjs`）时求值 S10a/b：对别的 root 求值只会产生噪声。
+  const effectFile = join(root, 'src', 'effect.mjs');
+  if (existsSync(effectFile)) {
+    const src = readFileSync(effectFile, 'utf8');
+    if (/hit\.ok\s*===?\s*false/.test(src)) {
+      add('S10_AGGREGATE_AS_HIT', 'src/effect.mjs: 命中判定不得用聚合布尔（`hit.ok === false`）——必须取载体自己的 verdict（规则 41 · L614 的 blocker 回归门）');
+    }
+    if (!/carrierVerdictOf\(/.test(src)) {
+      add('S10_OBJECT_VERDICT_MISSING', 'src/effect.mjs: 找不到 `carrierVerdictOf(`（对象级判定缺失）——规则 41 要求判据落在被测对象自身');
+    }
+    if (!/buildSampleLanding\(/.test(src)) {
+      add('S10_SAMPLE_NOT_CONSTRUCTED', 'src/effect.mjs: 找不到 `buildSampleLanding(`——规则 42 要求违规样本**构造**出来，不得依赖现场状态');
+    }
+  }
+  // S10c 配对检查：自称型签字 flag ⇔ 自曝（跨文件、可机械判定）
+  {
+    const flagRe = /--by\s+human|by\s*===?\s*'human'|--attested-by|--approved-by/;
+    const disclosureRe = /不是[\s"'“”‘’]{0,2}签名|声明[，,、]?\s*不是|自称/;   // 容忍 README 里的引号（第一版写死"不是签名"⇒ 对自己的 README 假红）
+    const testPrefix = join(root, 'test') + sep;
+    const flagged = [];
+    for (const file of listModules(root)) {
+      if (file.startsWith(testPrefix)) continue;
+      if (flagRe.test(readFileSync(file, 'utf8'))) flagged.push(relative(root, file).split(sep).join('/'));
+    }
+    if (flagged.length > 0) {
+      const readmePath = join(root, 'README.md');
+      const readme = existsSync(readmePath) ? readFileSync(readmePath, 'utf8') : '';
+      if (!disclosureRe.test(readme)) {
+        add('S10_SELF_ATTEST_NO_DISCLOSURE', `发布面带自称型签字（${flagged.join(', ')}），但 README 缺少自曝（应写明"这是声明、不是签名"）——规则 43 · L616`);
+      }
+    }
+  }
+
   return { ok: findings.length === 0, findings, dirs };
 }

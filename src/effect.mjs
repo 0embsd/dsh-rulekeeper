@@ -970,11 +970,24 @@ export function effectInjectPlan(opts = {}) {
   const want = plan.items
     .filter((i) => (i.state === 'none' || i.state === 'injected') && i.entries > 0)
     .sort((a, b) => (a.rule < b.rule ? -1 : 1));
-  const candidates = want.map((i) => ({
-    rule: i.rule,
-    problem: `这条纪律已入账 ${i.entries} 次但尚未绑定机械判据（state=${i.state}）：改动前先看它，别重复踩。`,
-    fields: { rule: i.rule, target: 'rules.json', action: 'observe', wanted: '绑定判据或注入提醒', reason: '入账未生效' },
-  }));
+  // **`inject` 绑定声明的 `fields` 必须真被消费**（2026-09-19 自审，规则 44 的正面用法）：
+  // 此前 `rules.json` 里 inject 条目的 `fields` 只用于"状态判定"（有绑定 ⇒ injected），
+  // 生成提醒时却被硬编码的通用字段取代 ⇒ 声明了却没人读（正是"已实现未生效"的同类形态）。
+  // 现在：有 inject 绑定的纪律，提醒里用它自己声明的 target/wanted/reason。
+  const bindings = ruleBindings(loadLandingRules(landingDir).rulesResult.rules);
+  const candidates = want.map((i) => {
+    const declared = bindings.get(i.rule)?.inject?.[0]?.fields ?? null;
+    const fields = declared !== null && Object.keys(declared).length > 0
+      ? { ...declared, rule: i.rule }
+      : { rule: i.rule, target: 'rules.json', action: 'observe', wanted: '绑定判据或注入提醒', reason: '入账未生效' };
+    return {
+      rule: i.rule,
+      problem: declared !== null
+        ? `这条纪律已入账 ${i.entries} 次（state=${i.state}）：按它自己声明的注入面提醒一次。`
+        : `这条纪律已入账 ${i.entries} 次但尚未绑定机械判据（state=${i.state}）：改动前先看它，别重复踩。`,
+      fields,
+    };
+  });
   const out = injectPlan({ candidates, messages: [], delivered: 0, maxPerSession, now });
   return { ok: out.ok, appended: out.appended, dropped: out.dropped, ledgerOnly: out.ledgerOnly, findings: out.findings, candidates: candidates.length };
 }
