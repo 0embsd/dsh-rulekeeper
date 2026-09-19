@@ -26,10 +26,10 @@
 | `solution` | string | 是 |  |  |  |
 | `evidence` | array | 是 |  |  | 凭证路径列表（字符串数组） |
 | `mechanism` | string | 是 |  |  | text | mechanized | uncheckable(+理由) |
-| `recurrence` | number | 是 |  | 派生 | 派生：同 rule 行数 |
-| `first_seen` | iso8601 | 是 |  | 派生 | 派生：同 rule 最早 ts |
-| `last_seen` | iso8601 | 是 |  | 派生 | 派生：同 rule 最晚 ts |
-| `status` | enum (active\|superseded\|archived) | 是 |  | 派生 | 派生：按状态事件行 fold |
+| `recurrence` | number | 是 |  | 派生 | **行内恒为 1**（写入时单行事实）；同 rule 行数须派生（recurrenceOf()/summary），读行内字段恒得 1 |
+| `first_seen` | iso8601 | 是 |  | 派生 | **行内 = 本行 ts**（写入时事实）；同 rule 最早 ts 须派生 |
+| `last_seen` | iso8601 | 是 |  | 派生 | **行内 = 本行 ts**（写入时事实）；同 rule 最晚 ts 须派生 |
+| `status` | enum (active\|superseded\|archived) | 是 |  | 派生 | **行内 = 写入时状态**（导入的历史行可出生即 superseded，故无常数不变式）；后续迁移按状态事件行 fold，禁原地改写 |
 | `activation` | string | 否 |  |  | 可判激活条件：一句话说明在什么**可观测**条件下这条纪律适用/该被想起/该被判红（须可机械判定；占位符不算） |
 
 ### `rules.json`
@@ -117,3 +117,18 @@
 **为什么禁止**：把"计数/状态"放进 append-only 行里原地改写，等于在并发下做「整文件读-改-写」。
 实测该形态会丢计数（`scripts/demo-rmw-loss.mjs` 复现；本机曾测得期望 1600 实得 56，丢 96.5%）。
 计数用**派生**（扫同 rule 行数），状态迁移用**事件行**；写入侧的原子性与锁由 LF-160 / LF-170 保证。
+
+### 2.1 行内值 ≠ 聚合值（2026-09-19 口径更正）
+
+上表 `可变` 列标"派生"说的是**读法**（该字段的语义要派生着读），**不是**"行里存的是聚合值"。
+**行里写下的永远是写入那一刻的单行事实**：`recurrence` 恒 `1`、`first_seen`/`last_seen` 恒等于本行 `ts`、
+`status` 为写入时状态（导入的历史行可**出生即** `superseded`）。因此**直接读行内字段当聚合用会得到常数**——
+同 rule 行数请用 `recurrenceOf()` / `summary()`。下表由 `LEDGER_ROW_WRITE_INVARIANTS` 渲染（改口径请改代码重生成）：
+
+| 字段 | 行内不变式 | 违反级别 | 为什么 |
+|---|---|---|---|
+| `recurrence` | `=== 1` | error | 行内 recurrence 是写入时的单行事实（恒 1）；同 rule 行数必须派生。出现非 1 ⇒ 有人把聚合写进了 append-only 行里（LF-120 禁原地更新的反面形态），该行及其它读数一律不可信 |
+| `first_seen` | `=== ts` | warn | 行内 first_seen 是写入时事实（= 本行 ts）；同 rule 最早 ts 必须派生。不等 ⇒ 该行携带了跨行聚合，口径可疑 |
+| `last_seen` | `=== ts` | warn | 行内 last_seen 是写入时事实（= 本行 ts）；同 rule 最晚 ts 必须派生。不等 ⇒ 该行携带了跨行聚合，口径可疑 |
+
+机械面：`doctor()` 逐行核对上表，违反即报 `DOCTOR_<code>`（如 `DOCTOR_ROW_RECURRENCE_NOT_ONE`）并计入 `summary.rowViolations`。

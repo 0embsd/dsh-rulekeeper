@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { FILES, LEDGER_PLAN_FIELDS, SCHEMA_VERSION, checkSchema, renderSchemaMarkdown } from '../src/schema.mjs';
+import { FILES, LEDGER_PLAN_FIELDS, LEDGER_ROW_WRITE_INVARIANTS, SCHEMA_VERSION, checkSchema, renderSchemaMarkdown } from '../src/schema.mjs';
 import { PKG_ROOT, cleanupAll, tempDir } from './helpers/sandbox.mjs';
 
 test.after(cleanupAll);
@@ -120,4 +120,54 @@ test('red: 缺 SCHEMA.md → SCHEMA_DOC_MISSING', () => {
   mkdirSync(root, { recursive: true });
   const report = checkSchema({ root, checkDoc: true });
   assert.ok(report.findings.some((f) => f.code === 'SCHEMA_DOC_MISSING'));
+});
+
+// ── 行内写入不变式（2026-09-19：修"行内 recurrence 恒 1"与"派生：同 rule 行数"的口径矛盾）──
+
+test('schema：行内不变式只挂在"可变 + 有派生规则"的 ledger 字段上（真实冻结单自证）', () => {
+  const ledger = FILES.find((f) => f.name === 'ledger.jsonl');
+  const derived = new Set(ledger.derived.map((d) => d.field));
+  assert.ok(LEDGER_ROW_WRITE_INVARIANTS.length > 0, '不变式表不得为空（否则等于没有机械面）');
+  for (const inv of LEDGER_ROW_WRITE_INVARIANTS) {
+    const f = ledger.fields.find((x) => x.name === inv.field);
+    assert.ok(f, `不变式字段 ${inv.field} 不在 ledger 字段表里`);
+    assert.equal(f.mutable, true, `${inv.field} 若不标可变，就不该有条目级派生读法`);
+    assert.ok(derived.has(inv.field), `${inv.field} 有行内不变式却没有派生规则 ⇒ 聚合该从哪读没交代`);
+    assert.ok(['error', 'warn'].includes(inv.level), `${inv.field} 的违反级别非法`);
+    assert.equal(typeof inv.equals, 'function');
+  }
+});
+
+test('schema：status 不做常数不变式（导入的历史行可出生即 superseded ⇒ 做了就是假红）', () => {
+  assert.equal(
+    LEDGER_ROW_WRITE_INVARIANTS.some((inv) => inv.field === 'status'),
+    false,
+    'status 实测 active 374 + superseded 14，不能当常数核对',
+  );
+});
+
+test('red: 行内不变式指向不存在的字段 → SCHEMA_ROW_INVARIANT_UNKNOWN', () => {
+  const report = checkSchema({ rowInvariants: [{ ...LEDGER_ROW_WRITE_INVARIANTS[0], field: 'no_such_field' }] });
+  assert.ok(report.findings.some((f) => f.code === 'SCHEMA_ROW_INVARIANT_UNKNOWN'));
+});
+
+test('red: 行内不变式字段不再标可变/派生 → SCHEMA_ROW_INVARIANT_NOT_DERIVED', () => {
+  const files = FILES.map((f) => (f.name === 'ledger.jsonl'
+    ? { ...f, derived: f.derived.filter((d) => d.field !== 'recurrence') }
+    : f));
+  const report = checkSchema({ files, rowInvariants: LEDGER_ROW_WRITE_INVARIANTS });
+  assert.ok(report.findings.some((f) => f.code === 'SCHEMA_ROW_INVARIANT_NOT_DERIVED'));
+});
+
+test('red: 行内不变式缺 level/why/equals → SCHEMA_ROW_INVARIANT_NOT_DESCRIBED', () => {
+  const report = checkSchema({ rowInvariants: [{ ...LEDGER_ROW_WRITE_INVARIANTS[0], why: '   ', equals: undefined }] });
+  assert.ok(report.findings.some((f) => f.code === 'SCHEMA_ROW_INVARIANT_NOT_DESCRIBED'));
+});
+
+test('schema：行内 vs 派生 的口径必须写进 SCHEMA.md（生成物含 2.1 节与不变式表）', () => {
+  const md = renderSchemaMarkdown();
+  assert.ok(md.includes('行内值 ≠ 聚合值'), 'SCHEMA.md 缺口径更正节');
+  for (const inv of LEDGER_ROW_WRITE_INVARIANTS) {
+    assert.ok(md.includes(`\`${inv.field}\` | \`${inv.expect}\``), `不变式表缺 ${inv.field} 行`);
+  }
 });

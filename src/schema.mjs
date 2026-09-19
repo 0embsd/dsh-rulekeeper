@@ -44,10 +44,13 @@ export const FILES = Object.freeze([
       { name: 'solution', type: 'string', required: true },
       { name: 'evidence', type: 'array', required: true, note: '凭证路径列表（字符串数组）' },
       { name: 'mechanism', type: 'string', required: true, note: 'text | mechanized | uncheckable(+理由)' },
-      { name: 'recurrence', type: 'number', required: true, mutable: true, note: '派生：同 rule 行数' },
-      { name: 'first_seen', type: 'iso8601', required: true, mutable: true, note: '派生：同 rule 最早 ts' },
-      { name: 'last_seen', type: 'iso8601', required: true, mutable: true, note: '派生：同 rule 最晚 ts' },
-      { name: 'status', type: 'enum', required: true, mutable: true, values: ['active', 'superseded', 'archived'], note: '派生：按状态事件行 fold' },
+      // ↓ 注意口径（2026-09-19 更正）：`mutable` 描述的是**该字段的语义要派生着读**，
+      //   而**行里写下的**是写入那一刻的单行事实（`recurrence` 恒 1、`first_seen`/`last_seen` 恒 = 本行 ts）。
+      //   旧 note 写"派生：同 rule 行数"会被读成"行内字段就是聚合" ⇒ 直接读恒得 1（E3 仿真发现的口径矛盾）。
+      { name: 'recurrence', type: 'number', required: true, mutable: true, note: '**行内恒为 1**（写入时单行事实）；同 rule 行数须派生（recurrenceOf()/summary），读行内字段恒得 1' },
+      { name: 'first_seen', type: 'iso8601', required: true, mutable: true, note: '**行内 = 本行 ts**（写入时事实）；同 rule 最早 ts 须派生' },
+      { name: 'last_seen', type: 'iso8601', required: true, mutable: true, note: '**行内 = 本行 ts**（写入时事实）；同 rule 最晚 ts 须派生' },
+      { name: 'status', type: 'enum', required: true, mutable: true, values: ['active', 'superseded', 'archived'], note: '**行内 = 写入时状态**（导入的历史行可出生即 superseded，故无常数不变式）；后续迁移按状态事件行 fold，禁原地改写' },
       // P0-2（2026-09-19）：**可判激活条件**（可选）。生效语义过去只挂类目层（`rule` 标签），
       // 而类目只是分组标签 ⇒ TEXT_ONLY 21/22 是结构必然；现把"何时适用"挂到**条目**上，
       // 体检报 RK_EFFECT_ENTRY_ACTIVATION / _COVERAGE（判据见 effect.mjs 的 activationOf()）。
@@ -171,11 +174,57 @@ export const FROZEN_FILE_NAMES = Object.freeze([
 ]);
 
 /**
+ * ledger 行的**写入时不变式** —— 把"行内字段不是聚合值"从注释变成**可机检数据**。
+ *
+ * 来历（2026-09-19，E3 治理仿真发现的口径矛盾）：落点 `ledger.jsonl` 实测 **388 行里
+ * `recurrence` 全为 1**，而本文件旧 note 写的是"派生：同 rule 行数" ⇒ 两条读法互相矛盾，
+ * 任何"引用该字段当复发次数"的数字都不可信。实测同时确认 `first_seen`/`last_seen` 各 388 行
+ * 都等于本行 `ts`；`status` 则是 active 374 + superseded 14（导入的历史行**出生即 superseded**），
+ * 故 **status 不做常数不变式**（做了就是假红）。
+ *
+ * 为什么要有机械面：单纯改注释只治"读文档的人"，治不了"读字段的代码"。消费方：
+ * `doctor()` 逐行核对（违反 → `DOCTOR_<code>`），SCHEMA.md 由本常量渲染出对照表（防文档漂移）。
+ *
+ * 判据分级理由：`recurrence ≠ 1` 只可能是**把聚合写进了 append-only 行**（LF-120 明令禁止的
+ * 反面形态）⇒ error；`first_seen/last_seen ≠ ts` 理论上导入历史行可携带原值 ⇒ warn（一旦真有
+ * 这样的调用方，要么升级 error、要么改口径，两者都要落到本常量上）。
+ *
+ * @type {ReadonlyArray<{field:string, expect:string, level:'error'|'warn', code:string, why:string, equals:(row:object)=>boolean}>}
+ */
+export const LEDGER_ROW_WRITE_INVARIANTS = Object.freeze([
+  Object.freeze({
+    field: 'recurrence',
+    expect: '=== 1',
+    level: 'error',
+    code: 'ROW_RECURRENCE_NOT_ONE',
+    equals: (row) => row.recurrence === 1,
+    why: '行内 recurrence 是写入时的单行事实（恒 1）；同 rule 行数必须派生。出现非 1 ⇒ 有人把聚合写进了 append-only 行里（LF-120 禁原地更新的反面形态），该行及其它读数一律不可信',
+  }),
+  Object.freeze({
+    field: 'first_seen',
+    expect: '=== ts',
+    level: 'warn',
+    code: 'ROW_FIRST_SEEN_NOT_TS',
+    equals: (row) => row.first_seen === row.ts,
+    why: '行内 first_seen 是写入时事实（= 本行 ts）；同 rule 最早 ts 必须派生。不等 ⇒ 该行携带了跨行聚合，口径可疑',
+  }),
+  Object.freeze({
+    field: 'last_seen',
+    expect: '=== ts',
+    level: 'warn',
+    code: 'ROW_LAST_SEEN_NOT_TS',
+    equals: (row) => row.last_seen === row.ts,
+    why: '行内 last_seen 是写入时事实（= 本行 ts）；同 rule 最晚 ts 必须派生。不等 ⇒ 该行携带了跨行聚合，口径可疑',
+  }),
+]);
+
+/**
  * 校验冻结单自身的一致性。
- * @param {{files?: object[], readFile?: (p:string)=>string, exists?: (p:string)=>boolean, root?: string, checkDoc?: boolean}} [opts]
+ * @param {{files?: object[], rowInvariants?: object[], readFile?: (p:string)=>string, exists?: (p:string)=>boolean, root?: string, checkDoc?: boolean}} [opts]
  */
 export function checkSchema(opts = {}) {
   const files = opts.files ?? FILES;
+  const invariants = opts.rowInvariants ?? LEDGER_ROW_WRITE_INVARIANTS;
   const findings = [];
   const add = (code, msg) => findings.push({ code, msg });
   if (files.length !== 6) add('SCHEMA_FILE_COUNT', `必须冻结 6 个数据文件，实测 ${files.length}`);
@@ -238,6 +287,27 @@ export function checkSchema(opts = {}) {
     for (const required of REQUIRED_PLAN_FIELDS[file.name] ?? []) {
       if (!names.includes(required)) add('SCHEMA_REQUIRED_FIELD_MISSING', `${label}: 缺必需字段 "${required}"`);
     }
+
+    // 行内写入不变式（2026-09-19）：不变式只能挂在"确实是行内写入时事实"的字段上，
+    // 即该字段必须是 ledger 的**可变 + 有派生规则**字段（否则口径自相矛盾：既说是行内常数、
+    // 又没告诉人聚合该从哪读）。
+    if (file.name === 'ledger.jsonl') {
+      const mutables = new Set(file.fields.filter((f) => f.mutable === true).map((f) => f.name));
+      const derivedNames = new Set((file.derived ?? []).map((d) => d.field));
+      for (const inv of invariants) {
+        const invLabel = `${label}.${inv?.field ?? '?'}`;
+        if (!names.includes(inv?.field)) {
+          add('SCHEMA_ROW_INVARIANT_UNKNOWN', `${invLabel}: 行内不变式指向不存在的字段`);
+          continue;
+        }
+        if (!mutables.has(inv.field) || !derivedNames.has(inv.field)) {
+          add('SCHEMA_ROW_INVARIANT_NOT_DERIVED', `${invLabel}: 行内不变式字段必须同时是"可变 + 有派生规则"字段（否则"行内是常数、聚合在哪读"没交代）`);
+        }
+        if (!['error', 'warn'].includes(inv?.level) || typeof inv?.why !== 'string' || inv.why.trim() === '' || typeof inv?.equals !== 'function') {
+          add('SCHEMA_ROW_INVARIANT_NOT_DESCRIBED', `${invLabel}: 不变式必须写清 level(error|warn) + why(为什么) + equals(判据函数)`);
+        }
+      }
+    }
   }
 
   if (opts.checkDoc === true && typeof opts.root === 'string') {
@@ -246,7 +316,7 @@ export function checkSchema(opts = {}) {
     const readText = opts.readFile ?? ((p) => readFileSync(p, 'utf8'));
     if (!exists(docPath)) {
       add('SCHEMA_DOC_MISSING', `缺 SCHEMA.md（用 rk-schema --write-md 生成）: ${docPath}`);
-    } else if (readText(docPath) !== renderSchemaMarkdown(files)) {
+    } else if (readText(docPath) !== renderSchemaMarkdown(files, invariants)) {
       add('SCHEMA_DOC_DRIFT', 'SCHEMA.md 与 src/schema.mjs 的生成结果不一致（手改文档或改码未重生成）');
     }
   }
@@ -255,7 +325,7 @@ export function checkSchema(opts = {}) {
 }
 
 /** 渲染冻结单 markdown（**唯一生成路径**；SCHEMA.md 必须等于它的输出） */
-export function renderSchemaMarkdown(files = FILES) {
+export function renderSchemaMarkdown(files = FILES, invariants = LEDGER_ROW_WRITE_INVARIANTS) {
   const lines = [];
   lines.push(`# dsh-rulekeeper schema v${SCHEMA_VERSION}（冻结单）`);
   lines.push('');
@@ -295,6 +365,21 @@ export function renderSchemaMarkdown(files = FILES) {
   lines.push('**为什么禁止**：把"计数/状态"放进 append-only 行里原地改写，等于在并发下做「整文件读-改-写」。');
   lines.push('实测该形态会丢计数（`scripts/demo-rmw-loss.mjs` 复现；本机曾测得期望 1600 实得 56，丢 96.5%）。');
   lines.push('计数用**派生**（扫同 rule 行数），状态迁移用**事件行**；写入侧的原子性与锁由 LF-160 / LF-170 保证。');
+  lines.push('');
+  lines.push('### 2.1 行内值 ≠ 聚合值（2026-09-19 口径更正）');
+  lines.push('');
+  lines.push('上表 `可变` 列标"派生"说的是**读法**（该字段的语义要派生着读），**不是**"行里存的是聚合值"。');
+  lines.push('**行里写下的永远是写入那一刻的单行事实**：`recurrence` 恒 `1`、`first_seen`/`last_seen` 恒等于本行 `ts`、');
+  lines.push('`status` 为写入时状态（导入的历史行可**出生即** `superseded`）。因此**直接读行内字段当聚合用会得到常数**——');
+  lines.push('同 rule 行数请用 `recurrenceOf()` / `summary()`。下表由 `LEDGER_ROW_WRITE_INVARIANTS` 渲染（改口径请改代码重生成）：');
+  lines.push('');
+  lines.push('| 字段 | 行内不变式 | 违反级别 | 为什么 |');
+  lines.push('|---|---|---|---|');
+  for (const inv of invariants) {
+    lines.push(`| \`${inv.field}\` | \`${inv.expect}\` | ${inv.level} | ${inv.why} |`);
+  }
+  lines.push('');
+  lines.push('机械面：`doctor()` 逐行核对上表，违反即报 `DOCTOR_<code>`（如 `DOCTOR_ROW_RECURRENCE_NOT_ONE`）并计入 `summary.rowViolations`。');
   lines.push('');
   return `${lines.join('\n')}`;
 }

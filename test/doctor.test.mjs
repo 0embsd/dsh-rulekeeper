@@ -110,6 +110,52 @@ test('red: ts 非单调 -> DOCTOR_TS_NOT_MONOTONIC(warn)', () => {
   assert.ok(codes(report).includes('DOCTOR_TS_NOT_MONOTONIC'));
 });
 
+// ── 行内写入不变式（2026-09-19）：判据表在 src/schema.mjs 的 LEDGER_ROW_WRITE_INVARIANTS ──
+// 样本是**构造**的（改一个字段值即可重跑），不依赖现场：见规则 42。
+
+test('red: 行内 recurrence 被写成聚合值(7) -> DOCTOR_ROW_RECURRENCE_NOT_ONE(error)，且干净落点不报（非恒真）', () => {
+  const dirty = landingFixture('d-rowrec-dirty');
+  writeJsonl(join(dirty, 'ledger.jsonl'), [
+    ledgerEntry('L001'),
+    ledgerEntry('L002', '2026-09-14T00:00:01.000Z', { recurrence: 7 }),
+  ]);
+  const report = doctor({ landingDir: dirty });
+  const finding = report.findings.find((f) => f.code === 'DOCTOR_ROW_RECURRENCE_NOT_ONE');
+  assert.ok(finding, '把聚合写进行里必须报出来');
+  assert.equal(finding.level, 'error', '聚合写进 append-only 行 ⇒ 该行不可信（LF-120 反面形态）');
+  assert.equal(finding.index, 2, '定位到具体行（对象级判据，不是"整份报告红"）');
+  assert.equal(report.summary.rowViolations, 1);
+  assert.equal(report.ok, false);
+
+  // 反事实：同一判据在健康落点必须**不报** —— 否则它是恒真的
+  const clean = landingFixture('d-rowrec-clean');
+  writeJsonl(join(clean, 'ledger.jsonl'), [ledgerEntry('L001')]);
+  const cleanReport = doctor({ landingDir: clean });
+  assert.equal(codes(cleanReport).includes('DOCTOR_ROW_RECURRENCE_NOT_ONE'), false, '干净行不该报');
+  assert.equal(cleanReport.summary.rowViolations, 0);
+});
+
+test('warn: first_seen 携带跨行聚合 -> DOCTOR_ROW_FIRST_SEEN_NOT_TS(warn)，不判 error', () => {
+  const landing = landingFixture('d-rowfs');
+  writeJsonl(join(landing, 'ledger.jsonl'), [
+    ledgerEntry('L001', '2026-09-14T00:00:00.000Z'),
+    ledgerEntry('L002', '2026-09-14T00:00:01.000Z', { first_seen: '2026-01-01T00:00:00.000Z' }),
+  ]);
+  const report = doctor({ landingDir: landing });
+  const finding = report.findings.find((f) => f.code === 'DOCTOR_ROW_FIRST_SEEN_NOT_TS');
+  assert.ok(finding);
+  assert.equal(finding.level, 'warn', '导入历史行理论上可携带原 first_seen ⇒ warn');
+  assert.equal(report.ok, true, 'warn 不动 ok（--strict 才升级）');
+  assert.equal(doctorExitCode(report, true), 1);
+});
+
+test('green: status!=active 不报行内不变式（导入的历史行可出生即 superseded）', () => {
+  const landing = landingFixture('d-rowsuperseded');
+  writeJsonl(join(landing, 'ledger.jsonl'), [ledgerEntry('L001', '2026-09-14T00:00:00.000Z', { status: 'superseded' })]);
+  const report = doctor({ landingDir: landing });
+  assert.equal(report.summary.rowViolations, 0, 'status 没有常数不变式 ⇒ 不得假红');
+});
+
 test('red: 有记录无备份 -> DOCTOR_BACKUP_ORPHAN(error)', () => {
   const landing = landingFixture('d-orphan');
   writeJsonl(join(landing, 'snapshots', 'index.jsonl'), [{

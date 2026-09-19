@@ -3,7 +3,8 @@
 // 三件事：
 //   ① 崩溃恢复的前提是**容错读**：半行/坏行不得让整文件读取失败（复用 LF-160 的 readLines）
 //   ② doctor 把"账本是否可信"变成可机检结论：坏行、截断尾、超长行、重复 id、ts 非单调、
-//      evidence 路径不存在、快照↔备份对账（有记录无备份 / 有备份无记录）、孤儿/超龄锁
+//      evidence 路径不存在、**行内写入不变式**（`recurrence` 恒 1 等，表在 schema.mjs）、
+//      快照↔备份对账（有记录无备份 / 有备份无记录）、孤儿/超龄锁
 //   ③ findings 分级：error（不可信，CLI exit 1）/ warn（可修复，默认放过，--strict 转 error）/ info
 //
 // 归属：core 模块。零依赖：只用 node:*。
@@ -14,6 +15,7 @@ import { join, resolve } from 'node:path';
 import { readLines } from './append.mjs';
 import { backupDir } from './backup.mjs';
 import { DEFAULT_STALE_MS, lockAgeMs } from './lock.mjs';
+import { LEDGER_ROW_WRITE_INVARIANTS } from './schema.mjs';
 
 const JSONL_FILES = ['ledger.jsonl', 'findings.jsonl', join('snapshots', 'index.jsonl')];
 
@@ -52,7 +54,7 @@ export function doctor(opts = {}) {
   const projectRoot = opts.projectRoot ?? process.cwd();
   const lockStaleMs = opts.lockStaleMs ?? DEFAULT_STALE_MS;
   const findings = [];
-  const summary = { files: {}, badLines: 0, truncatedTails: 0, entries: 0, locks: 0, backups: 0, nonPathEvidence: 0 };
+  const summary = { files: {}, badLines: 0, truncatedTails: 0, entries: 0, locks: 0, backups: 0, nonPathEvidence: 0, rowViolations: 0 };
   if (typeof landingDir !== 'string' || landingDir.trim() === '') {
     push(findings, 'error', 'DOCTOR_NO_LANDING', 'doctor 需要 landingDir');
     return { ok: false, findings, summary };
@@ -106,6 +108,14 @@ export function doctor(opts = {}) {
     }
     if (typeof entry.rule === 'string' && entry.rule.trim() === '') {
       push(findings, 'warn', 'DOCTOR_EMPTY_RULE', `ledger 第 ${index + 1} 行 rule 为空`, { index: index + 1 });
+    }
+    // 行内写入不变式（2026-09-19）：`recurrence` 这类"行内恒为常数、聚合靠派生"的字段，
+    // 一旦行内出现非常数，就说明有人把聚合写进了 append-only 行（LF-120 禁止的反面形态），
+    // 或写入方口径变了 —— 两者都让"引用该字段的数字"不可信，故必须报出来（判据表在 schema.mjs）。
+    for (const inv of LEDGER_ROW_WRITE_INVARIANTS) {
+      if (inv.equals(entry)) continue;
+      summary.rowViolations += 1;
+      push(findings, inv.level, `DOCTOR_${inv.code}`, `ledger 第 ${index + 1} 行违反行内不变式 ${inv.field} ${inv.expect}（实测 ${JSON.stringify(entry[inv.field])}）：${inv.why}`, { index: index + 1, field: inv.field, value: entry[inv.field], invariant: inv.code });
     }
     const evidence = Array.isArray(entry.evidence) ? entry.evidence : [];
     for (const ref of evidence) {
