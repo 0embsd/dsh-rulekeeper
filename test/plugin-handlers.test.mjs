@@ -15,7 +15,7 @@ import { join } from 'node:path';
 
 import { defaultHandlers } from '../src/handlers.mjs';
 import { sha256OfFile } from '../src/gate.mjs';
-import { PLUGIN_TOOLS, toolDefinition } from '../src/plugin.mjs';
+import { PLUGIN_EVENTS, PLUGIN_TOOLS, toolDefinition } from '../src/plugin.mjs';
 import { cleanupAll, tempDir } from './helpers/sandbox.mjs';
 
 test.after(cleanupAll);
@@ -153,8 +153,10 @@ test('集成: index.js 默认装载就注入 handlers（apply 注册出来的工
   const root = tempDir('ph-boot');
   const dshRoot = join(root, '.dsh');
   mkdirSync(join(dshRoot, 'lib'), { recursive: true });
-  // 宿主事件表的近似来源：宿主代码里出现的 'tools/*' 字面量（boot 自检据此判定）
-  writeFileSync(join(dshRoot, 'lib', 'host.js'), "ctx.on('tools/pre-execute'); ctx.on('tools/post-execute'); ctx.on('tools/result');\n", 'utf8');
+  // 宿主事件表的近似来源：宿主代码里出现的**事件名字面量**（boot 自检据此判定）。
+  // 2026-09-19 改：**从 PLUGIN_EVENTS 派生**——此前硬编码三个 tools/*，PLUGIN_EVENTS 新增
+  // `agent/pre-step` 后 boot 自检在夹具里误红（生产宿主确有该事件）。派生后不会再漂移。
+  writeFileSync(join(dshRoot, 'lib', 'host.js'), `${[...PLUGIN_EVENTS].map((e) => `ctx.on('${e}');`).join(' ')}\n`, 'utf8');
   const f = fixture('ph-boot-proj');
   const registered = [];
   const ctx = { effect: (fn) => fn(), tools: { register: (d) => { registered.push(d); } }, on: () => {} };

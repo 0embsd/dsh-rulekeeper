@@ -14,7 +14,10 @@ import { cleanupAll, tempDir } from './helpers/sandbox.mjs';
 test.after(cleanupAll);
 
 /** 迷你宿主安装面：把事件名写成 `'tools/xxx'` 字面量 */
-function fixtureHost(label, { events = ['tools/pre-execute', 'tools/post-execute', 'tools/result'] } = {}) {
+// 默认事件表**从 PLUGIN_EVENTS 派生**（2026-09-19 改）：此前硬编码三个 tools/*，
+// 导致 PLUGIN_EVENTS 新增 `agent/pre-step` 后 boot 自检在夹具里误红（生产宿主是有的）。
+// 单一口径 ⇒ 以后 PLUGIN_EVENTS 变了，夹具自动跟上；需要"故意缺事件"的用例仍可显式传 events。
+function fixtureHost(label, { events = [...PLUGIN_EVENTS] } = {}) {
   const root = tempDir(label);
   mkdirSync(join(root, 'lib'), { recursive: true });
   const js = ['// 迷你宿主', ...events.map((e) => `ctx.on('${e}', () => {})`), "ctx.on('other/event', () => {})"].join('\n');
@@ -162,7 +165,7 @@ test('红（自证缺陷）: 扫描面里"我们自己的包"不得被算作宿�
 test('绿（引号形态）: 双引号 / 反引号写出的事件名同样要被认到', () => {
   const root = tempDir('plugin-quotes');
   mkdirSync(root, { recursive: true });
-  writeFileSync(join(root, 'host.js'), 'const a = "tools/pre-execute"; const b = `tools/result`; const c = \'tools/post-execute\';\n', 'utf8');
+  writeFileSync(join(root, 'host.js'), `${[...PLUGIN_EVENTS].map((e, i) => `const q${i} = ${['"', '`', "'"][i % 3]}${e}${['"', '`', "'"][i % 3]};`).join(' ')}\n`, 'utf8');
   const { table } = eventTableFromHost(root);
   for (const e of PLUGIN_EVENTS) assert.equal(table.has(e), true, `${e} 必须被认到（引号形态不该影响判据）`);
 });

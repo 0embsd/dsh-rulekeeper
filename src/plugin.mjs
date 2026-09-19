@@ -14,6 +14,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeErrorSink, safeListener } from './isolation.mjs';
 import { deliveryCapability, registerDelivery } from './deliver.mjs';
+import { makePreStepHandler, preStepCapability } from './prestep.mjs';
 
 /** 本包根目录（`src/plugin.mjs` 上溯两级）——用于"宿主事件表扫描**排除自身**"（见 `eventTableFromHost`） */
 export const PKG_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -31,6 +32,10 @@ export const PLUGIN_EVENTS = Object.freeze([
   'tools/pre-execute',
   'tools/post-execute',
   'tools/result',
+  // P0-3b（2026-09-19）：`agent/pre-step` 全文通道。**必须**登记在这里而不是旁路再 `ctx.on` 一次——
+  // 本仓的两条不变量由用例钉死：①订阅集合必须**恰好等于** PLUGIN_EVENTS（plugin.test.mjs:116）
+  // ②每个订阅都必须过 `safeListener`（异常隔离 + 透传上游，plugin.test.mjs:120-135）。
+  'agent/pre-step',
 ]);
 
 /** 本插件向宿主注册的工具（名字必须带 TOOL_PREFIX） */
@@ -188,7 +193,11 @@ export function eventTableFromHost(dshRoot, { maxFiles = 20000, exclude = [] } =
         text = readFileSync(abs, 'utf8');
       } catch { continue; }
       // 三种引号都要认（2026-09-16 修）：宿主里事件名可能写成 'x' / "x" / `x`
-      for (const m of text.matchAll(/['"`]tools\/([a-z0-9-]+)['"`]/g)) table.add(`tools/${m[1]}`);
+      // 事件族白名单（2026-09-19 扩）：原先只认 `tools/*` ⇒ 新增 `agent/pre-step`（P0-3b 全文通道）
+      // 时 boot 自检**误红**（生产宿主里该事件确实存在：`dsh-agent/lib/types/runtime-types.d.ts:313`，
+      // 本机实测命中 28 处）。**故意不放开成任意 `x/y`**：那样路径字符串（如 'lib/types'）会被误当事件，
+      // 让这个安全门产生**假绿**——白名单仍要求"已知事件族 + 名字完全一致"。
+      for (const m of text.matchAll(/['"`]((?:tools|agent|session|skills|internal|approval)\/[a-z0-9-]+)['"`]/g)) table.add(m[1]);
     }
   };
   walk(dshRoot);
@@ -242,7 +251,7 @@ export function bootSelfCheck({ dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_
  *     故报告走 `opts.onReport` + 模块级 `lastApplyReport`，`apply` 返回 `undefined`。
  * 缺契约 → **fail-fast 抛错**（宁可启动失败，也不要"看起来装上了"）。
  */
-export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOOLS, maxFiles = 20000, exclude = [PKG_ROOT], handlers = {}, landingDir = null, appendLine = null, faultInjection = null, onReport = null, delivery = true, deliveryOptions = {} } = {}) {
+export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOOLS, maxFiles = 20000, exclude = [PKG_ROOT], handlers = {}, landingDir = null, appendLine = null, faultInjection = null, onReport = null, delivery = true, deliveryOptions = {}, prestep = true, prestepOptions = {} } = {}) {
   const injectedFault = faultInjection ?? (process.env.RULEKEEPER_FAULT ?? null);
   const faultInjectionMode = injectedFault === 'throw-listener' ? 'throw-listener' : null;
   if (ctx === null || typeof ctx !== 'object') throw new Error('rulekeeper 插件: ctx 非法');
@@ -265,6 +274,9 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
   // ── 事件监听（LF-450：四插件同场共存）──
   // 每个订阅都用 `safeListener`（LF-460 异常隔离）包一层：**我们抛错也不得打断别人的留痕**（fail-open）。
   // `faultInjection` 是**测试缝**：显式打开时让我们的监听器故意抛错，用来验证"第三方照常留痕"（默认关闭）。
+  // P0-3b：pre-step 处理函数（**不在这里订阅**——订阅统一走下面的循环，以满足
+  // "订阅集合 == PLUGIN_EVENTS" 与 "每个订阅都过 safeListener" 两条被用例钉死的不变量）。
+  const prestepBuilt = prestep === true ? makePreStepHandler({ landingDir, ...(prestepOptions ?? {}) }) : null;
   const subscribed = [];
   if (typeof ctx.on === 'function') {
     const sink = makeErrorSink({ landingDir, appendLine });
@@ -276,6 +288,8 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
           // Must participate in the waterfall: for tools/pre-execute the last arg is next();
           // returning undefined made the host read result.kind and blow up (tool layer broke, third-party rows 3 -> 0).
           const next = args[args.length - 1];
+          // P0-3b：`agent/pre-step` 走专用处理函数（仍由本 safeListener 包裹 ⇒ 异常隔离与透传不变量不变）
+          if (ev === 'agent/pre-step' && prestepBuilt !== null) return prestepBuilt.handler(args[0], next);
           return typeof next === 'function' ? await next() : undefined;
         },
         onError: async (...args) => {
@@ -309,12 +323,23 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
     }
   }
 
+  // ── P0-3b pre-step 全文通道（LF-A92，2026-09-19）────────────────────────────
+  // 分工：索引/摘要走 `systemPrompt.context()`（deliver.mjs）；**命中教训的全文**走这里，
+  // 只在"本轮消息与该条目相关"时才注入（`{kind:'enter', messages:[...原 messages, 我们的]}`）。
+  // 宿主签名与约束见 `dsh-agent/lib/types/runtime-types.d.ts:302-328`。同样 fail-open。
+  // 注意：**订阅已在上面的 PLUGIN_EVENTS 循环里完成**，这里只取报告（避免重复订阅）。
+  const prestepReg = prestepBuilt === null
+    ? { ok: false, reason: 'disabled' }
+    : prestepBuilt.report();
+
   const report = {
     ok: true, registered, boot, subscribed,
     listenerErrors: reportSink === null ? 0 : reportSink.records.length,
     errorSink: reportSink,
     delivery: deliveryReg,
     deliveryCapability: deliveryCapability(),
+    prestep: prestepReg,
+    prestepCapability: preStepCapability(),
   };
   // **`apply` 的返回值必须符合 cordis 的 effect 规则**（2026-09-15 真装载实测）：
   //   只接受 函数 / null·undefined / thenable / (async)iterable —— 返回**普通对象**会被判

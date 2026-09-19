@@ -148,9 +148,14 @@ export function registerDelivery(ctx, {
     try {
       const built = buildReminderText({ landingDir, now: now(), maxRules, maxChars });
       const step = nextDelivery({ runtime, built, now: now() });
+      // E3 推演实验抓出的缺陷（2026-09-19）：原先只记 `built.rules[0]`，而 `maxRules` 默认 3
+      // ⇒ 单次投递最多只记 1 条，命中账**系统性少记**（拿它做排序/淘汰时判别力天然偏低）。
+      // 现在把这一版**实际投递到的每一条**都记上；`evaluated` 只记一次（它是"提供者被求值"的计数）。
       if (built.rules.length > 0) {
         bumpUsage(landingDir, { rule: built.rules[0], event: 'evaluated', now: now() });
-        if (step.emitted) bumpUsage(landingDir, { rule: built.rules[0], event: 'emitted', now: now() });
+        if (step.emitted) {
+          for (const rule of built.rules) bumpUsage(landingDir, { rule, event: 'emitted', now: now() });
+        }
       }
       return step.text;
     } catch {
