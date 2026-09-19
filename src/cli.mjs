@@ -2416,6 +2416,11 @@ function runCliEffect(argv, io, env) {
       io.out(line(`RK_EFFECT_UNENFORCED=${plan.findings.filter((f) => f.code === 'EFFECT_BINDING_UNENFORCED').length}`));
       io.out(line(`RK_EFFECT_UNVERIFIED=${plan.findings.filter((f) => f.code === 'EFFECT_NOT_VERIFIED').length}`));
       io.out(line(`RK_EFFECT_RECURRED_AFTER=${plan.findings.filter((f) => f.code === 'EFFECT_RECURRED_AFTER_ACTIVATION').length}`));
+      // P0-2 新口径（2026-09-19）：**条目级**可判激活条件覆盖——比"类目是否绑定"可机械统计，
+      // 且直接指出缺的是原料（可判条件/指纹），而不是含糊地报"21/22 没绑定"。
+      const es = plan.entryStats ?? { entries: 0, withActivation: 0, withoutActivation: 0, coverage: 0 };
+      io.out(line(`RK_EFFECT_ENTRY_ACTIVATION=${es.withActivation}/${es.entries}`));
+      io.out(line(`RK_EFFECT_ENTRY_COVERAGE=${(es.coverage * 100).toFixed(2)}`));
       for (const f of plan.findings) io.out(line(`FINDING ${f.code} ${f.severity ?? 'warn'} ${f.rule ?? '-'} ${f.message}`));
     }
     io.out(resultLine('EFFECT', plan.ok === true));

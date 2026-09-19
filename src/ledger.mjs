@@ -75,6 +75,13 @@ export function normalizeEntry(input, opts = {}) {
       first_seen: ts,
       last_seen: ts,
       status: typeof input.status === 'string' && input.status.trim() !== '' ? input.status : 'active',
+      // P0-2（2026-09-19）：**可判激活条件**（可选字段，语义见 effect.mjs 的 activationOf()）。
+      // 为什么单独在这里展开：本函数用**显式字段表**造行 ⇒ 调用方传的 `activation` 原本会被
+      // **静默丢弃**（与 `buildInjection` 丢 `rule`、测试 helper 丢 `activation` 同源——一天内第三次
+      // 撞到"字段被白名单吃掉"，已记入教训）。空值不入库，保持既有行形状不变（append-only 兼容）。
+      ...(typeof input.activation === 'string' && input.activation.trim() !== ''
+        ? { activation: input.activation.trim() }
+        : {}),
     },
   };
 }

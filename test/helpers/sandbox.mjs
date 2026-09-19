@@ -62,12 +62,15 @@ export function freshLanding(label, { mode = 'observe', entries = [], rules = tr
   return { root, landing };
 }
 
-/** 一条合法账本行（字段取自 LF-120 冻结表） */
-export function ledgerEntry({ id, ts, rule, category = '纪律', problem = 'p', rootCause = 'r', solution = 's', mechanism = 'm', evidence = [] }) {
-  return {
+/** 一条合法账本行（字段取自 LF-120 冻结表；`activation` 是 P0-2 新增的**可选**字段） */
+export function ledgerEntry({ id, ts, rule, category = '纪律', problem = 'p', rootCause = 'r', solution = 's', mechanism = 'm', evidence = [], activation }) {
+  const row = {
     schema: 1, id, ts, rule, category, problem, root_cause: rootCause, solution,
     evidence, mechanism, recurrence: 1, first_seen: ts, last_seen: ts, status: 'active',
   };
+  // 可选字段：**仅在显式给出时写入**（既有用例的行形状保持不变——它们不传 activation）
+  if (activation !== undefined) row.activation = activation;
+  return row;
 }
 
 export function cleanupAll() {

@@ -37,7 +37,19 @@ test('schema：ledger 含方案 13 字段 + schema 版本字段（逐个一致�
   const ledger = FILES.find((f) => f.name === 'ledger.jsonl');
   const names = ledger.fields.map((f) => f.name);
   for (const field of LEDGER_PLAN_FIELDS) assert.ok(names.includes(field), `ledger 缺字段 ${field}`);
-  assert.equal(names.filter((n) => n !== 'schema').length, 13);
+  // 基线契约（计划 §3 的 13 字段）**不得增删**；新增只能走显式扩展位，且必须是可选字段。
+  // 2026-09-19：`activation`（P0-2 可判激活条件）即通过该机制加入 ⇒ 期望数 = 13 + 扩展数。
+  const ext = ledger.extensions ?? [];
+  assert.equal(
+    names.filter((n) => n !== 'schema').length,
+    13 + ext.length,
+    '字段数必须 = 计划 13 + 显式扩展数（不许悄悄加字段，也不许悄悄删基线字段）',
+  );
+  for (const e of ext) {
+    assert.ok(names.includes(e), `扩展字段 ${e} 未出现在 fields 表里`);
+    const f = ledger.fields.find((x) => x.name === e);
+    assert.equal(f.required, false, `扩展字段 ${e} 必须是可选（required:false）——加法不得破坏既有行形状`);
+  }
   assert.equal(SCHEMA_VERSION, 1);
 });
 

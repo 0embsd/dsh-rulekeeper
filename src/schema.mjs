@@ -48,6 +48,11 @@ export const FILES = Object.freeze([
       { name: 'first_seen', type: 'iso8601', required: true, mutable: true, note: '派生：同 rule 最早 ts' },
       { name: 'last_seen', type: 'iso8601', required: true, mutable: true, note: '派生：同 rule 最晚 ts' },
       { name: 'status', type: 'enum', required: true, mutable: true, values: ['active', 'superseded', 'archived'], note: '派生：按状态事件行 fold' },
+      // P0-2（2026-09-19）：**可判激活条件**（可选）。生效语义过去只挂类目层（`rule` 标签），
+      // 而类目只是分组标签 ⇒ TEXT_ONLY 21/22 是结构必然；现把"何时适用"挂到**条目**上，
+      // 体检报 RK_EFFECT_ENTRY_ACTIVATION / _COVERAGE（判据见 effect.mjs 的 activationOf()）。
+      // 可选：缺失/空白/占位符一律视为"没有条件"（不改旧行形状）。
+      { name: 'activation', type: 'string', required: false, note: '可判激活条件：一句话说明在什么**可观测**条件下这条纪律适用/该被想起/该被判红（须可机械判定；占位符不算）' },
     ],
     derived: [
       { field: 'recurrence', rule: 'scan:count-rows-with-same-rule', note: '禁原地更新' },
@@ -55,6 +60,10 @@ export const FILES = Object.freeze([
       { field: 'last_seen', rule: 'scan:max-ts-of-same-rule' },
       { field: 'status', rule: 'event:fold-status-events', note: '状态迁移写事件行，不覆写历史行' },
     ],
+    // **显式扩展位**（2026-09-19 引入）：计划 §3 的 13 字段是**基线契约**（不得改），
+    // 新增字段只能走这里登记，且**必须是可选**（required:false —— 加法不得破坏既有行形状）。
+    // 机检：checkSchema 会断言每个扩展字段在 fields 里存在且非必填（SCHEMA_EXTENSION_*）。
+    extensions: ['activation'],
     dedupeKey: ['rule', 'target', 'sha256'],
   },
   {
@@ -211,6 +220,19 @@ export function checkSchema(opts = {}) {
     for (const rule of file.derived ?? []) {
       if (!names.includes(rule.field)) add('SCHEMA_DERIVED_FIELD_UNKNOWN', `${label}: 派生规则指向不存在的字段 ${rule.field}`);
       if (typeof rule.rule !== 'string' || rule.rule === '') add('SCHEMA_DERIVED_RULE_EMPTY', `${label}.${rule.field}: 派生规则为空`);
+    }
+
+    // 显式扩展位（2026-09-19）：计划 §3 的基线字段集**不得增删**；新增字段只能登记在
+    // `extensions` 里，且必须可选（required:false）——加法不得破坏既有行形状。
+    for (const ext of file.extensions ?? []) {
+      if (!names.includes(ext)) {
+        add('SCHEMA_EXTENSION_UNKNOWN', `${label}: 扩展字段 "${ext}" 不在 fields 表里`);
+        continue;
+      }
+      const extField = file.fields.find((x) => x.name === ext);
+      if (extField.required === true) {
+        add('SCHEMA_EXTENSION_REQUIRED', `${label}.${ext}: 扩展字段必须可选（required:false）`);
+      }
     }
 
     for (const required of REQUIRED_PLAN_FIELDS[file.name] ?? []) {

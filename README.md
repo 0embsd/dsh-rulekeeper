@@ -135,6 +135,45 @@ rk-effect inject --landing <落点>                       # 把"只写下来了"
 - **`checks` 对象条目是闭集校验，且与门禁同源**：升级到本版后，形状不合规的绑定对象（未知字段、缺 `carrier`…）
   会让 `rk-gate write` 判红（fail-closed）。旧 `rules.json` 请先跑 `rk-rules check` 按提示改写。
 - **注入的去重/预算是"单次调用内"的**：`rk-effect inject` 不落盘计数 ⇒ 反复调用会重新产出提醒（id 每次都是新的）。
+  > 更正（2026-09-19，P0-3 落地）：**插件侧的投递通道自己维护跨轮状态**——见下节《提醒投递通道》。本行仍适用于 CLI 子命令本身。
+
+### 提醒投递通道（P0-3，2026-09-19）
+
+**为什么有这一节**：`effect.mjs` 早就会算"该提醒哪几条纪律"（`effectInjectPlan()`），但**没有投递口** ——
+提醒只落在落点里等人去读，体检的 `injected` 面永远是 0。宿主其实**早就**给插件开放了通道，我们此前误判为
+"没有"（还起草了一份要上游新开能力的请求，已作废）。
+
+- **通道**：宿主 `ctx.systemPrompt.context({ name, order, text })`（`@deepseek-ai/dsh-system-prompt`；
+  `name = rulekeeper/reminders`，`order = 900`）。宿主把返回文本物化为**持久 user-role 快照消息**，
+  且**文本相同不重复追加、变化才 append**（依据：`dsh-agent-loop/lib/index.js:890-893` / `:336-355`）。
+  我们 profile 的组合里默认已挂该服务（`dsh-base/cordis.patch.yml:465`、`dsh-web-app/cordis.patch.yml:16`）。
+- **三条硬约束**（缺一条就刷屏或静默失效，实现见 `src/deliver.mjs`）：
+  1. **文本必须稳定**（宿主按"文本变化"追加 ⇒ 文本里不放时间戳/每次都变的计数）；
+  2. **跨轮状态自持**（`injectPlan()` 的 `seenRules` 去重**只在单次调用内**有效——读源码确认）；
+  3. **变化最小间隔默认 30 分钟**（文本变化才可能被追加，故对"变化"本身设最小间隔防抖动）。
+- **绝不进 system prompt 正文**：动态内容一律走 logged channel（这也是宿主自身的约束）。
+- **服务缺失时如实返回原因**（`delivery.reason=no-systemPrompt-service`），**不静默假成功**；
+  注册失败 fail-open（绝不让插件树装载失败）。
+- **`agent/pre-step`（"命中教训全文随现场注入"）尚未接**——本版只做上面的索引/摘要通道。
+
+### 用量遥测 `usage.json`（P0-3 配套）
+
+- 落点：`<landing>/usage.json`。形状：`{schema, rules:{"<RULE>":{evaluated,emitted,lastAt}}, totalEmitted}`。
+- 语义：`evaluated` = 投递提供者被求值次数；`emitted` = 返回**新**文本次数。
+  **≠"模型一定看到了"**（宿主对相同文本有自己的去重，插件侧观测不到追加结果——如实登记，不臆断）。
+- 纪律：原子写（临时文件 + rename）；读失败/损坏 ⇒ 降级为空账（fail-open，度量失败绝不打断投递）。
+- **它不在 SCHEMA.md 的冻结 6 文件里**：`rk-schema` 的冻结单恰好 6 个数据文件（`SCHEMA_FILE_COUNT` 硬校验），
+  本文件属**运行态遥测**。⚠ **待决**：是否把它纳入冻结单（要走 §9.8 式契约变更）——当前按"运行态"处理并在此登记。
+
+### 生效面口径变更：从"类目层"到"条目层"（P0-2，2026-09-19）
+
+- **旧口径**问"这个**类目**有没有生效绑定"⇒ `TEXT_ONLY 21/22` 是**结构必然**（类目只是分组标签，不承担生效语义；
+  成熟实现把条件挂在**每一条**上）。
+- **新口径**问"**条目**有没有一条可判激活条件"：账本行新增可选字段 `activation`（见 SCHEMA.md），
+  体检新增两行读数：`RK_EFFECT_ENTRY_ACTIVATION=<带条件条目>/<总条目>` 与 `RK_EFFECT_ENTRY_COVERAGE=<百分比>`；
+  缺条件时产 `EFFECT_ENTRY_NO_ACTIVATION`（**severity=info**，不改 ok / exit code）。
+- **实测起点**：`RK_EFFECT_ENTRY_ACTIVATION=0/385` —— 385 条账本行里**0 条**带可判条件。
+  这正是"缺原料"（不是"缺工具"）：先补条件/反例/误报面，再谈自动捕获或生命周期治理。
 - **零信号只报 `EFFECT_STALE_NO_SIGNAL`（warn），不自动产退役提案**：提案四要件必须**由人显式给**，
   工具不替人编判据（"自动生成的是草稿不是规则"）。
   > 更正（同日稍后，LF-A55 落地）：**已实现自动退役提案**——`evolve --retire-days N` 会为零信号的已生效纪律

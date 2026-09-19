@@ -298,7 +298,36 @@ export function verificationsFromLanding(landingDir) {
   return out;
 }
 
-/** 账本按 canonical rule 聚合（复发计数 / 首末时间 / 条目） */
+/** 可判激活条件的占位符黑名单（trim 后等于这些值 ⇒ 视为**没有**条件，不许蒙混） */
+export const ACTIVATION_PLACEHOLDERS = Object.freeze(['todo', 'tbd', 'n/a', '待补', '待定', '待写', '无']);
+
+/**
+ * 条目的**可判激活条件**（P0-2，2026-09-19）。
+ *
+ * 语义：一句话说明"在什么**可观测**条件下这条纪律适用 / 该被想起 / 该被判红"，
+ * 措辞必须可机械判定（禁"注意""小心一点"这类不可判表述）。
+ *
+ * 为什么必须挂在**条目层**而不是类目层（06 Hermes 深读给出的结构性根因）：
+ *   类目（CAT-*）只是分组标签、不承担生效语义；成熟实现把 `conditions` 挂在**每一条**技能上
+ *   （`agent/skill_utils.py:635`、`agent/prompt_builder.py:1174-1192`）。我们把绑定做在类目层，
+ *   于是 `TEXT_ONLY 21/22` 是**结构必然**——不是执行不力。
+ * 为什么先做"可统计"这一步（E1 实验结论）：10 条真实教训里 **0 条**能对上现有"文件载体"模型、
+ *   **10 条**只能靠 `kind:"checker"`；而 634 条账本里仅 **6 条**带可判指纹 ⇒ 先把
+ *   "这条到底有没有一条可判条件"变成**可机械统计的事实**，才谈得上推进。
+ *
+ * @returns {string} trim 后的条件文本；空/非字符串/占位符 ⇒ `''`（= 没有可判激活条件）
+ */
+export function activationOf(row) {
+  if (row === null || typeof row !== 'object' || Array.isArray(row)) return '';
+  const raw = row.activation;
+  if (typeof raw !== 'string') return '';
+  const t = raw.trim();
+  if (t === '') return '';
+  if (ACTIVATION_PLACEHOLDERS.includes(t.toLowerCase())) return '';
+  return t;
+}
+
+/** 账本按 canonical rule 聚合（复发计数 / 首末时间 / 条目 / **带可判激活条件的条目数**） */
 export function ledgerGroups(landingDir) {
   const groups = new Map();
   const read = readLedger(landingDir);
@@ -308,8 +337,9 @@ export function ledgerGroups(landingDir) {
     if (row.category === EFFECT_EVENT_CATEGORY) continue; // 生效登记不是"又踩了一次"
     if (row.category === EFFECT_RETIRE_CATEGORY) continue; // 生效退役同理
     const rule = canonicalRule(row.rule);
-    const g = groups.get(rule) ?? { rule, count: 0, firstSeen: null, lastSeen: null, variants: new Set() };
+    const g = groups.get(rule) ?? { rule, count: 0, withActivation: 0, firstSeen: null, lastSeen: null, variants: new Set() };
     g.count += 1;
+    if (activationOf(row) !== '') g.withActivation += 1;
     g.variants.add(row.rule);
     const ts = typeof row.ts === 'string' ? row.ts : '';
     if (ts !== '') {
@@ -441,6 +471,9 @@ export function effectPlan(opts = {}) {
       rule,
       state,
       entries: g.count,
+      // P0-2：条目级"可判激活条件"覆盖（**新口径**：可机械统计；类目层绑定不是生效的充分条件）
+      entriesWithActivation: g.withActivation ?? 0,
+      activationCoverage: g.count > 0 ? Number(((g.withActivation ?? 0) / g.count).toFixed(4)) : 0,
       firstSeen: g.firstSeen,
       lastSeen: g.lastSeen,
       variants: [...g.variants].sort(),
@@ -460,7 +493,33 @@ export function effectPlan(opts = {}) {
 
   const counts = {};
   for (const s of EFFECT_STATES) counts[s] = items.filter((i) => i.state === s).length;
-  return { items, findings, counts, ok: findings.every((f) => f.severity !== 'error'), landed: loaded.rulesResult.missing !== true };
+
+  // ── P0-2：条目级可判激活条件的**体检口径**（2026-09-19）──────────────────────────
+  // 旧口径问"这个类目有没有生效绑定"；新口径问"**条目**有没有一条可判激活条件"。
+  // 为什么换：类目只是分组标签（06 深读的结构性根因），旧口径下 21/22 全空是必然，
+  // 看不出"到底缺什么"；新口径直接指出"缺的是原料（可判条件/指纹）"，且**可机械统计**。
+  // 严重性取 `info`：**不改 ok 与 exit code**（这是口径补充，不是新增阻断）。
+  const entryStats = {
+    entries: items.reduce((n, i) => n + i.entries, 0),
+    withActivation: items.reduce((n, i) => n + i.entriesWithActivation, 0),
+  };
+  entryStats.withoutActivation = entryStats.entries - entryStats.withActivation;
+  entryStats.coverage = entryStats.entries > 0
+    ? Number((entryStats.withActivation / entryStats.entries).toFixed(4))
+    : 0;
+  if (entryStats.entries > 0 && entryStats.withoutActivation > 0) {
+    findings.push({
+      code: 'EFFECT_ENTRY_NO_ACTIVATION',
+      severity: 'info',
+      message: `${entryStats.withoutActivation}/${entryStats.entries} 条纪律**没有可判激活条件**（账本行的 activation 字段为空或占位符）⇒ 它们无法被机械判定"何时适用"，绑定再写也是空转。先补原料（可判条件/反例/误报面）——口径说明见 SCHEMA.md 的 ledger.jsonl 与 effect.mjs 的 activationOf()`,
+    });
+  }
+
+  return {
+    items, findings, counts, entryStats,
+    ok: findings.every((f) => f.severity !== 'error'),
+    landed: loaded.rulesResult.missing !== true,
+  };
 }
 
 /**
