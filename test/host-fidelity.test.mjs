@@ -21,7 +21,7 @@ import { join } from 'node:path';
 import { apply, lastApplyReport, PLUGIN_EVENTS, probeService } from '../src/plugin.mjs';
 import { registerDelivery } from '../src/deliver.mjs';
 import { makeAnchoredApplyHandler } from '../src/handlers.mjs';
-import { createLandingResolver, registryCwd } from '../src/landing.mjs';
+import { createLandingResolver, readOptionalService, registryCwd } from '../src/landing.mjs';
 import { cleanupAll, tempDir } from './helpers/sandbox.mjs';
 
 test.after(cleanupAll);
@@ -91,8 +91,23 @@ test('判据: 其余读宿主服务的地方同样不能在"刻薄宿主"上抛'
   assert.doesNotThrow(() => createLandingResolver(h.ctx).describe());
 });
 
-test('判据: 诊断报告不得把"探服务"写成装载前置条件（inject 白名单必须保持最小）', async () => {
+test('判据: inject 只放"核心功能的硬依赖"，且必须包含 systemPrompt（2026-09-20 真根因）', async () => {
   const entry = (await import('../index.js')).default;
-  // `inject` 一旦加上 systemPrompt/agents/userQuestions，就变成"缺服务即不装载" ⇒ 与"只观察"相反。
-  assert.deepEqual(entry.inject, ['tools'], 'inject 只放真正必需的宿主能力；诊断用服务必须靠 probeService 观察');
+  // ① `systemPrompt` 必须在 inject 里 —— 线上 boot 记录**五条全是** `systemPrompt:false`，
+  //    投递从注册那一步就失败（`no-systemPrompt-service`）⇒ 两条自动通道**一条提醒都没发**。
+  //    声明它之后 cordis 会"等到服务就绪再跑 apply"（缺服务时是**等待**，不是崩；实测提供后自动补跑）。
+  assert.ok(entry.inject.includes('systemPrompt'), 'inject 必须声明 systemPrompt（提醒投递的载体）');
+  assert.ok(entry.inject.includes('tools'), 'inject 必须声明 tools（工具注册的载体）');
+  // ② 可选能力**不得**写进 inject：写进去 = 缺服务就不装载（把"可选"变成"硬前置"）
+  for (const optional of ['agents', 'userQuestions', 'sessionProjections']) {
+    assert.equal(entry.inject.includes(optional), false, `${optional} 属可选能力，必须走 readOptionalService 而不是 inject`);
+  }
+  // ③ 可选服务的读法必须"无 inject 要求"（reflect.get 优先）—— 否则功能静默失效
+  const viaReflect = readOptionalService({ reflect: { get: (n) => (n === 'userQuestions' ? { ask: () => {} } : undefined) } }, 'userQuestions');
+  assert.equal(typeof viaReflect?.ask, 'function', 'reflect.get 能读到就必须读到');
+  const throwing = new Proxy({}, {
+    get() { throw new Error('cannot get property "agents" without inject'); },
+    has: () => true,
+  });
+  assert.equal(readOptionalService(throwing, 'agents'), null, '未 inject 且无 reflect ⇒ null（不抛）');
 });

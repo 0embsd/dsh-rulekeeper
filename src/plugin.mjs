@@ -30,8 +30,15 @@ export const PKG_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
  * 在 `apply()` 里抛 = 插件树装载失败 = 整个 profile 起不来（DSH 会退回 web-safe）——
  * 这正是 2026-09-20 的真实事故：**为了"让失败可见"而加的诊断，本身把插件搞挂了**。
  *
- * 为什么不干脆加进 `inject`：`inject` 是**装载前置条件**（缺服务就不装载），把诊断用的服务写进去
- * 等于让"能装上"依赖它们 —— 诊断应当**只观察、不改变**装载可行性。
+ * 为什么不干脆全加进 `inject`：`inject` 是**装载前置条件**（缺服务就等/不装载）。核心功能需要的
+ *   `systemPrompt` 已按设计写进 `index.js` 的 `inject`；其余（`agents`/`userQuestions`）属**可选能力**，
+ *   用 `reflect.get` 观察即可 —— 诊断与探测**只观察、不改变**装载可行性。
+ *
+ * 读法顺序（2026-09-20 晚补，**用真 cordis 实测过**）：
+ *   ① `ctx.reflect.get(name)` —— **无 inject 要求**地从 store 读（祖先 fiber 提供的服务也能读到，
+ *      实测返回 same-instance）⇒ 这才是"只观察"的正解。
+ *   ② 退一步直接读（包 try）—— 兼容没有 `reflect` 的极简 ctx / 夹具。
+ * 绝不抛。
  *
  * @param {object} ctx 宿主插件上下文
  * @param {string} name 服务名
@@ -39,12 +46,15 @@ export const PKG_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
  * @returns {boolean} 服务可用才 true；缺失/未声明/形态不符/抛错 ⇒ false（**永不抛**）
  */
 export function probeService(ctx, name, method = null) {
+  if (ctx === null || typeof ctx !== 'object') return false;
+  const usable = (svc) => svc !== null && typeof svc === 'object' && (method === null || typeof svc[method] === 'function');
   try {
-    if (ctx === null || typeof ctx !== 'object') return false;
-    const svc = ctx[name];                       // ← 未声明 inject 时**这一行会抛**，故必须包在 try 里
-    if (svc === null || typeof svc !== 'object') return false;
-    if (method !== null && typeof svc[method] !== 'function') return false;
-    return true;
+    if (ctx.reflect !== null && typeof ctx.reflect === 'object' && typeof ctx.reflect.get === 'function') {
+      if (usable(ctx.reflect.get(name))) return true;   // ① 无 inject 要求
+    }
+  } catch { /* 落到下一档 */ }
+  try {
+    return usable(ctx[name]);                            // ② 未 inject 时会抛 ⇒ 吞掉当"不可用"
   } catch {
     return false;
   }

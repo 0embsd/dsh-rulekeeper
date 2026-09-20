@@ -55,7 +55,7 @@ test('green: patch 文件点名本包（否则 insert 了别的名字 = 静默�
 
 test('green: 入口是宿主约定形态（default {name, inject, apply}）', () => {
   assert.equal(entry.name, manifest.name);
-  assert.deepEqual(entry.inject, ['tools']);
+  assert.deepEqual(entry.inject, ['tools', 'systemPrompt']);   // 2026-09-20：+systemPrompt（提醒投递的载体，不声明就读不到）
   assert.equal(typeof entry.apply, 'function');
   assert.equal(typeof resolveDshRoot(), 'string');
 });

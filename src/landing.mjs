@@ -27,11 +27,36 @@ export function agentCwd(agent) {
   return typeof cwd === 'string' && cwd.trim() !== '' ? cwd : null;
 }
 
+/**
+ * **无 inject 要求**地读一个可选宿主服务（2026-09-20 晚补，用真 cordis 实测过）。
+ *
+ * 为什么需要它：`agents` / `userQuestions` 属**可选能力**，不该写进 `inject`（写进去 = 缺服务就不装载）；
+ *   但直接读未声明的服务会**抛** `cannot get property "X" without inject` ⇒ 功能静默失效。
+ *   正解是 `ctx.reflect.get(name)`：文档逐字"Read a service from the store **without the inject requirement**"，
+ *   实测能读到祖先 fiber 提供的服务（same-instance）。
+ * @returns {object|null} 服务对象；没有/形态不符/任何异常 ⇒ null（**永不抛**）
+ */
+export function readOptionalService(ctx, name) {
+  if (ctx === null || typeof ctx !== 'object') return null;
+  try {
+    if (ctx.reflect !== null && typeof ctx.reflect === 'object' && typeof ctx.reflect.get === 'function') {
+      const svc = ctx.reflect.get(name);            // ① 无 inject 要求
+      if (svc !== null && typeof svc === 'object') return svc;
+    }
+  } catch { /* 落到下一档 */ }
+  try {
+    const svc = ctx[name];                          // ② 已 inject 或夹具（普通对象）
+    return svc !== null && typeof svc === 'object' ? svc : null;
+  } catch {
+    return null;
+  }
+}
+
 /** `ctx.agents` 注册表里的根 agent cwd（服务形态不符时**当作取不到**，绝不抛） */
 export function registryCwd(ctx) {
   try {
-    const agents = ctx === null || typeof ctx !== 'object' ? null : ctx.agents;
-    if (agents === null || typeof agents !== 'object') return null;
+    const agents = readOptionalService(ctx, 'agents');
+    if (agents === null) return null;
     const list = typeof agents.roots === 'function' ? agents.roots()
       : (typeof agents.list === 'function' ? agents.list() : null);
     if (!Array.isArray(list)) return null;

@@ -23,6 +23,7 @@ import { applyActivation, effectPlan } from './effect.mjs';
 import { buildApprovalQuestion, makeAnchoredApproval, parseApprovalAnswer } from './approval.mjs';
 import { record as ledgerRecord } from './ledger.mjs';
 import { isSafeId } from './proposal.mjs';
+import { readOptionalService } from './landing.mjs';
 import { resolveProjectLanding, toPosix } from './platform/paths.mjs';
 import { canonicalRule } from './ruleid.mjs';
 import { takeSnapshot } from './snap.mjs';
@@ -229,13 +230,9 @@ export function makeAnchoredApplyHandler({ ctx, cwd = process.cwd(), now = () =>
       : `kind=${binding.kind} carrier=${binding.carrier ?? '-'} patterns=${(planned.additions?.patterns ?? []).join(',') || '(none)'}`;
 
     // ② 问真人（唯一入口）。服务缺失 / 无根 agent / 抛错（含 DELEGATED_CALLER）⇒ 一律不写
-    // **读服务必须包 try**（2026-09-20 事故同族）：cordis 对未在 inject 里声明的服务，读属性会直接抛。
-    let svc = null;
-    try {
-      svc = ctx !== null && typeof ctx === 'object' ? ctx.userQuestions : null;
-    } catch {
-      svc = null;
-    }
+    // 读法：**无 inject 要求**（`readOptionalService` 优先走 `ctx.reflect.get`）—— `userQuestions` 是可选的，
+    // 不该写进 inject（写进去 = 缺服务就不装载）；但直接读未声明服务会抛，故必须走这条安全读。
+    const svc = readOptionalService(ctx, 'userQuestions');
     const ask = typeof askFn === 'function' ? askFn : (svc !== null && typeof svc === 'object' && typeof svc.ask === 'function' ? svc.ask.bind(svc) : null);
     if (ask === null) {
       return { ok: false, decision: 'no-answerer', reason: '宿主没有 userQuestions 服务 ⇒ 拿不到真人应答，拒绝落盘（绝不退回 --by human 声明）', proposalId };
@@ -282,11 +279,12 @@ export function makeAnchoredApplyHandler({ ctx, cwd = process.cwd(), now = () =>
   };
 }
 
-/** 取注册表里第一个活着的根 agent（`ask()` 要求"恰好那个活着的实例"，故必须从注册表取，不能自造） */
+/** 取注册表里第一个活着的根 agent（`ask()` 要求"恰好那个活着的实例"，故必须从注册表取，不能自造）
+ *  读法同样走"无 inject 要求"的安全读（`agents` 是可选能力，不写进 inject）。 */
 function firstRootAgent(ctx) {
   try {
-    const agents = ctx !== null && typeof ctx === 'object' ? ctx.agents : null;
-    if (agents === null || typeof agents !== 'object') return null;
+    const agents = readOptionalService(ctx, 'agents');
+    if (agents === null) return null;
     const list = typeof agents.roots === 'function' ? agents.roots() : null;
     if (!Array.isArray(list) || list.length === 0) return null;
     const first = list[0];

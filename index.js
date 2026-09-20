@@ -28,7 +28,17 @@ export function resolveDshRoot(env = process.env) {
 
 export default {
   name: 'dsh-rulekeeper',
-  inject: ['tools'],
+  // **为什么 inject 里必须有 `systemPrompt`（2026-09-20 定位到的真根因）**：
+  //   提醒投递走宿主 `ctx.systemPrompt.context()`。cordis 的 ctx **只允许读在 `inject` 里声明过的服务**：
+  //   声明了 ⇒ 它会**等到服务就绪再跑 apply**（缺服务时是"等待"不是崩；实测提供后会自动补跑）；
+  //   不声明 ⇒ apply 期读到的是抛错（被我们的 probeService 吞成 false）。
+  //   线上实测（`<DSH_HOME>/rulekeeper-boot.jsonl` 的 boot 记录）每条都是 `systemPrompt:false`
+  //   ⇒ `delivery.ok=false / no-systemPrompt-service` ⇒ **两条自动通道从头到尾就没注册过**（一条提醒都没发）。
+  //   ⇒ "通道是哑的"根因不是别处，就是这里少声明了一个服务。
+  // 只有 `tools` 与 `systemPrompt` 是**核心功能**的硬依赖；`agents`/`userQuestions` 走运行时可选读
+  //   （见 plugin.mjs 的 probeService 与 handlers.mjs 的 readOptionalService），
+  //   避免把"可选能力"变成"缺了就不装载"。
+  inject: ['tools', 'systemPrompt'],
   apply(ctx) {
     // **不返回报告对象**：cordis 只接受 函数/null·undefined/thenable/iterable 作为 effect 结果，
     // 返回普通对象会被判 `TypeError: Invalid effect`（2026-09-15 真装载实测）。
