@@ -119,6 +119,7 @@ export function registerDelivery(ctx, {
   landingDir = null,
   resolveLanding = null,
   onDelivery = null,
+  shouldStaySilent = null,
   order = DEFAULT_ORDER,
   maxRules = DEFAULT_MAX_RULES,
   maxChars = DEFAULT_MAX_CHARS,
@@ -175,6 +176,13 @@ export function registerDelivery(ctx, {
 
   const provider = () => {
     try {
+      // **让路**（方案"乙"）：所有会话都已按自己的作用域注册提醒位时，根通道不再出话，
+      // 避免同一份提醒投两遍。判定是**每次求值时现算**（会话会来来去去）。
+      if (typeof shouldStaySilent === 'function') {
+        try {
+          if (shouldStaySilent() === true) return '';
+        } catch { /* 判定失败 ⇒ 照常投递（宁可重复也不静默） */ }
+      }
       const picked = pickLanding();
       runtime.lastLanding = picked;
       const built = buildReminderText({ landingDir: picked.dir, now: now(), maxRules, maxChars });

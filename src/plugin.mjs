@@ -15,7 +15,8 @@ import { fileURLToPath } from 'node:url';
 import { makeAnchoredApplyHandler } from './handlers.mjs';
 import { appendDiag, bootDiagRecord } from './diag.mjs';
 import { makeErrorSink, safeListener } from './isolation.mjs';
-import { landingCapability, createLandingResolver } from './landing.mjs';
+import { landingCapability, createLandingResolver, liveCwds } from './landing.mjs';
+import { registerAgentScopedDelivery } from './scoped.mjs';
 import { deliveryCapability, registerDelivery } from './deliver.mjs';
 import { makePreStepHandler, preStepCapability } from './prestep.mjs';
 
@@ -334,6 +335,41 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
   // 现在集中到 `createLandingResolver`：静态 > 现场 agent cwd > 进程内最近 cwd > ctx.agents 根代理人 > 用户级兜底。
   const landing = createLandingResolver(ctx, { staticLanding: landingDir });
 
+  // ── 方案"乙"：**按会话**注册提醒位（2026-09-20 根治 last-writer-wins）────────────────
+  // 根通道（`systemPrompt.context` 是进程级一份）拿不到 agent ⇒ 只能猜是哪个项目。
+  // 现在每见到一个新会话，就在**它自己的 `agent.ctx`** 里注册一份：provider 用**该会话自己的 cwd**
+  // 解析落点（不必猜），跨轮状态（去重/最小间隔）也随之按会话分开。
+  // 幂等：`scopedAgents` 记账，同一会话只注册一次；注册失败**不抛**、如实记账 —— 此时根通道继续兜底。
+  const scopedAgents = new Map();
+  const scopedReport = () => {
+    const rows = [...scopedAgents.values()];
+    return {
+      registered: rows.filter((r) => r.ok === true).length,
+      failed: rows.filter((r) => r.ok !== true).map((r) => ({ agent: r.agent, reason: r.reason })),
+      mode: rows.length === 0 ? 'root-only' : (rows.every((r) => r.ok === true) ? 'per-agent' : 'mixed'),
+    };
+  };
+  /** 该会话是否已成功注册过自己的提醒位（根通道据此**让路**，避免同一份提醒投两遍） */
+  const scopedFor = (agent) => scopedAgents.get(agent)?.ok === true;
+  const ensureScoped = (agent) => {
+    if (agent === null || typeof agent !== 'object' || scopedAgents.has(agent)) return;
+    let out;
+    try {
+      out = registerAgentScopedDelivery({
+        agent,
+        env: process.env,
+        onDelivery: (info) => appendDiag(dshRoot, {
+          kind: 'delivery', scope: info.scope, agent: info.agent, landing: info.landing,
+          rules: info.built?.rules ?? [], chars: info.built?.chars ?? 0,
+          emitted: info.step?.emitted === true, reason: info.reason ?? null,
+        }),
+      });
+    } catch (err) {
+      out = { ok: false, reason: `register-error:${String(err?.message ?? err)}`, name: null };
+    }
+    scopedAgents.set(agent, { ok: out.ok === true, reason: out.reason ?? null, agent: out.name ?? null });
+  };
+
   // ── 事件监听（LF-450：四插件同场共存）──
   // 每个订阅都用 `safeListener`（LF-460 异常隔离）包一层：**我们抛错也不得打断别人的留痕**（fail-open）。
   // `faultInjection` 是**测试缝**：显式打开时让我们的监听器故意抛错，用来验证"第三方照常留痕"（默认关闭）。
@@ -358,6 +394,8 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
             // 记下"这一轮是哪个会话"：`systemPrompt.context()` 的 provider 拿不到 agent，
             // 靠这里记的 cwd 才能解析出落点（landing.mjs 的第③顺位）。
             landing.noteAgent(args[0] && args[0].agent);
+            // 方案"乙"：为**这个会话**注册它自己作用域里的提醒位（幂等；失败只记账，不抛）
+            ensureScoped(args[0] && args[0].agent);
             if (prestepBuilt !== null) return prestepBuilt.handler(args[0], next);
           }
           return typeof next === 'function' ? await next() : undefined;
@@ -387,7 +425,17 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
     try {
       const r = registerDelivery(ctx, {
         resolveLanding: () => landing.describe(),
-        onDelivery: (info) => appendDiag(dshRoot, { kind: 'delivery', landing: info.landing, rules: info.built?.rules ?? [], chars: info.built?.chars ?? 0, emitted: info.step?.emitted === true, reason: info.reason ?? null }),
+        // **根通道让路**（方案"乙"）：若**所有**活着的根会话都已成功注册自己的作用域提醒位，
+        // 根通道就不再出话（否则同一份提醒会被投两遍 —— 两次注册是两份不同 name 的 context）。
+        // 只要有**任何一个会话**没注册成功（宿主没给 agent.ctx / 作用域里读不到 systemPrompt），
+        // 根通道就继续兜底（配合"甲"的多项目规则，多项目时只投用户级落点，绝不张冠李戴）。
+        shouldStaySilent: () => {
+          const live = liveCwds(ctx).size;                 // 有几个会话带着目录在跑
+          if (live === 0) return false;                    // 还没有会话 ⇒ 根通道负责（进程 cwd 那一档）
+          const stuck = [...ctx.agents?.roots?.() ?? []].filter((a) => !scopedFor(a));
+          return stuck.length === 0;                        // 全部已按会话注册 ⇒ 让路
+        },
+        onDelivery: (info) => appendDiag(dshRoot, { kind: 'delivery', scope: 'root', landing: info.landing, rules: info.built?.rules ?? [], chars: info.built?.chars ?? 0, emitted: info.step?.emitted === true, reason: info.reason ?? null }),
         ...(deliveryOptions ?? {}),
       });
       deliveryReg = r.ok === true ? r.report() : { ok: false, reason: r.reason, name: r.name };
@@ -425,6 +473,8 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
       userQuestions: probeService(ctx, 'userQuestions', 'ask'),
     },
   };
+  // 方案"乙"的状态必须是**实时读数**（会话是装载之后才来的；写成快照就会永远显示 0）。
+  Object.defineProperty(report, 'scoped', { enumerable: true, get: () => scopedReport() });
   // ── 落盘诊断（2026-09-20）────────────────────────────────────────────────
   // 来历：用户重启后两条自动通道一条提醒都没发（全盘无 usage.json），而同一份代码在测试里
   //   对任何合理 cwd 都能解析出落点 ⇒ "为什么没发"从**进程外面查不出来**（报告只活在内存里）。

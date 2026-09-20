@@ -257,6 +257,35 @@ rk-effect inject --landing <落点>                       # 把"只写下来了"
   能改落点文件的人仍能把字段抄进去。防伪造落在流程层：唯一会问真人的提供者是 `rulekeeper_apply`，
   且问不通就不写；要更硬须引入外部签名密钥（未做，如实登记）。
 
+### 提醒落点的**多会话**问题：止血（甲）+ 根治（乙）（2026-09-20）
+
+**问题**：`systemPrompt.context()` 以前只注册**一份**（根上下文）——整个宿主进程共享。它的 provider
+**拿不到 agent**，只能靠"最后一次 `agent/pre-step` 记下的目录"猜是哪场会话 ⇒ 同时开着两个不同项目的
+会话时 **last-writer-wins**，提醒会**串到另一个项目的落点**（张冠李戴）。
+
+**甲（止血，`929d03a`）**：只在**拿不到 agent 的那条通道**上生效 ——
+新增 `landing.liveCwds(ctx)`（从 `ctx.agents` 取全部会话目录、去重）；当**两处以上不同目录在线**时
+**只投用户级落点**（`source=user-multi-project`；用户级纪律与项目无关，绝不会张冠李戴）；
+没有用户级落点 ⇒ 返回空（`multi-project-no-user-landing`，**宁可不说也不说错话**）。
+单会话 / 同项目多会话行为不变；`agent/pre-step` 全文通道**不受影响**（它拿得到真实会话，本来就精确）。
+
+**乙（根治，本轮）**：把提醒位注册进**每个会话自己的作用域**（`agent.ctx`，宿主文档逐字：
+"Agent-scoped context; its contributions are agent-local, unwind on disposal, and reject registration
+afterward."）⇒ provider 用**该会话自己的 cwd**解析落点，不再需要猜；跨轮状态（去重 / 最小间隔）
+与遥测也随之**按会话分开**。实现见 `src/scoped.mjs`：
+- 每个会话一个唯一注册名 `rulekeeper/reminders#<会话id>`（同作用域重名会抛）；
+- 落点来源 `agent-project` / `agent-user-fallback`（沿用"项目优先、用户级兜底"口径）；
+- 拿不到 `agent.ctx` 或作用域里读不到 `systemPrompt` ⇒ 如实 `{ok:false}`（**不抛**），
+  此时**根通道继续兜底**（甲的多项目规则仍然生效）——"乙不成立也不能变哑"；
+- **根通道让路**：当**所有**活着的会话都已按作用域注册成功时，根通道的 provider 返回空串，
+  避免同一份提醒被投两遍（两次注册是两份不同 name 的 context）；判定每次求值现算，判定函数抛错时
+  照常投递（**宁可重复也不静默**）。
+- 报告里 `scoped` 是**实时读数**（getter）：`{registered, failed:[{agent,reason}], mode: root-only|per-agent|mixed}`。
+
+**真 cordis 实测（乙）**：两个真实作用域（模拟两个会话、两个项目）⇒ 注册名不同、
+各自的 provider **只投自己项目的纪律**（`CAT-AAA` 里没有 `CAT-BBB`，反之亦然）、
+各自落点的 `usage.json` 各记 1 条 emitted、rc=0。
+
 ### 生效面口径变更：从"类目层"到"条目层"（P0-2，2026-09-19）
 
 - **旧口径**问"这个**类目**有没有生效绑定"⇒ `TEXT_ONLY 21/22` 是**结构必然**（类目只是分组标签，不承担生效语义；
