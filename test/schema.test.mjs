@@ -22,11 +22,11 @@ test('schema：真实冻结单通过自检（含 SCHEMA.md 与代码一致）', 
   assert.equal(report.ok, true);
 });
 
-test('schema：冻结 6 个文件，且每个文件都有版本字段', () => {
-  assert.equal(FILES.length, 6);
+test('schema：冻结 7 个文件（2026-09-19 契约变更 +activations.jsonl），且每个文件都有版本字段', () => {
+  assert.equal(FILES.length, 7);
   assert.deepEqual(
     FILES.map((f) => f.name).sort(),
-    ['config.json', 'findings.jsonl', 'ledger.jsonl', 'proposals/<id>.json', 'rules.json', 'snapshots/index.jsonl'],
+    ['activations.jsonl', 'config.json', 'findings.jsonl', 'ledger.jsonl', 'proposals/<id>.json', 'rules.json', 'snapshots/index.jsonl'],
   );
   for (const file of FILES) {
     assert.ok(file.fields.some((f) => f.name === file.versionField), `${file.name} 缺版本字段 ${file.versionField}`);

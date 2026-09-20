@@ -5,7 +5,7 @@
 
 ## 0. 冻结范围
 
-共 6 个数据文件，每个文件都有版本字段；可变聚合字段**一律派生**（禁原地更新）。
+共 7 个数据文件，每个文件都有版本字段；可变聚合字段**一律派生**（禁原地更新）。
 
 ## 1. 逐文件字段表
 
@@ -75,6 +75,20 @@
 | `target` | string | 是 |  |  |  |
 | `evidence` | array | 是 |  |  |  |
 | `action` | enum (observe\|deny\|warn) | 是 |  |  |  |
+
+### `activations.jsonl`
+
+- 形态：**append-only**｜版本字段：`schema`｜用途：条目级注解流：`id` 指向账本行，携带"可判激活条件"；账本保持 append-only 不被改写
+
+| 字段 | 类型 | 必填 | 唯一 | 可变 | 说明 |
+|---|---|---|---|---|---|
+| `schema` | number | 是 |  |  |  |
+| `ts` | iso8601 | 是 |  |  |  |
+| `id` | string | 是 |  |  | 指向 ledger.jsonl 的 id（孤儿注解由 doctor 报 DOCTOR_ANNOTATION_ORPHAN） |
+| `activation` | string | 是 |  |  | 可判激活条件；必须含可观测锚点（路径/通配符/命令/错误串），判据见 annotations.validateActivation() |
+| `by` | enum (machine\|human) | 是 |  |  | **声明**不是签名（规则 43） |
+| `confidence` | string | 否 |  |  | 起草置信度（machine 起草时给出，供人优先复核低置信项） |
+| `evidence` | array | 是 |  |  |  |
 
 ### `config.json`
 

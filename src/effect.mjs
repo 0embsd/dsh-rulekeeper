@@ -26,6 +26,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import { appendLine, readLines } from './append.mjs';
+import { activationsById, mergeActivation } from './annotations.mjs';
 import { backupFile } from './backup.mjs';
 import { CHECK_KINDS } from './checks.mjs';
 import { CLOSE_KNOWN_GATES, effectiveProtection, readGateLedger, reconWrite } from './gate.mjs';
@@ -327,10 +328,16 @@ export function activationOf(row) {
   return t;
 }
 
-/** 账本按 canonical rule 聚合（复发计数 / 首末时间 / 条目 / **带可判激活条件的条目数**） */
+/** 账本按 canonical rule 聚合（复发计数 / 首末时间 / 条目 / **带可判激活条件的条目数**）
+ *
+ * 2026-09-19 契约变更：条件是**合并视图**（行内 `activation` 优先；为空则取 `activations.jsonl`
+ * 注解层）。原因：账本 append-only 不可原地改写，而 385 条既有教训一开始全都没有条件 ——
+ * 补条件只能走注解层（`annotations.mjs`），否则就是"改行=违宪"或"复制新行=制造重复"。
+ */
 export function ledgerGroups(landingDir) {
   const groups = new Map();
   const read = readLedger(landingDir);
+  const byId = activationsById(landingDir);
   for (const row of read.values) {
     if (row === null || typeof row !== 'object' || Array.isArray(row)) continue;
     if (typeof row.rule !== 'string' || row.rule.trim() === '') continue;
@@ -339,7 +346,7 @@ export function ledgerGroups(landingDir) {
     const rule = canonicalRule(row.rule);
     const g = groups.get(rule) ?? { rule, count: 0, withActivation: 0, firstSeen: null, lastSeen: null, variants: new Set() };
     g.count += 1;
-    if (activationOf(row) !== '') g.withActivation += 1;
+    if (activationOf(mergeActivation(row, byId)) !== '') g.withActivation += 1;
     g.variants.add(row.rule);
     const ts = typeof row.ts === 'string' ? row.ts : '';
     if (ts !== '') {

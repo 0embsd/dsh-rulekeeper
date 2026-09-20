@@ -28,7 +28,7 @@ import { SCHEMA_VERSION } from './schema.mjs';
 export const SNAPSHOT_INDEX = 'snapshots/index.jsonl';
 /** 落点内**自产物**（相对落点的前缀）：一律不进基线（进一次就自污染一次） */
 export const SELF_ARTIFACT_PREFIXES = Object.freeze([
-  'ledger.jsonl', 'findings.jsonl', 'config.json', 'rules.json',
+  'ledger.jsonl', 'findings.jsonl', 'activations.jsonl', 'config.json', 'rules.json',
   'snapshots/', 'logs/', 'backups/', 'proposals/',
 ]);
 /** 单次基线最多处理的受保护文件数（防"glob 写太宽 -> 把整个仓库备一遍"） */

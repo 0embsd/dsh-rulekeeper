@@ -12,12 +12,13 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
+import { validateActivation } from './annotations.mjs';
 import { readLines } from './append.mjs';
 import { backupDir } from './backup.mjs';
 import { DEFAULT_STALE_MS, lockAgeMs } from './lock.mjs';
 import { LEDGER_ROW_WRITE_INVARIANTS } from './schema.mjs';
 
-const JSONL_FILES = ['ledger.jsonl', 'findings.jsonl', join('snapshots', 'index.jsonl')];
+const JSONL_FILES = ['ledger.jsonl', 'findings.jsonl', 'activations.jsonl', join('snapshots', 'index.jsonl')];
 
 /**
  * 判断一个 evidence 字符串是否"形如**文件路径**"（只有这类才该做存在性检查）。
@@ -131,6 +132,39 @@ export function doctor(opts = {}) {
         push(findings, 'warn', 'DOCTOR_EVIDENCE_MISSING', `ledger 第 ${index + 1} 行 evidence 路径不存在: ${ref}`, { index: index + 1, ref });
       }
     }
+  }
+
+  // ── ②b 注解层对账（activations.jsonl ↔ ledger.jsonl，2026-09-19 契约变更的配套检查）──────
+  // 注解按 `id` 指向账本行；id 打错/账本被改写 ⇒ 注解就**永远不生效**（覆盖率读数却看不出来，
+  // 因为它只数"有 activation 的行"）。这里把"孤儿注解"与"同一个 id 被注解多次"如实报出来。
+  const annotationRead = readLines(join(landingDir, 'activations.jsonl'));
+  const ledgerIds = new Set(ledger.values.filter((r) => r !== null && typeof r === 'object').map((r) => r.id).filter((v) => typeof v === 'string'));
+  let annotationRows = 0;
+  for (const [index, ann] of annotationRead.values.entries()) {
+    if (ann === null || typeof ann !== 'object') continue;
+    annotationRows += 1;
+    const id = typeof ann.id === 'string' ? ann.id.trim() : '';
+    if (id === '') {
+      push(findings, 'warn', 'DOCTOR_ANNOTATION_NO_ID', `activations 第 ${index + 1} 行缺 id（指向账本行）`, { index: index + 1 });
+      continue;
+    }
+    if (!ledgerIds.has(id)) {
+      push(findings, 'warn', 'DOCTOR_ANNOTATION_ORPHAN', `activations 第 ${index + 1} 行指向不存在的账本 id: ${id}（注解永不生效）`, { index: index + 1, id });
+    }
+    const verdict = validateActivation(ann.activation);
+    if (verdict.ok !== true) {
+      push(findings, 'warn', 'DOCTOR_ANNOTATION_UNCHECKABLE', `activations 第 ${index + 1} 行的条件不可机械判定: ${verdict.reasons.join('；')}`, { index: index + 1, id });
+    }
+  }
+  const byIdCount = new Map();
+  for (const ann of annotationRead.values) {
+    if (ann === null || typeof ann !== 'object' || typeof ann.id !== 'string') continue;
+    byIdCount.set(ann.id, (byIdCount.get(ann.id) ?? 0) + 1);
+  }
+  summary.annotations = annotationRows;
+  summary.annotationDuplicates = [...byIdCount.values()].filter((n) => n > 1).length;
+  if (summary.annotationDuplicates > 0) {
+    push(findings, 'info', 'DOCTOR_ANNOTATION_REDECLARED', `${summary.annotationDuplicates} 个账本 id 被注解多次（后写覆盖先写，历史仍保留在文件里）`, { count: summary.annotationDuplicates });
   }
 
   // ── ③ 快照 ↔ 备份 对账 ────────────────────────────────────────────

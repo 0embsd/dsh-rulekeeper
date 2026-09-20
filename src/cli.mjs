@@ -43,6 +43,8 @@ import { listLogFiles, readEntries, rotateIfNeeded, totalBytes } from './log.mjs
 import { RC, checkRcTable, renderRcTable } from './rc.mjs';
 import { checkSchema, renderSchemaMarkdown } from './schema.mjs';
 import { DEFAULT_NEAR_DUP_THRESHOLD, findNearDuplicates } from './similarity.mjs';
+import { activationsById, appendAnnotation } from './annotations.mjs';
+import { draftActivations } from './draft.mjs';
 import { USAGE_FILE, usageSummary } from './usage.mjs';
 import { canonicalRule, dedupe, detectRuleDivergence, ruleFragmentation } from './ruleid.mjs';
 import { redactText, redactValue, scanText, selfTestRules, statsOf } from './redact.mjs';
@@ -275,6 +277,9 @@ export const USAGE_EFFECT = `用法:
   rk-effect apply  --landing <落点> --proposal <id> --by human [--pattern <glob>]... [--gate <机制>] [--apply] [--project <项目根>] [--now <ISO>] [--json]
   rk-effect inject --landing <落点> [--max-per-session n] [--now <ISO>] [--json]
   rk-effect usage  --landing <落点> [--json]
+  rk-effect draft-activation --landing <落点> [--limit n] [--write] [--json]
+                     （机器起草"条目级可判激活条件"；默认只出草稿，--write 才写注解层
+                       activations.jsonl（**不碰账本**，账本 append-only 逐字节不变））
   （亦可用 dsh-rulekeeper effect <子命令>，两者同实现）
 说明: **入账 ≠ 生效**（LF-A*，2026-09-19）。五个动作：
       plan   = 只读体检：每条纪律的生效状态（none/injected/mechanized/verified/recurred）+ findings；
@@ -2409,7 +2414,7 @@ function projectRootOfLanding(landing) {
  *   2 = 用法错误（缺子命令/未知参数/缺 --by/--by 取值非法/--proposal 不存在）
  */
 function runCliEffect(argv, io, env) {
-  const EFFECT_SUBS = ['plan', 'verify', 'apply', 'inject', 'usage'];
+  const EFFECT_SUBS = ['plan', 'verify', 'apply', 'inject', 'usage', 'draft-activation'];
   const sub = argv[0] ?? null;
   if (sub === null || !EFFECT_SUBS.includes(sub)) {
     io.err(`dsh-rulekeeper effect: 需要子命令（${EFFECT_SUBS.join('|')}）\n${USAGE_EFFECT}\n`);
@@ -2419,6 +2424,7 @@ function runCliEffect(argv, io, env) {
     '--landing': 'string', '--project': 'string', '--now': 'string', '--stale-days': 'string',
     '--proposal': 'string', '--all': 'boolean', '--by': 'string', '--apply': 'boolean',
     '--pattern': 'string[]', '--gate': 'string', '--max-per-session': 'string', '--json': 'boolean',
+    '--limit': 'string', '--write': 'boolean',
   }, io);
   if (parsed.error !== null) return parsed.error;
   const flags = parsed.flags;
@@ -2441,6 +2447,59 @@ function runCliEffect(argv, io, env) {
   if (staleDays === null || maxPerSession === null) {
     io.err('dsh-rulekeeper effect: --stale-days / --max-per-session 需要非负整数\n');
     return RC.USAGE;
+  }
+
+  if (sub === 'draft-activation') {
+    // 机器起草"条目级可判激活条件"（objective ②）：**默认只出草稿**，`--write` 才写注解层。
+    // 为什么写注解层而不是改账本：账本 append-only 不可原地改写（LF-120），注解层是唯一合法通路
+    // （协议与理由见 src/annotations.mjs 顶部）。
+    const limit = flags.limit === undefined ? Infinity : Number(flags.limit);
+    if (flags.limit !== undefined && (!Number.isInteger(limit) || limit < 0)) {
+      io.err(`rk-effect draft-activation: --limit 需要非负整数，实得 ${JSON.stringify(flags.limit)}\n`);
+      return RC.USAGE;
+    }
+    const rows = readLedger(landing).values;
+    const result = draftActivations(rows, { limit });
+    const byId = activationsById(landing);
+    // 已经注解过的行不再起草（幂等：重复跑不会把注解层灌满）
+    const todo = result.drafts.filter((d) => !byId.has(d.id));
+    if (flags['write'] === true) {
+      if (flags.dryRun === true) {
+        // parseSub 未必认识 --dry-run；这里只是把语义写清：--write 与 --dry-run 同时给 = 不写
+      }
+      let written = 0;
+      let failed = 0;
+      for (const d of todo) {
+        const r = appendAnnotation(landing, { id: d.id, activation: d.activation, by: 'machine', confidence: d.confidence, evidence: d.anchors }, { now });
+        if (r.ok === true) written += 1;
+        else {
+          failed += 1;
+          if (failed <= 3) io.err(`draft-activation: 写入失败（${d.id}）: ${r.reason}\n`);
+        }
+      }
+      const after = effectPlan({ landingDir: landing, projectRoot, now, staleDays });
+      io.out(line(`RK_DRAFT_WRITTEN=${written}`));
+      io.out(line(`RK_DRAFT_FAILED=${failed}`));
+      io.out(line(`RK_DRAFT_COVERAGE_AFTER=${after.entryStats.withActivation}/${after.entryStats.entries}`));
+      io.out(line(`RK_DRAFT_COVERAGE_PCT=${(after.entryStats.coverage * 100).toFixed(2)}`));
+    }
+    io.out(line(`RK_DRAFT_LANDING=${toPosix(landing)}`));
+    io.out(line(`RK_DRAFT_ROWS=${result.stats.rows}`));
+    io.out(line(`RK_DRAFT_ALREADY=${rows.length - result.stats.rows}`));
+    io.out(line(`RK_DRAFT_ANNOTATED=${[...byId.keys()].length}`));
+    io.out(line(`RK_DRAFT_PENDING=${todo.length}`));
+    io.out(line(`RK_DRAFT_HIGH=${todo.filter((d) => d.confidence === 'high').length}`));
+    io.out(line(`RK_DRAFT_MEDIUM=${todo.filter((d) => d.confidence === 'medium').length}`));
+    io.out(line(`RK_DRAFT_NO_ANCHOR=${result.stats.noAnchor}`));
+    io.out(line(`RK_DRAFT_LOW_QUALITY=${result.stats.lowQuality}`));
+    if (flags.json === true) {
+      io.out(jsonStable({ landing, stats: result.stats, drafts: todo.slice(0, 50), noAnchor: result.noAnchor.slice(0, 50), lowQuality: result.lowQuality.slice(0, 20) }));
+    } else {
+      for (const d of todo.slice(0, 10)) io.out(line(`DRAFT ${d.id} [${d.confidence}] ${d.activation}`));
+      if (todo.length > 10) io.out(line(`…（其余 ${todo.length - 10} 条见 --json）`));
+    }
+    io.out(resultLine('EFFECT_DRAFT_ACTIVATION', true));
+    return RC.OK;
   }
 
   if (sub === 'usage') {

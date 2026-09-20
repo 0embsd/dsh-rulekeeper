@@ -119,6 +119,28 @@ export const FILES = Object.freeze([
     ],
     derived: [],
   },
+  // **第 7 个文件（2026-09-19 契约变更）**：注解层 —— 给既有 append-only 行补 `activation` 的合法通路。
+  // 来历：账本行不可原地改写，而 activation 是行内字段 ⇒ 想给 385 条既有教训补"何时适用"，
+  //   改行=违宪、复制新行=制造重复（E2 实测重复会把正确教训挤出 top-1）。故用 sidecar 注解层：
+  //   账本逐字节不动，注解单独 append，读侧合并（`annotations.mergeActivation`）。
+  // 同步面（契约变更必须同步全部消费方）：本冻结单（6→7）、`annotations.mjs`、`doctor` 健康检查、
+  //   `baseline` 的自产物清单、`effect` 的覆盖率口径。
+  {
+    name: 'activations.jsonl',
+    kind: 'append-only',
+    versionField: 'schema',
+    purpose: '条目级注解流：`id` 指向账本行，携带"可判激活条件"；账本保持 append-only 不被改写',
+    fields: [
+      { name: 'schema', type: 'number', required: true },
+      { name: 'ts', type: 'iso8601', required: true },
+      { name: 'id', type: 'string', required: true, note: '指向 ledger.jsonl 的 id（孤儿注解由 doctor 报 DOCTOR_ANNOTATION_ORPHAN）' },
+      { name: 'activation', type: 'string', required: true, note: '可判激活条件；必须含可观测锚点（路径/通配符/命令/错误串），判据见 annotations.validateActivation()' },
+      { name: 'by', type: 'enum', required: true, values: ['machine', 'human'], note: '**声明**不是签名（规则 43）' },
+      { name: 'confidence', type: 'string', required: false, note: '起草置信度（machine 起草时给出，供人优先复核低置信项）' },
+      { name: 'evidence', type: 'array', required: true },
+    ],
+    derived: [],
+  },
   {
     name: 'config.json',
     kind: 'json',
@@ -169,6 +191,7 @@ export const FROZEN_FILE_NAMES = Object.freeze([
   'rules.json',
   'snapshots/index.jsonl',
   'findings.jsonl',
+  'activations.jsonl',
   'config.json',
   'proposals/<id>.json',
 ]);
@@ -227,7 +250,7 @@ export function checkSchema(opts = {}) {
   const invariants = opts.rowInvariants ?? LEDGER_ROW_WRITE_INVARIANTS;
   const findings = [];
   const add = (code, msg) => findings.push({ code, msg });
-  if (files.length !== 6) add('SCHEMA_FILE_COUNT', `必须冻结 6 个数据文件，实测 ${files.length}`);
+  if (files.length !== 7) add('SCHEMA_FILE_COUNT', `必须冻结 7 个数据文件，实测 ${files.length}`);
 
   for (const file of files) {
     const label = file?.name ?? '?';
