@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "kind": "checker",
+  "rule": "PATH-SANITIZE",
+  "command": ["node", "scripts/checkers/leak-check.mjs"],
+  "expectRed": { "exitCode": 1 },
+  "expectGreen": { "exitCode": 0 },
+  "redSample": { "kind": "tree", "source": "test/fixtures/checker/red-sample" },
+  "greenSample": { "kind": "tree", "source": "test/fixtures/checker/green-sample" },
+  "checkerVersion": "leak-check@1",
+  "timeoutMs": 20000,
+  "notes": "公开面不得出现内部标识/本机路径（S8）。2026-09-19 一天内复发三次 ⇒ 落成 checker 判据。sampleHash 由 `rk-effect draft-activation`/测试现算后填入，见 test/checker.test.mjs 的 apply 用例。"
+}

@@ -2651,6 +2651,7 @@ function runCliEffect(argv, io, env) {
     });
     if (out.ok !== true) {
       io.out(line(`RK_EFFECT_APPLY_CODE=${out.code}`));
+      if (out.reasonCode !== null && out.reasonCode !== undefined) io.out(line(`RK_EFFECT_APPLY_REASON_CODE=${out.reasonCode}`));
       if (out.rolledBack === true) io.out(line(`RK_EFFECT_APPLY_ROLLED_BACK=1 RESTORED_SHA=${out.restoredSha ?? '(none)'}`));
       io.err(`dsh-rulekeeper effect apply: ${out.code}: ${out.message}\n`);
       io.out(resultLine('EFFECT_APPLY', false));
@@ -2658,7 +2659,11 @@ function runCliEffect(argv, io, env) {
     }
     io.out(line(`RK_EFFECT_APPLY_RULE=${out.rule} DRYRUN=${out.applied === true ? 0 : 1}`));
     io.out(line(`RK_EFFECT_APPLY_PATTERNS=${(out.additions?.patterns ?? []).join(',') || '(none)'}`));
-    io.out(line(`RK_EFFECT_APPLY_CARRIER=${out.additions?.binding?.carrier ?? '(none)'} GATE=${out.additions?.binding?.gate ?? '(none)'}`));
+    io.out(line(`RK_EFFECT_APPLY_CARRIER=${out.additions?.binding?.carrier ?? (out.additions?.binding?.kind === 'checker' ? `checker:${out.additions.binding.redSample?.source ?? '?'}` : '(none)')} GATE=${out.additions?.binding?.gate ?? (out.additions?.binding?.kind === 'checker' ? 'checker' : '(none)')}`));
+    if (out.additions?.binding?.kind === 'checker') {
+      io.out(line(`RK_EFFECT_APPLY_CHECKER_COMMAND=${(out.additions.binding.command ?? []).join(' ')}`));
+      io.out(line(`RK_EFFECT_APPLY_CHECKER_EXPECT=red:${out.additions.binding.expectRed?.exitCode} green:${out.additions.binding.expectGreen?.exitCode}`));
+    }
     io.out(line(`RK_EFFECT_APPLY_SHA_BEFORE=${out.beforeSha ?? '(new)'} AFTER=${out.afterSha}`));
     if (out.applied === true) {
       io.out(line(`RK_EFFECT_APPLY_BACKUP=${out.backup ?? '(none)'}`));

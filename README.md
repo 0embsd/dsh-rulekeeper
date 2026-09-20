@@ -228,6 +228,15 @@ rk-effect inject --landing <落点>                       # 把"只写下来了"
 - **已知缺口**：checker 绑定目前**还不能经 `rk-effect apply` 落盘**（apply 只构造文件类绑定）
   ⇒ 现在要写它得手工编辑 `rules.json`。下一步：让 apply 认提案里的 `checker:<spec.json>` 标记，
   由已入库的 spec 文件构造绑定（保持"唯一写通路 + 人签字"不破）。
+  > **已补齐（2026-09-19 收口，本条取代上面的"已知缺口"）**：提案的 `counterExample` 写
+  > `checker:<项目根相对的规格文件>` ⇒ `rk-effect apply --proposal <id> --by human [--apply]` 由
+  > **已入库的规格文件**构造 checker 绑定，走**同一条**写通路（备份 → 写入 → 回读校验 → 失败回滚 →
+  > 提案置 approved → 账本事件行）。规格文件
+  > （`{command, expectRed, expectGreen, redSample, greenSample, sampleHash, checkerVersion, timeoutMs}`）
+  > 必须入库（拒绝项目外路径）；落盘前核对：`sampleHash` 与当前样本一致、`rule` 与提案一致、
+  > 同一 rule 不得重复挂、AI 不许签字（`--by auto` 一律拒）。具体失败原因码经
+  > `RK_EFFECT_APPLY_REASON_CODE` 如实透出（不再被拍平成一个"不合格"）。
+  > 样例规格：`test/fixtures/checker/leak-check.spec.json`。
 
 ### 生效面口径变更：从"类目层"到"条目层"（P0-2，2026-09-19）
 

@@ -27,7 +27,7 @@ import { dirname, join } from 'node:path';
 
 import { appendLine, readLines } from './append.mjs';
 import { activationsById, mergeActivation } from './annotations.mjs';
-import { verifyChecker, validateCheckerBinding } from './checker.mjs';
+import { verifyChecker, validateCheckerBinding, treeHash } from './checker.mjs';
 import { backupFile } from './backup.mjs';
 import { CHECK_KINDS } from './checks.mjs';
 import { CLOSE_KNOWN_GATES, effectiveProtection, readGateLedger, reconWrite } from './gate.mjs';
@@ -67,10 +67,12 @@ export const DEFAULT_EFFECT_GATE = 'pre-commit';
 // 载体词法：路径在**空格 / 中英文标点 / 括号**处截断（实测踩到：`path:docs/x.md（改过没留证的样本）`
 // 曾把整句括号说明当成路径 ⇒ 判据载体与事实对不上，正是本条纪律要防的形态）
 const RE_CARRIER = /(?:^|[\s([{"'，。;；])(?:path|file|路径)\s*[:：]\s*([^\s()[\]{}<>（），、;；"'《》【】]+)/i;
+/** `checker:<项目根相对的规格文件>`（2026-09-19，objective ③ 收口）：检查器绑定的载体标记 */
+const RE_CHECKER_CARRIER = /(?:^|[\s([{"'，。;；])checker\s*[:：]\s*([^\s()[\]{}<>（），、;；"'《》【】]+)/i;
 
 /**
  * 从自由文本里解析判据载体。
- * @returns {{kind: 'path'|'inline'|null, value: string|null, reason: string|null}}
+ * @returns {{kind: 'path'|'checker'|'inline'|null, value: string|null, reason: string|null}}
  */
 export function parseCarrier(text) {
   if (typeof text !== 'string' || text.trim() === '') {
@@ -78,8 +80,11 @@ export function parseCarrier(text) {
   }
   const inline = /(?:^|[\s([{"'，。;；])inline\s*[:：]/i.test(text);
   if (inline) return { kind: 'inline', value: null, reason: 'inline: 载体不被支持（三类 check 都吃文件路径）' };
+  // checker 标记优先于 path（规格文件里通常也会写路径，先认哪一个不能靠运气）
+  const chk = RE_CHECKER_CARRIER.exec(text);
+  if (chk !== null) return { kind: 'checker', value: toPosix(chk[1].replace(/^\.\//, '')), reason: null };
   const m = RE_CARRIER.exec(text);
-  if (m === null) return { kind: null, value: null, reason: '没有 `path:<相对路径>` 载体标记（判据载体与事实必须一一对应）' };
+  if (m === null) return { kind: null, value: null, reason: '没有 `path:<相对路径>` 或 `checker:<规格文件>` 载体标记（判据载体与事实必须一一对应）' };
   return { kind: 'path', value: toPosix(m[1].replace(/^\.\//, '')), reason: null };
 }
 
@@ -788,6 +793,85 @@ export function planActivation(opts = {}) {
 
   const carriers = [];
   const ce = parseCarrier(proposal.counterExample);
+
+  // ── **checker 分支**（2026-09-19，objective ③ 的收口）────────────────────────────────
+  // 提案的 `counterExample` 写 `checker:<项目根相对的规格文件>` ⇒ 由**已入库的规格文件**构造
+  // `kind:"checker"` 绑定，走的是**同一条**人签字写通路（备份 / 写入 / 回读 / 失败回滚 / 台账）。
+  // 为什么非做不可：否则写 checker 绑定只能手改 rules.json ⇒ 绕过唯一写通路，前面所有
+  // "闸门不可被 AI 直接改"的声明就都成了空话（规则 43 同族：自称型控制不是边界）。
+  if (ce.kind === 'checker') {
+    if (!isRelativeCarrier(ce.value)) {
+      problems.push(`counterExample 的 checker 规格文件必须是**项目根相对路径**（收到 ${ce.value}）`);
+      return { ok: false, findings: problems.map((p) => ({ code: 'EFFECT_PLAN_UNQUALIFIED', message: p })), candidate: null, additions: null };
+    }
+    const specAbs = join(opts.projectRoot ?? process.cwd(), ce.value);
+    if (!existsSync(specAbs)) {
+      return { ok: false, findings: [{ code: 'EFFECT_CHECKER_SPEC_MISSING', message: `checker 规格文件不存在: ${ce.value}（规格必须**入库**，否则判据在别的机器上无法复现）` }], candidate: null, additions: null };
+    }
+    let spec;
+    try {
+      spec = JSON.parse(readFileSync(specAbs, 'utf8'));
+    } catch (err) {
+      return { ok: false, findings: [{ code: 'EFFECT_CHECKER_SPEC_BAD_JSON', message: `checker 规格文件不是合法 JSON（${ce.value}）: ${String(err?.message ?? err)}` }], candidate: null, additions: null };
+    }
+    if (spec !== null && typeof spec === 'object' && spec.rule !== undefined && canonicalRule(String(spec.rule)) !== rule) {
+      return { ok: false, findings: [{ code: 'EFFECT_CHECKER_SPEC_RULE_MISMATCH', message: `规格文件的 rule=${JSON.stringify(spec.rule)} 与提案的 rule=${rule} 不一致（防止把 A 的检查器挂到 B 上）` }], candidate: null, additions: null };
+    }
+    const binding = {
+      kind: 'checker',
+      rule,
+      command: spec.command,
+      expectRed: spec.expectRed,
+      expectGreen: spec.expectGreen,
+      redSample: spec.redSample,
+      ...(spec.greenSample === undefined ? {} : { greenSample: spec.greenSample }),
+      ...(spec.sampleHash === undefined ? {} : { sampleHash: spec.sampleHash }),
+      ...(spec.checkerVersion === undefined ? {} : { checkerVersion: spec.checkerVersion }),
+      ...(spec.timeoutMs === undefined ? {} : { timeoutMs: spec.timeoutMs }),
+      ...(typeof spec.notes === 'string' && spec.notes.trim() !== '' ? { notes: spec.notes.trim() } : {}),
+      proposal: proposal.id ?? null,
+      activatedAt: now.toISOString(),
+    };
+    const shapeProblems = validateCheckerBinding(binding);
+    if (shapeProblems.length > 0) {
+      return { ok: false, findings: shapeProblems.map((p) => ({ code: 'EFFECT_CHECKER_SPEC_INVALID', message: `${rule}: 规格文件构造出的绑定形状不合法：${p}` })), candidate: null, additions: null };
+    }
+    // 样本固定：规格里写了 sampleHash 就必须与**当前**样本一致，否则落盘的是"签给旧样本的判据"
+    if (typeof binding.sampleHash === 'string' && binding.sampleHash !== '') {
+      const sampleAbs = join(opts.projectRoot ?? process.cwd(), binding.redSample.source);
+      const actual = treeHash(sampleAbs);
+      if (actual === null) {
+        return { ok: false, findings: [{ code: 'EFFECT_CHECKER_SAMPLE_MISSING', message: `${rule}: 违规样本目录不存在: ${binding.redSample.source}` }], candidate: null, additions: null };
+      }
+      if (actual.toLowerCase() !== binding.sampleHash.toLowerCase()) {
+        return { ok: false, findings: [{ code: 'EFFECT_CHECKER_SAMPLE_CHANGED', message: `${rule}: 规格里的 sampleHash 与当前样本内容不一致（样本被改过）⇒ 拒绝落盘，须重算并重签规格` }], candidate: null, additions: null };
+      }
+    }
+    const already = (Array.isArray(before.checks) ? before.checks : [])
+      .map((e) => normalizeBinding(e))
+      .some((b) => b !== null && b.rule === rule && b.kind === 'checker');
+    if (already) {
+      return { ok: false, findings: [{ code: 'EFFECT_CHECKER_ALREADY_BOUND', message: `${rule}: 已有 checker 绑定（避免重复挂同一判据；要先退役再改）` }], candidate: null, additions: null };
+    }
+    const candidate = {
+      ...before,
+      checks: [...(Array.isArray(before.checks) ? before.checks : []), binding],
+    };
+    return {
+      ok: true,
+      kind: 'activate-checker',
+      findings: [],
+      rule,
+      gate,
+      carriers: [],
+      falsePositive: null,
+      patterns: [],
+      additions: { patterns: [], binding },
+      candidate,
+      spec: ce.value,
+    };
+  }
+
   if (ce.kind === 'path') {
     if (!isRelativeCarrier(ce.value)) problems.push(`counterExample 的载体必须是**项目根相对路径**（收到 ${ce.value}：绝对路径或 .. 段会把保护面伸到项目之外，且不可跨机复现）`);
     else carriers.push(ce.value);
@@ -877,8 +961,16 @@ export function applyActivation(opts = {}) {
   } catch (err) {
     return fail('EFFECT_PROPOSAL_UNREADABLE', `提案不是合法 JSON: ${err?.message ?? String(err)}`);
   }
-  const planned = planActivation({ landingDir, proposal, patterns: opts.patterns, gate: opts.gate, now });
-  if (planned.ok !== true) return fail('EFFECT_PLAN_UNQUALIFIED', planned.findings.map((f) => f.message).join('；'), { findings: planned.findings });
+  const planned = planActivation({ landingDir, proposal, patterns: opts.patterns, gate: opts.gate, now, projectRoot: opts.projectRoot ?? process.cwd() });
+  if (planned.ok !== true) {
+    // **具体原因码必须活下来**（2026-09-19 实测）：以前只有 `EFFECT_PLAN_UNQUALIFIED` 一个大类码，
+    // 于是"规格文件不存在""样本被改""rule 不一致"这些**可操作**的原因在 CLI 上全被拍平成一个码，
+    // 操作者只能看到"不合格"。现在附带 `reasonCode`（= 第一条 finding 的码），CLI 单独打印。
+    return fail('EFFECT_PLAN_UNQUALIFIED', planned.findings.map((f) => f.message).join('；'), {
+      findings: planned.findings,
+      reasonCode: planned.findings[0]?.code ?? null,
+    });
+  }
   // **不许凭空发明规则包**（独立 CR nit #15）：落点没有 rules.json 时，旧实现会用 `project:'unknown'` 兜底
   // 造出一份 —— 而 `project` 是"双本（项目级/用户级）"的判别依据，哨兵值会把落点身份冲掉。
   if (!existsSync(join(landingDir, 'rules.json'))) {
@@ -968,13 +1060,17 @@ export function applyActivation(opts = {}) {
       category: isRetire ? EFFECT_RETIRE_CATEGORY : EFFECT_EVENT_CATEGORY,
       problem: isRetire
         ? `EFFECT_RETIRE rule=${planned.rule} proposal=${opts.proposalId} removedPatterns=${planned.additions.retirement.removedPatterns.length} removedBindings=${planned.additions.retirement.removedBindings}`
-        : `EFFECT_ACTIVATE rule=${planned.rule} proposal=${opts.proposalId} patterns=${planned.additions.patterns.length} gate=${planned.gate}`,
+        : (planned.kind === 'activate-checker'
+          ? `EFFECT_ACTIVATE rule=${planned.rule} proposal=${opts.proposalId} kind=checker spec=${planned.spec ?? '-'} exitRed=${planned.additions.binding.expectRed?.exitCode} exitGreen=${planned.additions.binding.expectGreen?.exitCode}`
+          : `EFFECT_ACTIVATE rule=${planned.rule} proposal=${opts.proposalId} patterns=${planned.additions.patterns.length} gate=${planned.gate}`),
       root_cause: isRetire
         ? '零信号窗口内主动不再拦（退役）：判据成本高于收益，或场景已消失'
         : '入账未生效：生效面此前没有绑定（rules.json 的 checks 无消费者）',
       solution: isRetire
         ? `checks 摘掉 ${planned.additions.retirement.removedBindings} 条绑定；protected_paths -= [${planned.additions.retirement.removedPatterns.join(', ')}]`
-        : `protected_paths += [${planned.additions.patterns.join(', ')}]；checks += [carrier=${planned.additions.binding.carrier}]`,
+        : (planned.kind === 'activate-checker'
+          ? `checks += [kind=checker spec=${planned.spec ?? '-'} command=${(planned.additions.binding.command ?? []).join(' ')} sample=${planned.additions.binding.redSample?.source ?? '-'}]`
+          : `protected_paths += [${planned.additions.patterns.join(', ')}]；checks += [carrier=${planned.additions.binding.carrier}]`),
       mechanism: 'rules.json',
       evidence: [toPosix(rulesFile), ...(backupPath === null ? [] : [toPosix(backupPath)])],
     }, { landingDir, now });

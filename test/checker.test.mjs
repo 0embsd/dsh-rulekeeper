@@ -11,10 +11,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { DEFAULT_CHECKER_TIMEOUT_MS, runChecker, treeHash, validateCheckerBinding, verifyChecker } from '../src/checker.mjs';
+import { parseCarrier } from '../src/effect.mjs';
 import { validateBindingEntry } from '../src/rules.mjs';
 import { cleanupAll, PKG_ROOT, tempDir } from './helpers/sandbox.mjs';
 
@@ -118,6 +119,107 @@ test('判据: 装载期就拦非法 checker 绑定（不许进了 rules.json 才
 
 test('判据: DEFAULT_CHECKER_TIMEOUT_MS 是正数且是有限值（超时必须有上限）', () => {
   assert.ok(Number.isInteger(DEFAULT_CHECKER_TIMEOUT_MS) && DEFAULT_CHECKER_TIMEOUT_MS > 0);
+});
+
+// ── 人签字写通路（objective ③ 收口）：不给"手改 rules.json"留后门 ─────────────────────
+// 判据：checker 绑定必须能经**同一条** apply 通路落盘（备份 / 写入 / 回读 / 回滚 / 人签字 + 台账），
+// 且规格文件必须入库、样本指纹必须与当前样本一致（否则签的是"给旧样本的判据"）。
+
+/** 造一个带规格文件的最小项目；规格里的 sampleHash 现算 */
+function specFixture(label) {
+  const root = tempDir(label);
+  const repo = join(root, 'repo');
+  const landing = join(repo, '.dsh-ai', 'rulekeeper');
+  const specDir = join(repo, 'test', 'fixtures', 'checker');
+  mkdirSync(join(specDir, 'red-sample'), { recursive: true });
+  mkdirSync(join(specDir, 'green-sample'), { recursive: true });
+  mkdirSync(join(repo, 'scripts', 'checkers'), { recursive: true });
+  writeFileSync(join(repo, 'scripts', 'checkers', 'leak-check.mjs'),
+    "process.exit(process.env.RULEKEEPER_SAMPLE_DIR?.endsWith('red-sample') ? 1 : 0);\n", 'utf8');
+  writeFileSync(join(specDir, 'red-sample', 'note.md'), 'bad\n', 'utf8');
+  writeFileSync(join(specDir, 'green-sample', 'note.md'), 'good\n', 'utf8');
+  const spec = {
+    schema: 1, kind: 'checker', rule: 'PATH-SANITIZE',
+    command: ['node', 'scripts/checkers/leak-check.mjs'],
+    expectRed: { exitCode: 1 }, expectGreen: { exitCode: 0 },
+    redSample: { kind: 'tree', source: 'test/fixtures/checker/red-sample' },
+    greenSample: { kind: 'tree', source: 'test/fixtures/checker/green-sample' },
+    sampleHash: treeHash(join(specDir, 'red-sample')),
+    checkerVersion: 'leak@1',
+  };
+  writeFileSync(join(specDir, 'spec.json'), `${JSON.stringify(spec, null, 2)}\n`, 'utf8');
+  mkdirSync(landing, { recursive: true });
+  writeFileSync(join(landing, 'config.json'), `${JSON.stringify({ schema: 1, mode: 'observe' }, null, 2)}\n`, 'utf8');
+  writeFileSync(join(landing, 'rules.json'), `${JSON.stringify({ schema: 1, project: 't', protected_paths: [], gates: [], checks: [], inject: [] }, null, 2)}\n`, 'utf8');
+  writeFileSync(join(landing, 'ledger.jsonl'), '', 'utf8');
+  const proposal = {
+    schema: 1, id: 'P-checker-1', rule: 'PATH-SANITIZE', source: 'human',
+    createdAt: '2026-09-19T00:00:00.000Z',
+    redCriteria: '公开面出现内部标识/本机路径时 leak-check 必须 exit 1',
+    counterExample: 'checker:test/fixtures/checker/spec.json',
+    falsePositiveSurface: 'path:test/fixtures/checker/green-sample/note.md',
+    activationCheck: 'node scripts/checkers/leak-check.mjs（RULEKEEPER_SAMPLE_DIR=<样本>）',
+    status: 'proposed',
+  };
+  mkdirSync(join(landing, 'proposals'), { recursive: true });
+  writeFileSync(join(landing, 'proposals', 'P-checker-1.json'), `${JSON.stringify(proposal, null, 2)}\n`, 'utf8');
+  return { repo, landing, specDir, spec };
+}
+
+const effectRun = (args) => spawnSync(process.execPath, [join(PKG_ROOT, 'bin', 'rk-effect.mjs'), ...args], { cwd: PKG_ROOT, encoding: 'utf8' });
+
+test('判据: `checker:` 载体标记被识别（与 `path:` 分开，不许靠运气）', () => {
+  const ce = parseCarrier('checker:test/fixtures/checker/spec.json（规格文件）');
+  assert.equal(ce.kind, 'checker');
+  assert.equal(ce.value, 'test/fixtures/checker/spec.json');
+  assert.equal(parseCarrier('path:docs/x.md').kind, 'path', 'path 标记仍要照常认');
+  assert.equal(parseCarrier('随便一句话').kind, null);
+});
+
+test('判据（人签字通路）: checker 绑定经 `rk-effect apply` 落盘，dry-run 不写、--apply 才写', () => {
+  const f = specFixture('checker-apply');
+  const dry = effectRun(['apply', '--landing', f.landing, '--project', f.repo, '--proposal', 'P-checker-1', '--by', 'human']);
+  assert.equal(dry.status, 0, `dry-run 应当成功：${dry.stdout} ${dry.stderr}`);
+  assert.match(dry.stdout, /RK_EFFECT_APPLY_RULE=PATH-SANITIZE DRYRUN=1/);
+  assert.match(dry.stdout, /RK_EFFECT_APPLY_CHECKER_COMMAND=node scripts\/checkers\/leak-check\.mjs/);
+  assert.match(dry.stdout, /RK_EFFECT_APPLY_CHECKER_EXPECT=red:1 green:0/);
+  const before = JSON.parse(readFileSync(join(f.landing, 'rules.json'), 'utf8'));
+  assert.equal(before.checks.length, 0, 'dry-run 不得写入');
+
+  const real = effectRun(['apply', '--landing', f.landing, '--project', f.repo, '--proposal', 'P-checker-1', '--by', 'human', '--apply']);
+  assert.equal(real.status, 0, `落盘应当成功：${real.stdout} ${real.stderr}`);
+  assert.match(real.stdout, /RK_EFFECT_APPLY_BACKUP=/);
+  const after = JSON.parse(readFileSync(join(f.landing, 'rules.json'), 'utf8'));
+  assert.equal(after.checks.length, 1);
+  assert.equal(after.checks[0].kind, 'checker');
+  assert.deepEqual(after.checks[0].command, ['node', 'scripts/checkers/leak-check.mjs']);
+  assert.equal(after.checks[0].sampleHash, f.spec.sampleHash, '样本指纹必须原样落盘');
+  // 落盘后立刻可验证（走 verify 通路，四项全过）
+  const verify = effectRun(['verify', '--landing', f.landing, '--project', f.repo, '--all', '--allow-exec']);
+  assert.equal(verify.status, 0, `落盘后应当可验证通过：${verify.stdout} ${verify.stderr}`);
+  assert.match(verify.stdout, /RK_EFFECT_STATE rule=PATH-SANITIZE state=green/);
+});
+
+test('判据: apply 的护栏 —— AI 不许签字 / 规格未入库 / 样本被改 / rule 不一致 / 重复挂', () => {
+  const f = specFixture('checker-apply-guards');
+  const base = ['apply', '--landing', f.landing, '--project', f.repo, '--proposal', 'P-checker-1'];
+  const auto = effectRun([...base, '--by', 'auto']);
+  assert.equal(auto.status, 1);
+  assert.match(auto.stdout, /EFFECT_HUMAN_SIGNATURE_REQUIRED/);
+  // 规格文件不在项目里（没入库）⇒ 拒绝（否则判据在别的机器上无法复现）
+  const missingSpec = JSON.parse(readFileSync(join(f.landing, 'proposals', 'P-checker-1.json'), 'utf8'));
+  missingSpec.counterExample = 'checker:no/such/spec.json';
+  writeFileSync(join(f.landing, 'proposals', 'P-checker-1.json'), `${JSON.stringify(missingSpec, null, 2)}\n`, 'utf8');
+  const miss = effectRun([...base, '--by', 'human']);
+  assert.equal(miss.status, 1);
+  assert.match(miss.stdout, /RK_EFFECT_APPLY_REASON_CODE=EFFECT_CHECKER_SPEC_MISSING/, `具体原因码必须活下来：${miss.stdout}`);
+  // 样本被改（指纹不符）⇒ 拒绝落盘
+  missingSpec.counterExample = 'checker:test/fixtures/checker/spec.json';
+  writeFileSync(join(f.landing, 'proposals', 'P-checker-1.json'), `${JSON.stringify(missingSpec, null, 2)}\n`, 'utf8');
+  writeFileSync(join(f.specDir, 'red-sample', 'note.md'), 'bad but changed\n', 'utf8');
+  const changed = effectRun([...base, '--by', 'human']);
+  assert.equal(changed.status, 1);
+  assert.match(changed.stdout, /RK_EFFECT_APPLY_REASON_CODE=EFFECT_CHECKER_SAMPLE_CHANGED/);
 });
 
 test('判据（端到端）: 真实落点里写一条 checker 绑定，`rk-effect verify --all --allow-exec` 判 pass', () => {
