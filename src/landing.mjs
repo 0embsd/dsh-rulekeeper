@@ -76,10 +76,13 @@ export function registryCwd(ctx) {
  */
 export function landingCapability() {
   return {
-    sources: ['static', 'project', 'user-fallback', 'none'],
+    sources: ['static', 'project', 'user-fallback', 'user-multi-project', 'multi-project-no-user-landing', 'none'],
     resolution: 'static > agent.session.header.cwd（现场，最准）> noteAgent() 最近 cwd > ctx.agents 根 agent cwd > '
       + 'process.cwd()（宿主进程的工作目录；可观测事实，不是猜路径）；'
       + '项目落点不存在 ⇒ 退用户级落点（<DSH_HOME>/rulekeeper，老 lessonflow 兼容）',
+    multiProject: '**拿不到 agent 的通道**（systemPrompt.context 索引/摘要）在"同时有两个以上不同会话目录在线"时'
+      + '只投用户级落点（source=user-multi-project）—— 进程级只有一份注册，按任何一方投递都可能张冠李戴；'
+      + '有 agent 的通道（agent/pre-step 全文）不受此限，永远按各自会话精确解析',
     unresolved: 'null —— 不投递、不猜路径、不硬编码家目录（reason 记 no-landing）',
   };
 }
@@ -100,9 +103,36 @@ function processCwd() {
 }
 
 /**
+ * **所有活着的根 agent 的会话目录**（去重）。用途：判断"是不是有多个不同项目同时在跑"。
+ *
+ * 为什么需要它（2026-09-20，方案"甲"止血）：`systemPrompt.context()` 的 provider **拿不到 agent**，
+ *   只能靠"最后一次 pre-step 记下的目录"猜是哪个项目 ⇒ 多会话时 last-writer-wins，
+ *   提醒会**串到另一个项目的落点**（张冠李戴）；而索引通道是**进程级一份注册**，无法按会话取。
+ *   止血办法：一旦发现**两处以上不同的会话目录**在线，就**只投用户级落点**
+ *   （用户级纪律与项目无关，绝不会张冠李戴）；单会话 / 同项目多会话时行为不变。
+ * 注意：`agent/pre-step` 全文通道**不在此列** —— 它拿得到真实 agent，本来就能按各自会话精确解析。
+ * @returns {Set<string>} cwd 集合（取不到任何东西 ⇒ 空集，行为退化成旧版）
+ */
+export function liveCwds(ctx) {
+  const out = new Set();
+  try {
+    const agents = readOptionalService(ctx, 'agents');
+    if (agents === null) return out;
+    const list = typeof agents.roots === 'function' ? agents.roots()
+      : (typeof agents.list === 'function' ? agents.list() : null);
+    if (!Array.isArray(list)) return out;
+    for (const agent of list) {
+      const cwd = agentCwd(agent);
+      if (cwd !== null) out.add(cwd);
+    }
+  } catch { /* 取不到 ⇒ 空集（看不出"多项目"，与旧版行为一致） */ }
+  return out;
+}
+
+/**
  * 造一个落点解析器。
  * @param {object} ctx 宿主插件上下文（只读 `agents`；缺失也合法）
- * @param {{staticLanding?: string|null, env?: object}} [opts]
+ * @param {{staticLanding?: string|null, env?: object, cwdOf?: () => string|null}} [opts]
  * @returns {{resolve: (agent?: object|null) => string|null, describe: (agent?: object|null) => {dir: string|null, source: string}, noteAgent: (agent: object) => void}}
  */
 export function createLandingResolver(ctx, { staticLanding = null, env = process.env, cwdOf = processCwd } = {}) {
@@ -110,6 +140,15 @@ export function createLandingResolver(ctx, { staticLanding = null, env = process
   const describe = (agent = null) => {
     if (typeof staticLanding === 'string' && staticLanding.trim() !== '') {
       return { dir: resolveProjectLanding(notedCwd ?? cwdOf() ?? process.cwd(), staticLanding), source: 'static' };
+    }
+    // ── 方案"甲"止血（2026-09-20）：只在**拿不到 agent** 的那条通道上生效 ──────────────────
+    // 拿不到 agent ⇒ 无法知道"这次求值是哪场会在问"（进程级一份注册）⇒ 若同时有多个不同项目在线，
+    // 按任何一方投递都可能张冠李戴。此时**只投用户级落点**（与项目无关）。
+    // 有 agent 时（`agent/pre-step` 全文通道）走下面的精确链，**不受影响**。
+    if (agent === null && liveCwds(ctx).size >= 2) {
+      const user = resolveUserLanding(env);
+      if (existsSync(user)) return { dir: user, source: 'user-multi-project' };
+      return { dir: null, source: 'multi-project-no-user-landing' };
     }
     const cwd = agentCwd(agent) ?? notedCwd ?? registryCwd(ctx) ?? cwdOf();
     if (cwd === null) return { dir: null, source: 'none' };

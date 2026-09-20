@@ -222,7 +222,10 @@ export function deliveryCapability() {
     minIntervalMs: DEFAULT_MIN_INTERVAL_MS,
     landing: {
       static: 'landingDir（显式传入，最高优先）',
-      dynamic: 'resolveLanding()（插件层来自 landing.mjs：现场 agent cwd → 进程内最近 cwd → ctx.agents 根代理人 → 用户级落点兜底）',
+      dynamic: 'resolveLanding()（插件层来自 landing.mjs：现场 agent cwd → 进程内最近 cwd → ctx.agents 根代理人 → 进程工作目录 → 用户级落点兜底）',
+      multiProject: '**多项目同时在线**（两条以上不同会话目录）时只投用户级落点（source=user-multi-project）——'
+        + '索引通道是进程级一份注册、拿不到 agent，按任一方投递都会张冠李戴；'
+        + '`agent/pre-step` 全文通道拿得到真实 agent，永远按各自会话精确解析',
       unresolved: '取不到落点 ⇒ 如实返回空文本并记 reason=no-landing（不猜、不硬编码家目录）',
     },
     untrustedMarkers: { open: INJECT.open, close: INJECT.close },

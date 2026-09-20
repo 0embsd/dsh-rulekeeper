@@ -100,8 +100,12 @@ test('判据: 宿主服务形态不符/抛错 ⇒ 当作取不到（fail-open，
 
 test('判据: 能力声明与实现同源（顺序与实现一致，不是另写一份文案）', () => {
   const cap = landingCapability();
-  assert.deepEqual(cap.sources, ['static', 'project', 'user-fallback', 'none']);
+  // 2026-09-20（方案"甲"）：sources 增 `user-multi-project` 与 `multi-project-no-user-landing`
+  assert.deepEqual(cap.sources, ['static', 'project', 'user-fallback', 'user-multi-project', 'multi-project-no-user-landing', 'none']);
   for (const [claimed, actual] of [['现场', 'agent'], ['noteAgent', 'noteAgent'], ['ctx.agents', 'ctx.agents']]) {
     assert.ok(cap.resolution.includes(claimed), `能力声明缺 ${actual} 顺位`);
   }
+  // 多项目止血的口径也必须写进能力声明（否则"按会话隔离"只活在代码里，读文档的人不知道）
+  assert.ok(String(cap.multiProject).includes('user-multi-project'), '能力声明必须写明多项目时只投用户级落点');
+  assert.ok(String(cap.multiProject).includes('agent/pre-step'), '必须写明"有 agent 的通道不受此限"');
 });
