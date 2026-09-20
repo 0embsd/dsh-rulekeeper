@@ -27,6 +27,7 @@ import { dirname, join } from 'node:path';
 
 import { appendLine, readLines } from './append.mjs';
 import { activationsById, mergeActivation } from './annotations.mjs';
+import { describeApproval, validateAnchoredApproval } from './approval.mjs';
 import { verifyChecker, validateCheckerBinding, treeHash } from './checker.mjs';
 import { backupFile } from './backup.mjs';
 import { CHECK_KINDS } from './checks.mjs';
@@ -36,6 +37,7 @@ import { record as ledgerRecord, readLedger } from './ledger.mjs';
 import { acquireLock, releaseLock } from './lock.mjs';
 import { offGuard } from './mode.mjs';
 import { toPosix } from './platform/paths.mjs';
+import { requireAnchoredApprovalOf } from './config.mjs';
 import { isSafeId, listProposals, proposalPath, validateProposalQuality } from './proposal.mjs';
 import { redactValue } from './redact.mjs';
 import { canonicalRule } from './ruleid.mjs';
@@ -946,6 +948,26 @@ export function applyActivation(opts = {}) {
   const fail = (code, message, extra = {}) => ({ ok: false, code, message, steps, applied: false, ...extra });
   if (typeof landingDir !== 'string' || landingDir.trim() === '') return fail('EFFECT_NO_LANDING', 'applyActivation 需要 landingDir');
   if (by !== 'human') return fail('EFFECT_HUMAN_SIGNATURE_REQUIRED', `rules.json 只能由人签字写入（收到 by=${JSON.stringify(by)}）；auto 一律拒绝——闸门本身不可被 AI 直接改`);
+  // ── 锚定式人签字（2026-09-19）──────────────────────────────────────────────────────
+  // `--by human` 只是字符串（规则 43 自曝）。这里把"确实问过真人"的**凭证**变成落盘的前置条件：
+  //   · 给了凭证 ⇒ 校验；decision=reject ⇒ **直接拒写**（人说不，就不写）
+  //   · 落点配了 `requireAnchoredApproval: true` ⇒ 没有合法规格凭证一律拒（EFFECT_APPROVAL_NOT_ANCHORED）
+  // 凭证由 `src/approval.mjs` 定义与校验；唯一会去问真人的是插件工具 `rulekeeper_apply`
+  // （它拿得到 `ctx.userQuestions`，而子代理调那条通道会被宿主判 `DELEGATED_CALLER`）。
+  const approval = opts.approval ?? null;
+  const approvalProblems = approval === null ? [] : validateAnchoredApproval(approval);
+  if (approvalProblems.length > 0) {
+    return fail('EFFECT_APPROVAL_INVALID', `审批凭证不合法，拒绝落盘：${approvalProblems.join('；')}`);
+  }
+  if (approval !== null && approval.decision === 'reject') {
+    return fail('EFFECT_APPROVAL_REJECTED', `真人应答为"拒绝"（${approval.questionId}）⇒ 不写任何东西`);
+  }
+  const requireAnchored = opts.requireAnchored === true || requireAnchoredApprovalOf(landingDir);
+  // **只在真写时强制**（2026-09-19 自查修正）：`--apply` 缺省是 dry-run，dry-run **不写任何东西**，
+  //   拦它只会让操作者"连准备写什么都没看到就被要求先签字"。故：dry-run 允许无锚定（但仍拦伪造凭证与已拒绝的应答）。
+  if (requireAnchored && approval === null && apply === true) {
+    return fail('EFFECT_APPROVAL_NOT_ANCHORED', '本落点要求**锚定式**人签字（requireAnchoredApproval=true）：`--by human` 只是声明，真写必须带"问过真人"的凭证（插件工具 rulekeeper_apply）；只看不写的 dry-run 不受此限');
+  }
   if (typeof opts.proposalId !== 'string' || opts.proposalId.trim() === '') return fail('EFFECT_NO_PROPOSAL', '需要 --proposal <id>');
   // **id 必须先过安全校验**（LF-270 的同族风险）：`proposalPath()` 会把 id 拼进文件名，
   // 含 `../` 或分隔符的 id 会让随后的 `renameSync` **写到落点之外**（读时会泄露落点外的文件）。
@@ -1072,7 +1094,11 @@ export function applyActivation(opts = {}) {
           ? `checks += [kind=checker spec=${planned.spec ?? '-'} command=${(planned.additions.binding.command ?? []).join(' ')} sample=${planned.additions.binding.redSample?.source ?? '-'}]`
           : `protected_paths += [${planned.additions.patterns.join(', ')}]；checks += [carrier=${planned.additions.binding.carrier}]`),
       mechanism: 'rules.json',
-      evidence: [toPosix(rulesFile), ...(backupPath === null ? [] : [toPosix(backupPath)])],
+      evidence: [
+        toPosix(rulesFile),
+        ...(backupPath === null ? [] : [toPosix(backupPath)]),
+        describeApproval(approval),
+      ],
     }, { landingDir, now });
     steps.push(`ledger ${logged.ok === true ? (logged.entry?.id ?? 'ok') : `FAILED(${logged.reason})`}`);
     // ⑦ 回读复核（锁内最后一件事）：候选的 mode 必须与落点真实 mode 一致

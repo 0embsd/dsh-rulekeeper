@@ -19,9 +19,11 @@
 import { resolve } from 'node:path';
 
 import { reconWrite } from './gate.mjs';
-import { effectPlan } from './effect.mjs';
+import { applyActivation, effectPlan } from './effect.mjs';
+import { buildApprovalQuestion, makeAnchoredApproval, parseApprovalAnswer } from './approval.mjs';
 import { record as ledgerRecord } from './ledger.mjs';
-import { resolveProjectLanding } from './platform/paths.mjs';
+import { isSafeId } from './proposal.mjs';
+import { resolveProjectLanding, toPosix } from './platform/paths.mjs';
 import { canonicalRule } from './ruleid.mjs';
 import { takeSnapshot } from './snap.mjs';
 
@@ -155,6 +157,14 @@ export function defaultHandlers(opts = {}) {
     //   （入账 ≠ 生效），用户记完教训无从知道它是否真的拦得住。本 handler 只做**读**判定，
     //   绝不写 rules.json（写权归人，见 `src/effect.mjs` 的红线）。
     rulekeeper_effect: (args = {}) => effectOnce({ projectRoot: projectRootOf(args, cwd), rule: args.rule, full: args.json === true }),
+    // 2026-09-19：**锚定式人签字**的纯表兜底。真正的实现需要 `ctx`（`ctx.userQuestions` / `ctx.agents`），
+    // 由插件装载时注入（`plugin.mjs` 覆盖同一个键）。这里**不装空壳**：明确 fail-closed 并给理由，
+    // 这样"拿不到真人应答 ⇒ 不落盘"这条在**任何**调用路径上都成立（也便于用例直接验证）。
+    rulekeeper_apply: () => ({
+      ok: false,
+      decision: 'no-answerer',
+      reason: '锚定式人签字需要宿主 ctx（userQuestions/agents）——纯 handler 表拿不到真人应答 ⇒ 拒绝落盘（请经插件装载路径调用；绝不退回 --by human 声明）',
+    }),
   };
 }
 
@@ -184,5 +194,101 @@ export function effectOnce({ projectRoot, rule = null, full = false }) {
   };
 }
 
+/**
+ * **锚定式人签字**的落盘 handler（2026-09-19）：唯一会去问真人的地方。
+ *
+ * 为什么必须独立成工厂而不是塞进 `defaultHandlers`：它需要 `ctx`（`ctx.userQuestions` / `ctx.agents`），
+ *   而 `defaultHandlers` 是纯函数表。插件装载时把它覆盖进 handler 表即可。
+ *
+ * 流程（**每一步失败都不许降级**）：
+ *   ① 先 dry-run 算清要写什么（算不出来 ⇒ 不问人、直接报错）
+ *   ② 经 `ctx.userQuestions.ask()` 问真人（源码逐字：只有**注册表里活着的那个实例**能问，
+ *      子代理被拥有 ⇒ 宿主判 `DELEGATED_CALLER`）⇒ AI 在结构上造不出应答
+ *   ③ 应答 = 拒绝 / 拿不到 / 不可解析 ⇒ **一律不写**（fail-closed，**绝不退回** `--by human` 声明）
+ *   ④ 应答 = 批准 ⇒ 带锚定凭证走 `applyActivation`（备份 → 写入 → 回读 → 失败回滚 → 台账）
+ *
+ * @param {{ctx: object, cwd?: string, now?: () => Date, applyActivationFn?: Function, askFn?: Function}} opts
+ */
+export function makeAnchoredApplyHandler({ ctx, cwd = process.cwd(), now = () => new Date(), applyActivationFn = applyActivation, askFn = null } = {}) {
+  return async function rulekeeperApply(args = {}) {
+    const projectRoot = projectRootOf(args, cwd);
+    const landing = landingOf(projectRoot);
+    const proposalId = typeof args.proposal === 'string' ? args.proposal.trim() : '';
+    if (proposalId === '') return { ok: false, decision: 'usage', reason: '需要 proposal（提案 id）' };
+    if (!isSafeId(proposalId)) return { ok: false, decision: 'usage', reason: `提案 id 不安全（只允许 [A-Za-z0-9._-] 且禁 ".."）: ${JSON.stringify(proposalId)}` };
+    const apply = args.apply === true;
+
+    // ① dry-run：先算清"要写什么"；连这一步都过不了，就不该去打扰人
+    const planned = applyActivationFn({ landingDir: landing, projectRoot, proposalId, by: 'human', apply: false, now: now() });
+    if (planned.ok !== true) {
+      return { ok: false, decision: 'plan-failed', reason: `${planned.code}: ${planned.message}`, proposalId };
+    }
+    const binding = planned.additions?.binding ?? {};
+    const summary = binding.kind === 'checker'
+      ? `kind=checker command=${(binding.command ?? []).join(' ')} sample=${binding.redSample?.source ?? '-'}`
+      : `kind=${binding.kind} carrier=${binding.carrier ?? '-'} patterns=${(planned.additions?.patterns ?? []).join(',') || '(none)'}`;
+
+    // ② 问真人（唯一入口）。服务缺失 / 无根 agent / 抛错（含 DELEGATED_CALLER）⇒ 一律不写
+    const svc = ctx !== null && typeof ctx === 'object' ? ctx.userQuestions : null;
+    const ask = typeof askFn === 'function' ? askFn : (svc !== null && typeof svc === 'object' && typeof svc.ask === 'function' ? svc.ask.bind(svc) : null);
+    if (ask === null) {
+      return { ok: false, decision: 'no-answerer', reason: '宿主没有 userQuestions 服务 ⇒ 拿不到真人应答，拒绝落盘（绝不退回 --by human 声明）', proposalId };
+    }
+    const agent = firstRootAgent(ctx);
+    if (agent === null) {
+      return { ok: false, decision: 'no-answerer', reason: '宿主注册表里没有活着的根 agent ⇒ 无法取得真人应答，拒绝落盘', proposalId };
+    }
+    const question = buildApprovalQuestion({ rule: planned.rule, proposalId, summary, landing: toPosix(landing) });
+    let answer;
+    try {
+      answer = await ask({ agent, questions: [question] });
+    } catch (err) {
+      const code = err !== null && typeof err === 'object' && typeof err.code === 'string' ? err.code : 'ASK_FAILED';
+      return { ok: false, decision: 'ask-failed', reason: `无法取得真人应答（${code}）：${String(err?.message ?? err)} ⇒ 拒绝落盘`, proposalId };
+    }
+    const parsed = parseApprovalAnswer(answer, question.id);
+    if (parsed.decision !== 'approve') {
+      return {
+        ok: false,
+        decision: parsed.decision === 'reject' ? 'rejected' : 'unresolved',
+        reason: parsed.decision === 'reject'
+          ? `真人应答为"拒绝"（${question.id}）⇒ 未做任何写入`
+          : `应答无法判定为批准（${parsed.reason ?? '未选中批准项'}）⇒ 未做任何写入（fail-closed）`,
+        proposalId,
+      };
+    }
+    const approval = makeAnchoredApproval({
+      questionId: question.id, decision: 'approve', question: question.question, answer,
+      at: now(), agentLabel: typeof agent.id === 'string' ? agent.id : null,
+    });
+
+    // ④ 带锚定凭证落盘
+    const out = applyActivationFn({ landingDir: landing, projectRoot, proposalId, by: 'human', apply, now: now(), approval });
+    return {
+      ok: out.ok === true,
+      decision: out.ok === true ? (apply ? 'applied' : 'dry-run') : 'apply-failed',
+      proposalId,
+      rule: planned.rule,
+      approval: `anchored(${approval.questionId}) digest=${approval.digest.slice(0, 12)}`,
+      reason: out.ok === true ? String(out.code ?? 'OK') : `${out.code}: ${out.message}`,
+      applied: out.applied === true,
+    };
+  };
+}
+
+/** 取注册表里第一个活着的根 agent（`ask()` 要求"恰好那个活着的实例"，故必须从注册表取，不能自造） */
+function firstRootAgent(ctx) {
+  try {
+    const agents = ctx !== null && typeof ctx === 'object' ? ctx.agents : null;
+    if (agents === null || typeof agents !== 'object') return null;
+    const list = typeof agents.roots === 'function' ? agents.roots() : null;
+    if (!Array.isArray(list) || list.length === 0) return null;
+    const first = list[0];
+    return first !== null && typeof first === 'object' ? first : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 宿主侧固定使用的工具名（与 `PLUGIN_TOOLS` 同一命名空间） */
-export const HANDLER_TOOL_NAMES = Object.freeze(['rulekeeper_gate', 'rulekeeper_record', 'rulekeeper_snap', 'rulekeeper_effect']);
+export const HANDLER_TOOL_NAMES = Object.freeze(['rulekeeper_gate', 'rulekeeper_record', 'rulekeeper_snap', 'rulekeeper_effect', 'rulekeeper_apply']);

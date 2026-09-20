@@ -238,6 +238,25 @@ rk-effect inject --landing <落点>                       # 把"只写下来了"
   > `RK_EFFECT_APPLY_REASON_CODE` 如实透出（不再被拍平成一个"不合格"）。
   > 样例规格：`test/fixtures/checker/leak-check.spec.json`。
 
+### 锚定式人签字（2026-09-19 · 把"自称 human"换成"宿主问出来的真人应答"）
+
+- **问题**（本仓早自曝过，规则 43）：`rk-effect apply --by human` 里的 `--by human` **只是一个字符串**——
+  AI 也敲得出来。而 `rules.json` 是**生效面本身**（改它 = 改哪条纪律真会被拦），所以这一步必须真锚住。
+- **锚在哪**：宿主的人机问答通道 `ctx.userQuestions.ask()`（`@deepseek-ai/dsh-user-questions`）。
+  它的边界是**运行时归属**（源码逐字）：传入的 agent 必须是注册表里**恰好那个活着的实例**
+  （否则 `CALLER_NOT_LIVE`），且**被别的 agent 拥有**的（子代理）会被判 `DELEGATED_CALLER`
+  ⇒ **AI 在结构上造不出应答**。
+- **怎么用**：插件工具 `rulekeeper_apply`（`{proposal, project?, apply?}`）——
+  ①先 dry-run 算清要写什么 → ②问真人（选项标签 `批准落盘` / `拒绝`）→ ③**拒绝 / 问不通 / 应答不可解析
+  一律不写**（fail-closed，**绝不退回** `--by human` 声明）→ ④批准才带凭证落盘。
+- **落点级开关**：`config.json` 的 `requireAnchoredApproval: true` ⇒ 没有锚定凭证的写入**一律拒**
+  （`EFFECT_APPROVAL_NOT_ANCHORED`），CLI 也拦。缺省不要求（老落点行为不变）。
+- **凭证进账本**：`approval=anchored(<questionId>) decision=approve digest=<12 hex>`；
+  没有凭证时**逐字**写 `approval=declared(--by human 字符串；非锚定)` —— 不假装字符串是签名。
+- **诚实边界**：凭证是**可核对**（问答内容进宿主会话记录、可人工比对），**不是密码学签名**；
+  能改落点文件的人仍能把字段抄进去。防伪造落在流程层：唯一会问真人的提供者是 `rulekeeper_apply`，
+  且问不通就不写；要更硬须引入外部签名密钥（未做，如实登记）。
+
 ### 生效面口径变更：从"类目层"到"条目层"（P0-2，2026-09-19）
 
 - **旧口径**问"这个**类目**有没有生效绑定"⇒ `TEXT_ONLY 21/22` 是**结构必然**（类目只是分组标签，不承担生效语义；

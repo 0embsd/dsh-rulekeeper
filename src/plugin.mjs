@@ -12,6 +12,7 @@
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { makeAnchoredApplyHandler } from './handlers.mjs';
 import { makeErrorSink, safeListener } from './isolation.mjs';
 import { landingCapability, createLandingResolver } from './landing.mjs';
 import { deliveryCapability, registerDelivery } from './deliver.mjs';
@@ -50,6 +51,10 @@ export const PLUGIN_TOOLS = Object.freeze([
   //   此前**没有任何手段**能回答"这条记下来的纪律到底生效了没"——工具面到此为止（入账 ≠ 生效）。
   //   本工具是 `effectPlan` 的只读出口（只读 = 不写 rules.json，红线不动）。
   { name: `${TOOL_PREFIX}effect`, event: 'tools/result', summary: '生效体检（只读）：每条纪律的生效状态 none/injected/mechanized/verified/recurred + findings（只写下来了 = EFFECT_TEXT_ONLY）' },
+  // 2026-09-19：**锚定式人签字**的唯一入口。为什么必须有它：`--by human` 只是字符串（规则 43 自曝），
+  //   AI 也能敲；本工具经宿主 `ctx.userQuestions.ask()` 问**活着的根 agent**（子代理会被判
+  //   `DELEGATED_CALLER`）⇒ 应答在结构上造不出来。问不通/被拒 ⇒ **一律不写**（fail-closed）。
+  { name: `${TOOL_PREFIX}apply`, event: 'tools/result', summary: '落盘生效绑定（**锚定式人签字**：经宿主问真人，批准才写；拒绝/问不通一律不写）' },
 ]);
 
 /**
@@ -106,6 +111,15 @@ export const TOOL_PARAMETERS = Object.freeze({
       rule: { type: 'string', description: '只看这一条纪律（可选；不给则全量体检）' },
       json: { type: 'boolean', description: '返回完整体检数据（默认只回摘要）' },
     },
+  },
+  [`${TOOL_PREFIX}apply`]: {
+    type: 'object',
+    properties: {
+      proposal: { type: 'string', description: '提案 id（落点 proposals/<id>.json）' },
+      project: { type: 'string', description: '项目根（默认进程工作目录）' },
+      apply: { type: 'boolean', description: 'true 才真写；缺省/false = 只走到"问真人 + dry-run"，不落盘' },
+    },
+    required: ['proposal'],
   },
 });
 
@@ -266,9 +280,12 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
     throw new Error(`rulekeeper 插件: boot 自检未通过 ⇒ 拒绝注册（防"静默不生效"）: ${detail}`);
   }
   const registered = [];
+  // 锚定式人签字 handler（2026-09-19）：它需要 ctx，故在这里覆盖进 handler 表（纯函数表放不下）。
+  // 只覆盖 `rulekeeper_apply` 一个键；其它 handler 由调用方/默认表提供（契约不变）。
+  const handlerTable = { ...(handlers ?? {}), [TOOL_PREFIX + 'apply']: makeAnchoredApplyHandler({ ctx, cwd: process.cwd() }) };
   for (const t of tools) {
     // 宿主契约：`register(单对象)`（内部自带 effect 注册，dsh-tools/lib/index.js:2781）⇒ **不再外套 ctx.effect**
-    ctx.tools.register(toolDefinition(t, handlers));
+    ctx.tools.register(toolDefinition(t, handlerTable));
     registered.push(t.name);
   }
 

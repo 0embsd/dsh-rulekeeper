@@ -44,7 +44,20 @@ export function validateConfig(obj) {
   if (!MODES.includes(obj.mode)) {
     out.push(`mode 必须是 ${MODES.join('|')} 之一（实际 ${JSON.stringify(obj.mode)}）`);
   }
+  // 锚定式人签字（2026-09-19，契约扩展位）：落点级开关。true ⇒ 没有"问过真人"的凭证一律不许写 rules.json。
+  if (Object.hasOwn(obj, 'requireAnchoredApproval') && typeof obj.requireAnchoredApproval !== 'boolean') {
+    out.push(`requireAnchoredApproval 必须是布尔（实际 ${JSON.stringify(obj.requireAnchoredApproval)}）`);
+  }
   return out;
+}
+
+/** 读落点的"要不要锚定人签字"开关（**读不了就当作 false**：不能因为配置读不到就把写通路锁死，但也绝不假装锚定过） */
+export function requireAnchoredApprovalOf(landingDir) {
+  try {
+    return loadConfig(landingDir).requireAnchoredApproval === true;
+  } catch {
+    return false;
+  }
 }
 
 /**

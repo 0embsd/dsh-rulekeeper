@@ -101,6 +101,7 @@
 | `protected_paths` | array | 否 |  |  |  |
 | `ledgerPath` | string | 否 |  |  |  |
 | `maxInjectChars` | number | 否 |  |  |  |
+| `requireAnchoredApproval` | boolean | 否 |  |  | true ⇒ 无锚定人签字凭证时拒绝写 rules.json（凭证由插件工具 rulekeeper_apply 经 ctx.userQuestions 取得） |
 
 ### `proposals/<id>.json`
 

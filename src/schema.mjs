@@ -152,8 +152,12 @@ export const FILES = Object.freeze([
       { name: 'protected_paths', type: 'array', required: false },
       { name: 'ledgerPath', type: 'string', required: false },
       { name: 'maxInjectChars', type: 'number', required: false },
+      // 锚定式人签字（2026-09-19 契约扩展位）：true ⇒ rules.json 的写入必须带"问过真人"的凭证，
+      // `--by human` 这种字符串声明一律拒（规则 43 的同族落地）。缺省 = 不要求（保持既有落点行为不变）。
+      { name: 'requireAnchoredApproval', type: 'boolean', required: false, note: 'true ⇒ 无锚定人签字凭证时拒绝写 rules.json（凭证由插件工具 rulekeeper_apply 经 ctx.userQuestions 取得）' },
     ],
     derived: [],
+    extensions: ['requireAnchoredApproval'],
   },
   {
     name: 'proposals/<id>.json',
