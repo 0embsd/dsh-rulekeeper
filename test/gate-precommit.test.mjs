@@ -59,6 +59,34 @@ const snap = (f, file, why = 'LF-500 用例') => takeSnapshot({
 });
 const pre = (args) => gate(['precommit', ...args]);
 
+// ── 公开面脱敏的提交时机械面（2026-09-19，同一形态第三次复发后补）──────────────────
+// 复发史（实测，不是假想）：脚本探针注释 → src/landing.mjs 注释 → src/similarity.mjs 注释，
+//   三次都是"新写文件的注释里带了内部项目名/本机路径"，而此前只有跑 selfcheck 才发现。
+// 本条判据：**暂存**一份带内部标识的文件 ⇒ 提交当场被拒（且原因点名是脱敏，不是受保护路径）。
+test('red: 暂存文件带内部标识 ⇒ 提交被拒（GATE_PRECOMMIT_INTERNAL_LEAK）', () => {
+  const f = fixture('gate-leak-red', { protectedPaths: [] });   // 不设保护面 ⇒ 拒的唯一原因只能是脱敏
+  const leaky = join(f.repo, 'src', 'note.md');
+  writeFileSync(leaky, '参考：D:\\opt\\somewhere 的配置（本机路径）\n', 'utf8');
+  assert.equal(git(f.repo, 'add', 'src/note.md').status, 0);
+
+  const r = pre(['--repo', f.repo, '--landing', f.landing]);
+  assert.equal(r.rc, RC.FAIL, `应当被拒；out=${r.out} err=${r.err}`);
+  assert.match(r.out, /GATE_PRECOMMIT_INTERNAL_LEAK/, '拒的理由必须是脱敏，而不是别的');
+  assert.match(r.out, /src\/note\.md/, '要点名是哪个文件');
+  assert.match(r.out, /本机盘符路径/, '要点名是哪一类标识');
+});
+
+test('green（反事实）: 把标识改掉后同一门禁放行 —— 证明判据不是恒真的', () => {
+  const f = fixture('gate-leak-green', { protectedPaths: [] });
+  const clean = join(f.repo, 'src', 'note.md');
+  writeFileSync(clean, '参考：项目根下的配置文件（不含任何本机路径）\n', 'utf8');
+  assert.equal(git(f.repo, 'add', 'src/note.md').status, 0);
+
+  const r = pre(['--repo', f.repo, '--landing', f.landing]);
+  assert.equal(r.rc, RC.OK, `干净文件不得被拒；out=${r.out} err=${r.err}`);
+  assert.ok(!/GATE_PRECOMMIT_INTERNAL_LEAK/.test(r.out), '干净文件不得出现脱敏 finding');
+});
+
 test('green: 留证（基线 == 暂存内容）后提交通过 -> exit=0，且不写台账', () => {
   const f = fixture('pc-green');
   writeFileSync(join(f.repo, 'AGENTS.md'), 'v2\n', 'utf8');

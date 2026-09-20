@@ -236,6 +236,79 @@ export function duplicateImportBindings(code) {
   return [...dups].sort();
 }
 
+/** S8 模式表（**模块级导出**：既供 selfcheck 全量扫，也供 pre-commit 对暂存文件扫 —— 同一份口径，不许两套） */
+export const PUBLIC_FACE_FORBIDDEN = [
+  { re: /\bmyxV2\b/i, why: '内部项目名' },
+  { re: /\bmyx-[a-z]/i, why: '内部工具名' },
+  { re: /\bMYX_[A-Z]/i, why: '内部结果行前缀' },
+  { re: /[A-Za-z]:\\Users\\[A-Za-z0-9._-]+/i, why: '本机用户绝对路径' },
+  { re: /[A-Za-z]:\\opt\\/i, why: '本机盘符路径' },
+  { re: /\bpresets\b/i, why: '内部容器仓名' },
+  { re: /\b101\b/, why: '内部主机编号' },
+  // 「检测器自身必须写出模式」的例外（**只对检测模块生效**，且私钥头还要求文件里没有真密钥正文）：
+  //   src/redact.mjs 与 src/selfcheck.mjs 是**脱敏/门禁的实现**，它们必须包含模式字面量 —— 属元数据，不是凭据。
+  //   防滥用：私钥头例外额外要求"该文件里没有 60+ 字符的 base64 正文"（真密钥被粘进来仍会被抓）。
+  {
+    re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+    why: '私钥头（凭据）',
+    allow: (rel, _s, text) => (rel === 'src/redact.mjs' || rel === 'src/selfcheck.mjs') && !/[A-Za-z0-9+/]{60,}/.test(text),
+  },
+  {
+    re: /(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])/,
+    why: '真实 IPv4（基础设施标识）',
+    allow: (rel, s) => s === '127.0.0.1' || s === '0.0.0.0',   // 回环/未指定不算基础设施标识
+  },
+  { re: /\b(?:ali[_-]?key|ali[_-]?secret|cf[_-]?token|aws_secret_access_key|api[_-]?key|password|passwd)\b\s*[:=]\s*['"][^'"]{8,}/i, why: '云凭据/口令真值' },
+  {
+    re: /\b(?:id_rsa|id_ed25519)\b|\.pem\b/i,
+    why: '私钥文件名（基础设施标识）',
+    allow: (rel) => rel === 'src/selfcheck.mjs',   // 仅本模式表自身
+  },
+];
+
+/**
+ * 对**单份文本**做公开面脱敏扫描（纯函数：selfcheck 与 pre-commit 复用同一份口径）。
+ * @param {string} rel posix 相对路径（供 `allow` 例外判定）
+ * @param {string} text 文件文本
+ * @param {Array} [forbidden]
+ * @returns {{why:string, match:string}[]} 每类模式最多报一次（避免刷屏）
+ */
+export function findPublicFaceLeaks(rel, text, forbidden = PUBLIC_FACE_FORBIDDEN) {
+  const found = [];
+  for (const { re, why, allow } of forbidden) {
+    const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+    for (const m of text.matchAll(g)) {
+      if (typeof allow === 'function' && allow(rel, m[0], text)) continue;
+      found.push({ why, match: m[0] });
+      break;
+    }
+  }
+  return found;
+}
+
+/**
+ * 对一组**相对路径**做公开面脱敏扫描（pre-commit 用：暂存文件逐一过一遍）。
+ * 文件不存在（删除/改名）⇒ 跳过，不算违规。
+ * @returns {{rel:string, why:string, match:string}[]}
+ */
+export function scanPublicFacePaths(root, relPaths = []) {
+  const out = [];
+  for (const rel of relPaths) {
+    const posix = String(rel).split(sep).join('/');
+    if (posix.startsWith('test/fixtures/')) continue;   // 夹具里的历史文本是被测输入，不算对外文档
+    const file = join(root, posix);
+    if (!existsSync(file)) continue;
+    let text;
+    try {
+      text = readFileSync(file, 'utf8');
+    } catch {
+      continue;   // 二进制/读不了 ⇒ 跳过（S8 只管文本公开面）
+    }
+    for (const leak of findPublicFaceLeaks(posix, text)) out.push({ rel: posix, ...leak });
+  }
+  return out;
+}
+
 /**
  * @param {string} root dsh-rulekeeper 包根目录（含 package.json）
  * @param {{projectRoot?: string, env?: object}} [opts]
@@ -372,47 +445,20 @@ export function checkSkeleton(root, opts = {}) {
   //   列表刻意写死为"具体标识"（不写宽），避免误伤正常英文单词。
   //   2026-09-16 扩（要求"独立多平台通用 + 公开面不得出现个人的主机/服务器信息"）：后四条是**通用**模式，
   //   不针对任何具体主机 ⇒ 谁的基础设施信息漏进来都拦得住；本包实测 0 命中（不误伤自身）。
-  const FORBIDDEN = [
-    { re: /\bmyxV2\b/i, why: '内部项目名' },
-    { re: /\bmyx-[a-z]/i, why: '内部工具名' },
-    { re: /\bMYX_[A-Z]/i, why: '内部结果行前缀' },
-    { re: /[A-Za-z]:\\Users\\[A-Za-z0-9._-]+/i, why: '本机用户绝对路径' },
-    { re: /[A-Za-z]:\\opt\\/i, why: '本机盘符路径' },
-    { re: /\bpresets\b/i, why: '内部容器仓名' },
-    { re: /\b101\b/, why: '内部主机编号' },
-    // 「检测器自身必须写出模式」的例外（**只对检测模块生效**，且私钥头还要求文件里没有真密钥正文）：
-    //   src/redact.mjs 与 src/selfcheck.mjs 是**脱敏/门禁的实现**，它们必须包含模式字面量 —— 属元数据，不是凭据。
-    //   防滥用：私钥头例外额外要求"该文件里没有 60+ 字符的 base64 正文"（真密钥被粘进来仍会被抓）。
-    {
-      re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
-      why: '私钥头（凭据）',
-      allow: (rel, _s, text) => (rel === 'src/redact.mjs' || rel === 'src/selfcheck.mjs') && !/[A-Za-z0-9+/]{60,}/.test(text),
-    },
-    {
-      re: /(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])/,
-      why: '真实 IPv4（基础设施标识）',
-      allow: (rel, s) => s === '127.0.0.1' || s === '0.0.0.0',   // 回环/未指定不算基础设施标识
-    },
-    { re: /\b(?:ali[_-]?key|ali[_-]?secret|cf[_-]?token|aws_secret_access_key|api[_-]?key|password|passwd)\b\s*[:=]\s*['"][^'"]{8,}/i, why: '云凭据/口令真值' },
-    {
-      re: /\b(?:id_rsa|id_ed25519)\b|\.pem\b/i,
-      why: '私钥文件名（基础设施标识）',
-      allow: (rel) => rel === 'src/selfcheck.mjs',   // 仅本模式表自身
-    },
-  ];
+  //
+  // **2026-09-19 第三次复发后提到模块级**：S8 以前只能靠"跑一次 selfcheck"发现，而它已经因为
+  //   "新写文件的注释里带内部路径"复发了三次（脚本探针 → src/landing.mjs → src/similarity.mjs）。
+  //   现在模式表与扫描函数**导出**，由 `gate.precommitGate` 在**提交那一刻**对暂存文件跑一遍
+  //   ⇒ 复发的代价从"下次跑自检才发现"降到"当场提交被拒"。
+
+  const FORBIDDEN = PUBLIC_FACE_FORBIDDEN;
   for (const file of listPublicFace(root)) {
     const rel = relative(root, file).split(sep).join('/');
     // 夹具/派生品里的历史文本允许保留（它们是被测输入，不是对外文档）；但 src/ 与顶层文档必须干净
     if (rel.startsWith('test/fixtures/')) continue;
     const text = readFileSync(file, 'utf8');
-    for (const { re, why, allow } of FORBIDDEN) {
-      // 逐次全局匹配（原实现用 re.exec 只看第一处，且带 allow 白名单时无法跳过）：
-      const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
-      for (const m of text.matchAll(g)) {
-        if (typeof allow === 'function' && allow(rel, m[0], text)) continue;
-        add('S8_INTERNAL_LEAK', `${rel}: 出现${why}「${m[0]}」（公开仓不得暴露内部标识/本地路径/基础设施信息）`);
-        break;   // 每个文件每类只报一次，避免刷屏
-      }
+    for (const leak of findPublicFaceLeaks(rel, text)) {
+      add('S8_INTERNAL_LEAK', `${rel}: 出现${leak.why}「${leak.match}」（公开仓不得暴露内部标识/本地路径/基础设施信息）`);
     }
   }
 

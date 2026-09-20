@@ -30,6 +30,7 @@ import { validateUncheckableDeclaration } from './uncheckable.mjs';
 import { redactValue } from './redact.mjs';
 import { offGuard } from './mode.mjs';
 import { pathKey, resolveProjectLanding, toPosix } from './platform/paths.mjs';
+import { scanPublicFacePaths } from './selfcheck.mjs';
 
 /** 工具自产物/非项目目录：任何判据都不得把它们当"项目文件"（㉚） */
 export const SELF_ARTIFACT_DIRS = Object.freeze(['.git', 'node_modules', '.dsh-ai']);
@@ -347,6 +348,21 @@ export function precommitGate(opts = {}) {
   }
 
   const rules = { protected_paths: protection.patterns };
+
+  // ── 公开面脱敏的**提交时**机械面（2026-09-19，同一形态第三次复发后补）────────────
+  // 复发史：脚本探针注释 → `src/landing.mjs` 注释 → `src/similarity.mjs` 注释，三次都是
+  //   "新写文件的注释里带了内部项目名/本机路径"。此前只有 `rk-selfcheck` 的 S8 能发现它，
+  //   而那要等到"有人跑自检"。这里在**提交那一刻**对暂存文件跑同一份模式表 ⇒ 当场被拒。
+  // 为什么看工作区而不是 `git show :<path>`：S8 管的是"这段文字会不会进公开仓"，暂存区与
+  //   工作区在本仓的实际流程里一致（且 `stagedBlobSha` 已单独负责内容指纹对账）。
+  for (const leak of scanPublicFacePaths(repoRoot, staged.paths)) {
+    findings.push({
+      code: 'GATE_PRECOMMIT_INTERNAL_LEAK',
+      message: `暂存文件出现${leak.why}「${leak.match}」: ${leak.rel}（公开仓不得暴露内部标识/本地路径/基础设施信息；改掉措辞再提交）`,
+      path: leak.rel,
+    });
+  }
+
   const protectedStaged = [];
   const violations = [];
   for (const rel of staged.paths) {
