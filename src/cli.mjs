@@ -273,7 +273,9 @@ export const USAGE_LEDGER = `用法:
 
 export const USAGE_EFFECT = `用法:
   rk-effect plan   --landing <落点> [--project <项目根>] [--now <ISO>] [--stale-days n] [--json]
-  rk-effect verify --landing <落点> [--project <项目根>] [--proposal <id>] [--all] [--now <ISO>] [--json]
+  rk-effect verify --landing <落点> [--project <项目根>] [--proposal <id>] [--all] [--now <ISO>] [--json] [--allow-exec]
+                     （--allow-exec 才会**真的执行** kind:"checker" 绑定里写的命令；
+                       未加时 checker 一律报 inconclusive，绝不判通过）
   rk-effect apply  --landing <落点> --proposal <id> --by human [--pattern <glob>]... [--gate <机制>] [--apply] [--project <项目根>] [--now <ISO>] [--json]
   rk-effect inject --landing <落点> [--max-per-session n] [--now <ISO>] [--json]
   rk-effect usage  --landing <落点> [--json]
@@ -2424,7 +2426,7 @@ function runCliEffect(argv, io, env) {
     '--landing': 'string', '--project': 'string', '--now': 'string', '--stale-days': 'string',
     '--proposal': 'string', '--all': 'boolean', '--by': 'string', '--apply': 'boolean',
     '--pattern': 'string[]', '--gate': 'string', '--max-per-session': 'string', '--json': 'boolean',
-    '--limit': 'string', '--write': 'boolean',
+    '--limit': 'string', '--write': 'boolean', '--allow-exec': 'boolean',
   }, io);
   if (parsed.error !== null) return parsed.error;
   const flags = parsed.flags;
@@ -2597,12 +2599,23 @@ function runCliEffect(argv, io, env) {
     let passed = 0;
     let failed = 0;
     for (const e of entries) {
-      const report = verifyBinding({ landingDir: landing, projectRoot, binding: e.binding, falsePositive: e.binding.falsePositive });
+      // checker 绑定会**真的执行**本地命令 ⇒ 必须显式 `--allow-exec`（未许可时如实报 inconclusive，不判通过）
+      const report = verifyBinding({
+        landingDir: landing, projectRoot, binding: e.binding, falsePositive: e.binding.falsePositive,
+        allowExec: flags['allow-exec'] === true,
+      });
       for (const c of report.cases) io.out(line(`RK_EFFECT_CASE rule=${e.rule} name=${c.name} expect=${c.expect} got=${c.got} ok=${c.ok}`));
-      for (const f of report.findings) io.out(line(`FINDING ${f.code} error ${e.rule} ${f.message}`));
+      if (report.state !== undefined) io.out(line(`RK_EFFECT_STATE rule=${e.rule} state=${report.state}`));
+      for (const f of report.findings) io.out(line(`FINDING ${f.code} ${f.severity ?? 'error'} ${e.rule} ${f.message}`));
       const wrote = appendVerification(landing, {
-        rule: e.rule, target: e.binding.carrier ?? '', ok: report.ok,
-        evidence: [`carrier=${e.binding.carrier ?? '(none)'}`, `gate=${e.binding.gate ?? '(none)'}`], now,
+        rule: e.rule, target: e.binding.carrier ?? (e.binding.kind === 'checker' ? `checker:${e.binding.command?.[0] ?? '?'}` : ''),
+        ok: report.ok,
+        evidence: [
+          `kind=${e.binding.kind}`,
+          `carrier=${e.binding.carrier ?? '(none)'}`,
+          `gate=${e.binding.gate ?? '(none)'}`,
+          ...(e.binding.kind === 'checker' ? [`checkerVersion=${e.binding.checkerVersion ?? '(none)'}`, `state=${report.state ?? 'inconclusive'}`] : []),
+        ], now,
       });
       io.out(line(`RK_EFFECT_VERIFY_RULE=${e.rule} RESULT=${report.ok === true ? 'pass' : 'fail'} EVIDENCE=${wrote.ok !== true ? `failed(${wrote.reason ?? ''})` : (wrote.skipped === true ? 'skipped(mode=off)' : 'written')}`));
       if (report.ok === true) passed += 1; else failed += 1;

@@ -205,6 +205,30 @@ rk-effect inject --landing <落点>                       # 把"只写下来了"
   **0/385 → 31/385（8.05%）**；写注解前后 `ledger.jsonl` 的 sha256 相同。
   其余 **353 条无可观测锚点** —— 与 E1/E3 的结论一致：**缺的是原料，不是工具**。
 
+### `kind:"checker"` 绑定（2026-09-19，objective ③ · 技术类教训的唯一出路）
+
+- **为什么必须有**：现有文件类绑定只能表达"某文件被改了却没留证"。E1 拿 10 条真实技术类教训逐个试：
+  **0/10** 对得上那个模型、**10/10** 只能靠"跑检查器 + 用构造的违规样本判红"。此前 `verify` 对非文件类
+  kind 直接 `EFFECT_KIND_UNSUPPORTED`（fail-closed），于是"把技术类教训变成机械判据"结构上做不到。
+- **字段**（写进 `rules.json` 的 `checks[]`，与已立项设计 P1-1 对齐）：
+  `command[]`（argv，**无 shell**）／`expectRed.exitCode`（**必须非 0**，禁 `stdoutContains`）／
+  `expectGreen.exitCode`（必须 0）／`redSample{kind:'tree',source}`／`greenSample{...}`（缺省 = 项目根）／
+  `sampleHash`（样本内容指纹）／`checkerVersion`／`timeoutMs`。形状在**装载期**就校验（`rules.mjs`）。
+- **验证四项 + 三态**：
+  ① 命中红（违规样本上 exit 必须等于 `expectRed`）② 误报面绿（合规样本上必须等于 `expectGreen`）
+  ③ **反事实唯一性**（两样本结论必须不同：都红=检查器/环境坏了、都绿=判据没有判别力）
+  ④ **确定性**（同一输入两次结论一致）。状态：`green` / `red` / `inconclusive`。
+- **约定**：检查器**以项目根为 cwd**，被检样本目录由环境变量 `RULEKEEPER_SAMPLE_DIR` 传入
+  （同一条命令因此能跑红/绿两个样本）；命中 exit≠0、干净 exit=0。
+- **默认不执行**：checker 绑定**只有**加 `--allow-exec` 才会真的跑本地命令；不加时一律 `inconclusive`
+  （`EFFECT_CHECKER_EXEC_NOT_ALLOWED`）—— 这是**显式确认**而非安全边界（规则 43 同族自曝）。
+- **样本指纹**：`sampleHash` 对不上 ⇒ `inconclusive`（样本事后被改小也能骗过用例，必须作废重签）。
+- 样例检查器：`scripts/checkers/leak-check.mjs`（判的是一条**真实复发三次**的纪律：公开面不得出现
+  内部标识/本机路径），红/绿样本在 `test/fixtures/checker/{red,green}-sample/`。
+- **已知缺口**：checker 绑定目前**还不能经 `rk-effect apply` 落盘**（apply 只构造文件类绑定）
+  ⇒ 现在要写它得手工编辑 `rules.json`。下一步：让 apply 认提案里的 `checker:<spec.json>` 标记，
+  由已入库的 spec 文件构造绑定（保持"唯一写通路 + 人签字"不破）。
+
 ### 生效面口径变更：从"类目层"到"条目层"（P0-2，2026-09-19）
 
 - **旧口径**问"这个**类目**有没有生效绑定"⇒ `TEXT_ONLY 21/22` 是**结构必然**（类目只是分组标签，不承担生效语义；

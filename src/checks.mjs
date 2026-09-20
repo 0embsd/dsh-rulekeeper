@@ -24,7 +24,7 @@ import { normalizeTarget } from './rules.mjs';
 import { checkUncheckable } from './uncheckable.mjs';
 import { pathKey, relativeToRoot, toPosix } from './platform/paths.mjs';
 
-export const CHECK_KINDS = Object.freeze(['file_untracked_change', 'output_shape', 'invalid_reference']);
+export const CHECK_KINDS = Object.freeze(['file_untracked_change', 'output_shape', 'invalid_reference', 'checker']);
 
 /** 包根（src/checks.mjs → 上溯 2 级）：冻结源与夹具的定位基准 */
 export const PKG_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));

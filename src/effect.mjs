@@ -27,6 +27,7 @@ import { dirname, join } from 'node:path';
 
 import { appendLine, readLines } from './append.mjs';
 import { activationsById, mergeActivation } from './annotations.mjs';
+import { verifyChecker, validateCheckerBinding } from './checker.mjs';
 import { backupFile } from './backup.mjs';
 import { CHECK_KINDS } from './checks.mjs';
 import { CLOSE_KNOWN_GATES, effectiveProtection, readGateLedger, reconWrite } from './gate.mjs';
@@ -137,6 +138,15 @@ export function normalizeBinding(entry) {
       : null,
     proposal: str(entry.proposal),
     activatedAt: str(entry.activatedAt),
+    // checker 绑定的字段（kind='checker' 时才用；其余 kind 保持 null，便于判据区分"没写"与"写了空"）
+    command: Array.isArray(entry.command) ? entry.command.filter((a) => typeof a === 'string' && a !== '') : null,
+    expectRed: entry.expectRed !== null && typeof entry.expectRed === 'object' ? entry.expectRed : null,
+    expectGreen: entry.expectGreen !== null && typeof entry.expectGreen === 'object' ? entry.expectGreen : null,
+    redSample: entry.redSample !== null && typeof entry.redSample === 'object' ? entry.redSample : null,
+    greenSample: entry.greenSample !== null && typeof entry.greenSample === 'object' ? entry.greenSample : null,
+    sampleHash: str(entry.sampleHash),
+    checkerVersion: str(entry.checkerVersion),
+    timeoutMs: Number.isInteger(entry.timeoutMs) ? entry.timeoutMs : null,
   };
 }
 
@@ -419,6 +429,13 @@ export function effectPlan(opts = {}) {
     // 空转闸（"已实现未生效"在**数据面**的对应物）：绑定的载体必须真被保护面覆盖，否则这条绑定是挂名
     const uncovered = [];
     for (const c of b.checks) {
+      // checker 绑定没有文件载体：它的"空转"形态是**检查器压根跑不起来**（形状不合法）。
+      // 用同一份形状校验代替 carrier 覆盖检查，避免把合法的 checker 绑定误报成"缺 carrier"。
+      if (c.kind === 'checker') {
+        const cproblems = validateCheckerBinding(c);
+        if (cproblems.length > 0) uncovered.push(`${c.rule}: checker 绑定形状不合法（${cproblems.join('；')}）`);
+        continue;
+      }
       if (c.carrier === null) { uncovered.push(`${c.rule}: 绑定缺 carrier`); continue; }
       const verdict = isProtected(c.carrier, { protected_paths: protection.patterns }, { projectRoot: opts.projectRoot ?? process.cwd() });
       if (verdict.protected !== true) uncovered.push(`${c.rule}: carrier ${c.carrier} 未被保护面覆盖（空转闸）`);
@@ -556,9 +573,25 @@ export function verifyBinding(opts = {}) {
     return { ok: false, binding: null, cases, findings: [{ code: 'EFFECT_BINDING_UNREADABLE', message: '绑定条目形状不合法' }] };
   }
   // ④ 类型/载体检查（**先于判定**）：不支持的 kind 不许"用文件写入门禁"糊过去（CR major #2）
+  // 2026-09-19（objective ③）：`checker` 已实现（委托给 checker.mjs 的四项验证 + 三态），
+  //   其余非文件类 kind 仍 fail-closed 如实报"未实现"。
+  if (binding.kind === 'checker') {
+    const r = verifyChecker({
+      projectRoot: opts.projectRoot ?? process.cwd(),
+      binding,
+      allowExec: opts.allowExec === true,
+      ...(Number.isInteger(opts.timeoutMs) ? { timeoutMs: opts.timeoutMs } : {}),
+    });
+    for (const c of r.cases) cases.push({ ...c, kind: 'checker' });
+    for (const f of r.findings) findings.push({ ...f, rule: binding.rule });
+    if (r.ok === true) {
+      findings.push({ code: 'EFFECT_CHECKER_VERIFIED', severity: 'info', rule: binding.rule, message: `${binding.rule}: checker 四项验证全过（状态 ${r.state}）：命中红/误报面绿/反事实唯一性/确定性` });
+    }
+    return { ok: r.ok === true, binding, cases, findings, state: r.state };
+  }
   if (binding.kind !== 'file_untracked_change') {
-    findings.push({ code: 'EFFECT_KIND_UNSUPPORTED', message: `${binding.rule}: 绑定 kind=${binding.kind} 暂不支持验证（本工具只实现 file_untracked_change；其余 kind 必须如实报"未实现"，不得判通过）` });
-    return { ok: false, binding, cases, findings };
+    findings.push({ code: 'EFFECT_KIND_UNSUPPORTED', message: `${binding.rule}: 绑定 kind=${binding.kind} 暂不支持验证（本工具已实现 file_untracked_change 与 checker；其余 kind 必须如实报"未实现"，不得判通过）` });
+    return { ok: false, binding, cases, findings, state: 'inconclusive' };
   }
   if (binding.carrier === null) {
     findings.push({ code: 'EFFECT_VERIFY_UNCARRIED', message: `${binding.rule}: 绑定没有 carrier（判据载体与事实必须一一对应，缺载体 = 凭证不足）` });

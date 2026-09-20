@@ -12,6 +12,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { validateCheckerBinding } from './checker.mjs';
 import { pathKey, relativeToRoot, toPosix } from './platform/paths.mjs';
 import { SCHEMA_VERSION } from './schema.mjs';
 
@@ -45,7 +46,7 @@ export function validateRules(obj) {
     }
   }
   if (Array.isArray(obj.checks)) {
-    const allowed = ['file_untracked_change', 'output_shape', 'invalid_reference'];
+    const allowed = ['file_untracked_change', 'output_shape', 'invalid_reference', 'checker'];
     for (const check of obj.checks) {
       if (typeof check === 'string') {
         if (!allowed.includes(check)) findings.push({ code: 'RULES_CHECK_UNKNOWN', msg: `未知 check 类型: ${check}（只允许 ${allowed.join('/')}）` });
@@ -83,8 +84,17 @@ export function validateRules(obj) {
   return { ok: findings.length === 0, findings };
 }
 
-/** `checks` 对象条目（生效绑定）的字段表 —— **唯一权威源**，效果代码与测试都读它 */
-export const BINDING_FIELDS = Object.freeze(['kind', 'rule', 'carrier', 'falsePositive', 'gate', 'patterns', 'proposal', 'activatedAt', 'notes']);
+/** `checks` 对象条目（生效绑定）的字段表 —— **唯一权威源**，效果代码与测试都读它
+ *
+ * 2026-09-19（objective ③）：新增 `kind:"checker"` 的字段（按已立项设计 P1-1）：
+ *   `command[]` / `expectRed` / `expectGreen` / `redSample` / `greenSample` / `sampleHash` /
+ *   `checkerVersion` / `timeoutMs`。它们只对 checker 有意义，故在字段表里登记，由
+ *   `validateBindingEntry` 按 kind 分别要求（**不许**用一个宽字段表蒙过去）。
+ */
+export const BINDING_FIELDS = Object.freeze([
+  'kind', 'rule', 'carrier', 'falsePositive', 'gate', 'patterns', 'proposal', 'activatedAt', 'notes',
+  'command', 'expectRed', 'expectGreen', 'redSample', 'greenSample', 'sampleHash', 'checkerVersion', 'timeoutMs',
+]);
 
 /**
  * 校验一条生效绑定条目。
@@ -92,7 +102,7 @@ export const BINDING_FIELDS = Object.freeze(['kind', 'rule', 'carrier', 'falsePo
  * @param {string[]} allowedKinds
  * @returns {string[]} 问题列表（空 = 合法）
  */
-export function validateBindingEntry(entry, allowedKinds = ['file_untracked_change', 'output_shape', 'invalid_reference']) {
+export function validateBindingEntry(entry, allowedKinds = ['file_untracked_change', 'output_shape', 'invalid_reference', 'checker']) {
   const problems = [];
   if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
     return ['checks 条目只能是字符串（旧形态）或对象（生效绑定）'];
@@ -106,7 +116,11 @@ export function validateBindingEntry(entry, allowedKinds = ['file_untracked_chan
   if (typeof entry.rule !== 'string' || entry.rule.trim() === '') {
     problems.push('生效绑定必须有非空 rule（否则无从判断这条判据属于哪条纪律）');
   }
-  if (typeof entry.carrier !== 'string' || entry.carrier.trim() === '') {
+  // `checker` 与文件类绑定的本质区别：它的"载体"是**检查器 + 样本目录**，没有单个文件 carrier。
+  // 故按 kind 分别要求：checker 要 command/expectRed/expectGreen/redSample；其余要 carrier。
+  if (entry.kind === 'checker') {
+    for (const problem of validateCheckerBinding(entry)) problems.push(problem);
+  } else if (typeof entry.carrier !== 'string' || entry.carrier.trim() === '') {
     problems.push('生效绑定必须有非空 carrier（判据载体与事实必须一一对应；没有载体就无法验证）');
   }
   // `patterns` = **本次生效新增的保护面模式**（反事实验证要靠它"只摘掉这一条绑定带来的拦截"，
