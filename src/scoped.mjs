@@ -20,7 +20,7 @@ import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 
 import { DEFAULT_MAX_CHARS, DEFAULT_MAX_RULES, DEFAULT_MIN_INTERVAL_MS, DEFAULT_ORDER, REGISTRY_NAME, buildReminderText, createDeliveryRuntime, nextDelivery } from './deliver.mjs';
-import { resolveProjectLanding, resolveUserLanding } from './platform/paths.mjs';
+import { pathKey, resolveProjectLanding, resolveUserLanding } from './platform/paths.mjs';
 import { bumpUsage, readEmission, writeEmission } from './usage.mjs';
 
 /** 文本指纹（跨重启去重用；sha256 前 16 字节足够区分，且不把正文写进状态文件） */
@@ -46,17 +46,36 @@ export function agentSessionCwd(agent) {
 }
 
 /**
- * 用**这个会话自己的** cwd 解析落点：项目落点存在就用它，否则退用户级（与全局通道同一口径）。
+ * 该会话应该携带的落点**集合** = 项目落点 ∪ 用户级落点（保序：项目在前）。
+ *
+ * 为什么是并集（2026-09-21 修 F-2，现场实证）：作用域通道过去是"项目优先、有项目就不看用户级"，
+ *   而根通道在所有会话接管后会**让路** ⇒ **有项目落点的会话永远收不到用户级纪律**（评审会话现场
+ *   只剩 `CAT-*` 三条，`JUDGEMENT-*` 三条静默消失）。用户级纪律本该在**任何**项目里都被提醒
+ *   （与 `landing.mjs` 同一口径："项目自己没有落点 ⇒ 退用户级（用户级纪律本就该在任何项目里被提醒）"）。
+ * 去重按 `pathKey`：项目落点恰好就是用户级落点时只算一个。
+ * @returns {{dir: string|null, source: string}[]} 至少一项（无落点时为 `[{dir:null, source:'none'}]`）
+ */
+export function landingsForAgent(agent, { env = process.env } = {}) {
+  const out = [];
+  const cwd = agentSessionCwd(agent);
+  if (cwd !== null) {
+    const project = resolveProjectLanding(cwd);
+    if (existsSync(project)) out.push({ dir: project, source: 'agent-project' });
+  }
+  const user = resolveUserLanding(env);
+  if (existsSync(user) && !out.some((r) => pathKey(r.dir) === pathKey(user))) {
+    out.push({ dir: user, source: 'agent-user-fallback' });
+  }
+  if (out.length === 0) return [{ dir: null, source: 'none' }];
+  return out;
+}
+
+/**
+ * 单落点视角（**兼容保留**）：并集里的第一个（项目优先，没有项目才是用户级）。
  * @returns {{dir: string|null, source: string}}
  */
-export function landingForAgent(agent, { env = process.env } = {}) {
-  const cwd = agentSessionCwd(agent);
-  if (cwd === null) return { dir: null, source: 'none' };
-  const project = resolveProjectLanding(cwd);
-  if (existsSync(project)) return { dir: project, source: 'agent-project' };
-  const user = resolveUserLanding(env);
-  if (existsSync(user)) return { dir: user, source: 'agent-user-fallback' };
-  return { dir: null, source: 'none' };
+export function landingForAgent(agent, opts = {}) {
+  return landingsForAgent(agent, opts)[0];
 }
 
 /** 在给定作用域上下文里读 `systemPrompt`（先 reflect——无 inject 要求，再直接读；都不行 ⇒ null） */
@@ -98,6 +117,7 @@ export function registerAgentScopedDelivery({
 
   const runtime = createDeliveryRuntime({ minIntervalMs });
   runtime.lastLanding = landingForAgent(agent, { env });
+  runtime.lastLandings = landingsForAgent(agent, { env });
   const report = () => ({
     ok: true,
     scope: 'agent',
@@ -107,6 +127,9 @@ export function registerAgentScopedDelivery({
     order,
     landingDir: runtime.lastLanding.dir,
     landingSource: runtime.lastLanding.source,
+    landingDirs: (runtime.lastLandings ?? []).map((l) => l.dir).filter((d) => d !== null),
+    landingSources: (runtime.lastLandings ?? []).map((l) => l.source),
+    contributedDirs: runtime.lastContributed ?? [],   // 最近一次**真正被念到**的落点（并集去重后可能少于 landingDirs）
     landingBound: runtime.lastLanding.dir !== null,
     evaluations: runtime.evaluations,
     emissions: runtime.emissions,
@@ -118,17 +141,24 @@ export function registerAgentScopedDelivery({
 
   const provider = () => {
     try {
-      const picked = landingForAgent(agent, { env });      // ← 每次求值都用**这个会话自己**的 cwd
-      runtime.lastLanding = picked;
-      const built = buildReminderText({ landingDir: picked.dir, now: now(), maxRules, maxChars });
+      const picked = landingsForAgent(agent, { env });     // ← 每次求值都用**这个会话自己**的 cwd
+      runtime.lastLandings = picked;
+      runtime.lastLanding = picked[0];
+      const dirs = picked.map((p) => p.dir).filter((d) => typeof d === 'string' && d !== '');
+      // **并集文本**（项目落点 ∪ 用户级落点）：见 `landingsForAgent` 的注释（F-2 修复）
+      const built = buildReminderText({ landingDirs: dirs, now: now(), maxRules, maxChars });
+      const contributing = Array.isArray(built.landings) ? built.landings : [];
+      runtime.lastContributed = contributing;
       // **跨重启不重复投**（2026-09-20 实测到的重复）：内存里去重状态随进程消失，
       //   重启后同一段文本会被再投一次（上下文里出现两份）。这里查"落盘的上次投递"：
-      //   同一落点 + 同一个会话 + 同一段文本 ⇒ 本会话早就有它了，这次不出话。
+      //   同一会话 + 同一段文本 + **每个贡献落点都已记过** ⇒ 本会话早就有它了，这次不出话。
       const selfKey = agentKeyOf(agent);
       const already = (() => {
-        if (built.text === '') return false;
-        const last = readEmission(picked.dir, selfKey);
-        return last !== null && last.sha === textSha(built.text);
+        if (built.text === '' || contributing.length === 0) return false;
+        return contributing.every((dir) => {
+          const last = readEmission(dir, selfKey);
+          return last !== null && last.sha === textSha(built.text);
+        });
       })();
       if (already) {
         runtime.reasons.push('already-delivered-before-restart');
@@ -136,17 +166,30 @@ export function registerAgentScopedDelivery({
       }
       const step = nextDelivery({ runtime, built, now: now() });
       try {
-        const sig = JSON.stringify({ dir: picked.dir, source: picked.source, rules: built.rules, reason: built.reason ?? null });
+        const sig = JSON.stringify({
+          dirs: picked.map((p) => p.dir), sources: picked.map((p) => p.source),
+          rules: built.rules, reason: built.reason ?? null,
+        });
         if (sig !== runtime.lastDiagSignature && typeof onDelivery === 'function') {
           runtime.lastDiagSignature = sig;
-          onDelivery({ scope: 'agent', mechanism: runtime.mechanism ?? null, agent: agentKeyOf(agent), landing: picked, built, step, reason: built.reason ?? null });
+          onDelivery({ scope: 'agent', mechanism: runtime.mechanism ?? null, agent: agentKeyOf(agent), landing: picked[0], landings: picked, built, step, reason: built.reason ?? null });
         }
       } catch { /* 诊断绝不打断投递 */ }
-      if (built.rules.length > 0) {
-        bumpUsage(picked.dir, { rule: built.rules[0], event: 'evaluated', now: now() });
-        if (step.emitted) {
-          for (const rule of built.rules) bumpUsage(picked.dir, { rule, event: 'emitted', now: now() });
-          writeEmission(picked.dir, selfKey, { sha: textSha(built.text), at: now().toISOString() });
+      // 遥测**逐落点记账**（规则 41：每条纪律记到**它自己**的落点上，不许串账）
+      const attribution = Array.isArray(built.attribution) ? built.attribution : [];
+      const ownerOfFirst = attribution.find((a) => a.rules.includes(built.rules[0])) ?? attribution[0] ?? null;
+      if (built.rules.length > 0 && ownerOfFirst !== null && typeof ownerOfFirst.dir === 'string') {
+        bumpUsage(ownerOfFirst.dir, { rule: built.rules[0], event: 'evaluated', now: now() });
+      }
+      if (built.rules.length > 0 && step.emitted) {
+        const contributed = new Set(contributing);
+        for (const a of attribution) {
+          if (typeof a.dir !== 'string' || a.dir === '') continue;
+          // **只给真正出过力的落点记账**（并集去重后某一侧可能一条都没被念到 ⇒ 它不该收到指纹，
+          //   否则"后来它自己想投"时会误判成"这个会话已经有了" —— 用例 ⑦c 钉住这一条）
+          if (!contributed.has(a.dir)) continue;
+          for (const rule of a.rules) bumpUsage(a.dir, { rule, event: 'emitted', now: now() });
+          writeEmission(a.dir, selfKey, { sha: textSha(built.text), at: now().toISOString() });
         }
       }
       return step.text;

@@ -9,9 +9,17 @@ import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { apply, bootSelfCheck, eventTableFromHost, lastApplyReport, PLUGIN_EVENTS, PLUGIN_TOOLS, TOOL_PREFIX } from '../src/plugin.mjs';
-import { cleanupAll, freshProjectLanding, ledgerEntry, tempDir } from './helpers/sandbox.mjs';
+import { cleanupAll, freshProjectLanding, isolateProcessUserLanding, ledgerEntry, realUserLandingGuard, tempDir } from './helpers/sandbox.mjs';
 
-test.after(cleanupAll);
+// `apply()` 内部用 `process.env` 解析落点 ⇒ 本文件**必须**把 DSH_HOME 隔离到临时目录，
+// 否则并集记账会把本文件的遥测写进**真实**用户级落点（实测发生过两次，见 L644）。
+const landedGuard = realUserLandingGuard();
+const isolatedHome = isolateProcessUserLanding('plugin-home');
+test.after(() => {
+  cleanupAll();
+  isolatedHome.restore();
+  landedGuard.assertClean('plugin 用例');
+});
 
 /** 迷你宿主安装面：把事件名写成 `'tools/xxx'` 字面量 */
 // 默认事件表**从 PLUGIN_EVENTS 派生**（2026-09-19 改）：此前硬编码三个 tools/*，

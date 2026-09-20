@@ -18,9 +18,17 @@ import assert from 'node:assert/strict';
 import { PRESTEP_MAX_CHARS, latestUserText, pickMatch, preStepCapability, registerPreStep, scoreMatch, tokens } from '../src/prestep.mjs';
 import { createLandingResolver } from '../src/landing.mjs';
 import { readUsage } from '../src/usage.mjs';
-import { cleanupAll, freshLanding, freshProjectLanding, ledgerEntry } from './helpers/sandbox.mjs';
+import { cleanupAll, freshLanding, freshProjectLanding, isolateProcessUserLanding, ledgerEntry, realUserLandingGuard } from './helpers/sandbox.mjs';
 
-test.after(cleanupAll);
+// 本文件的解析器走 `process.env`（`createLandingResolver({})`）⇒ **必须**把 DSH_HOME 隔离到临时目录，
+// 否则"项目 ∪ 用户级"并集会把本文件的遥测写进**真实**用户级落点（实测发生过两次，见 L644）。
+const landedGuard = realUserLandingGuard();
+const isolatedHome = isolateProcessUserLanding('prestep-home');
+test.after(() => {
+  cleanupAll();
+  isolatedHome.restore();
+  landedGuard.assertClean('prestep 用例');
+});
 
 const TS = '2026-09-19T00:00:00.000Z';
 

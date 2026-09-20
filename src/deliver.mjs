@@ -34,36 +34,89 @@ export const DEFAULT_MIN_INTERVAL_MS = 30 * 60 * 1000; // 文本"变化"的最�
 
 /**
  * 纯函数：算出这次该投递的提醒文本（**稳定、可测**，不碰宿主）。
- * @returns {{text: string, rules: string[], candidates: number, chars: number, truncated: boolean, reason?: string}}
+ *
+ * **单落点**：传 `landingDir`（旧口径，行为逐字不变）。
+ * **并集**：传 `landingDirs`（保序；如 `[项目落点, 用户级落点]`）——同一纪律只念一次，
+ *   预算按"轮转"分配：每个落点轮流出一条，**保证每一方都被念到**。
+ *   为什么必须轮转（2026-09-21 修 F-2）：若按"项目取满再取用户级"，项目落点占满 `maxRules` 时
+ *   用户级纪律又会被饿死——那正是 F-2 的形态（项目会话里 `JUDGEMENT-*` 静默消失）。
+ *   `effectInjectPlan` 是**纯计算**（零落点写入），故可对多个落点各算一次。
+ * @returns {{text: string, rules: string[], candidates: number, chars: number, truncated: boolean,
+ *            landings: string[], attribution: {dir: string, ok: boolean, rules: string[]}[], reason?: string}}
  */
-export function buildReminderText({ landingDir, now = new Date(), maxRules = DEFAULT_MAX_RULES, maxChars = DEFAULT_MAX_CHARS } = {}) {
-  const empty = { text: '', rules: [], candidates: 0, chars: 0, truncated: false };
-  if (typeof landingDir !== 'string' || landingDir.trim() === '') return { ...empty, reason: 'no-landing' };
-  let plan;
-  try {
-    plan = effectInjectPlan({ landingDir, now, maxPerSession: maxRules });
-  } catch (error) {
-    return { ...empty, reason: `plan-error:${String((error && error.message) || error)}` };
+export function buildReminderText({ landingDir, landingDirs, now = new Date(), maxRules = DEFAULT_MAX_RULES, maxChars = DEFAULT_MAX_CHARS } = {}) {
+  const empty = { text: '', rules: [], candidates: 0, chars: 0, truncated: false, landings: [], attribution: [] };
+  // 落点集合：`landingDirs`（并集）优先，否则退回单个 `landingDir`；去重保序
+  const raw = Array.isArray(landingDirs) && landingDirs.length > 0 ? landingDirs : [landingDir];
+  const dirs = [];
+  for (const d of raw) {
+    if (typeof d !== 'string' || d.trim() === '') continue;
+    if (!dirs.includes(d)) dirs.push(d);
   }
-  const rules = [];
-  for (const m of plan.appended ?? []) {
-    const r = m && typeof m.rule === 'string' && m.rule !== '' ? m.rule : null;
-    if (r !== null) rules.push(r);
+  if (dirs.length === 0) return { ...empty, reason: 'no-landing' };
+
+  let planFailed = false;
+  const columns = [];
+  for (const dir of dirs) {
+    let plan;
+    try {
+      plan = effectInjectPlan({ landingDir: dir, now, maxPerSession: maxRules });
+    } catch (error) {
+      planFailed = true;
+      columns.push({ dir, ok: false, entries: [], candidates: 0, reason: `plan-error:${String((error && error.message) || error)}` });
+      continue;
+    }
+    const entries = [];
+    for (const m of plan.appended ?? []) {
+      const rule = m && typeof m.rule === 'string' && m.rule !== '' ? m.rule : null;
+      const text = m && typeof m.text === 'string' ? m.text : '';
+      if (rule === null && text === '') continue;
+      entries.push({ rule, text });
+    }
+    columns.push({ dir, ok: plan.ok !== false, entries, candidates: Number.isFinite(plan.candidates) ? plan.candidates : entries.length });
   }
-  const text = (plan.appended ?? [])
-    .map((m) => (m && typeof m.text === 'string' ? m.text : ''))
-    .filter((t) => t !== '')
-    .join('\n');
+
+  // 并集去重：同一纪律（同一 `rule`）只念一次，**先出现的落点胜**
+  const seen = new Set();
+  for (const c of columns) {
+    c.entries = c.entries.filter((e) => {
+      if (e.rule === null) return true;
+      if (seen.has(e.rule)) return false;
+      seen.add(e.rule);
+      return true;
+    });
+  }
+  // 轮转取条目（第 0 轮：每个落点各一条；第 1 轮：各第二条；直到预算耗尽）
+  const depth = columns.reduce((n, c) => Math.max(n, c.entries.length), 0);
+  const picked = [];
+  for (let i = 0; i < depth && picked.length < maxRules; i += 1) {
+    for (const c of columns) {
+      if (picked.length >= maxRules) break;
+      const e = c.entries[i];
+      if (e === undefined) continue;
+      picked.push({ rule: e.rule, text: e.text, dir: c.dir });
+    }
+  }
+  const text = picked.map((p) => p.text).filter((t) => t !== '').join('\n');
   const truncated = text.length > maxChars;
   const finalText = truncated ? `${text.slice(0, maxChars - 1)}…` : text;
+  const attribution = columns.map((c) => ({
+    dir: c.dir,
+    ok: c.ok === true,
+    rules: picked.filter((p) => p.dir === c.dir && p.rule !== null).map((p) => p.rule),
+  }));
+  const landings = [];
+  for (const p of picked) if (!landings.includes(p.dir)) landings.push(p.dir);
   return {
     text: finalText,
-    rules,
-    candidates: Number.isFinite(plan.candidates) ? plan.candidates : rules.length,
+    rules: picked.map((p) => p.rule).filter((r) => r !== null),
+    candidates: columns.reduce((n, c) => n + c.candidates, 0),
     chars: finalText.length,
     truncated,
+    landings,      // 真正**贡献了文本**的落点（跨重启去重与记账按这个集合逐落点做）
+    attribution,   // 每条纪律出自哪个落点（遥测必须记到**它自己的**落点上，不许串账）
     // 如实给出"为什么没话说"（供遥测/诊断区分：落点坏 vs 无可投递内容 vs 预算耗尽）
-    reason: finalText === '' ? (plan.ok === false ? 'plan-not-ok' : 'nothing-to-say') : undefined,
+    reason: finalText === '' ? (planFailed ? 'plan-not-ok' : 'nothing-to-say') : undefined,
   };
 }
 
@@ -78,6 +131,7 @@ export function createDeliveryRuntime({ minIntervalMs = DEFAULT_MIN_INTERVAL_MS 
     holds: 0,       // 因最小间隔而继续返回上一版的次数
     reasons: [],
     lastLanding: { dir: null, source: 'unset' }, // 最近一次求值用的落点与来源（诊断"为什么没话说"）
+    lastLandings: [],                            // 最近一次求值用的**落点集合**（并集语义：项目 ∪ 用户级）
   };
 }
 
@@ -131,17 +185,18 @@ export function registerDelivery(ctx, {
   // 落点解析（2026-09-19 修缺口）：静态 `landingDir` 优先；否则每次求值调 `resolveLanding()`
   // （插件层传的是 `landing.mjs` 的解析器 —— 没有它，装载入口不传 landingDir 就永远 no-landing）。
   const pickLanding = () => {
-    if (typeof landingDir === 'string' && landingDir.trim() !== '') return { dir: landingDir, source: 'static' };
+    if (typeof landingDir === 'string' && landingDir.trim() !== '') return { dir: landingDir, source: 'static', dirs: [landingDir] };
     if (typeof resolveLanding === 'function') {
       const r = resolveLanding();
-      if (typeof r === 'string' && r.trim() !== '') return { dir: r, source: 'resolver' };
+      if (typeof r === 'string' && r.trim() !== '') return { dir: r, source: 'resolver', dirs: [r] };
       if (r !== null && typeof r === 'object' && typeof r.dir === 'string' && r.dir.trim() !== '') {
-        return { dir: r.dir, source: typeof r.source === 'string' ? r.source : 'resolver' };
+        const dirs = Array.isArray(r.dirs) ? r.dirs.filter((d) => typeof d === 'string' && d.trim() !== '') : [];
+        return { dir: r.dir, source: typeof r.source === 'string' ? r.source : 'resolver', dirs: dirs.length > 0 ? dirs : [r.dir] };
       }
-      if (r !== null && typeof r === 'object' && typeof r.source === 'string') return { dir: null, source: r.source };
-      return { dir: null, source: 'resolver-none' };
+      if (r !== null && typeof r === 'object' && typeof r.source === 'string') return { dir: null, source: r.source, dirs: [] };
+      return { dir: null, source: 'resolver-none', dirs: [] };
     }
-    return { dir: null, source: 'none' };
+    return { dir: null, source: 'none', dirs: [] };
   };
   runtime.lastLanding = pickLanding();
   const report = () => ({
@@ -185,7 +240,8 @@ export function registerDelivery(ctx, {
       }
       const picked = pickLanding();
       runtime.lastLanding = picked;
-      const built = buildReminderText({ landingDir: picked.dir, now: now(), maxRules, maxChars });
+      // **并集**：解析器给出落点集合时（单项目兜底路径 = 项目 ∪ 用户级）按并集投；否则单落点（旧口径不变）
+      const built = buildReminderText({ landingDir: picked.dir, landingDirs: picked.dirs, now: now(), maxRules, maxChars });
       const step = nextDelivery({ runtime, built, now: now() });
       // 诊断（2026-09-20）：只在**签名变化**时落一条（landing 来源 / 条数 / 原因变了才写），
       // 否则每轮都写会把文件刷满、反而没人看。来历见 `diag.mjs` 顶部：
@@ -200,10 +256,17 @@ export function registerDelivery(ctx, {
       // E3 推演实验抓出的缺陷（2026-09-19）：原先只记 `built.rules[0]`，而 `maxRules` 默认 3
       // ⇒ 单次投递最多只记 1 条，命中账**系统性少记**（拿它做排序/淘汰时判别力天然偏低）。
       // 现在把这一版**实际投递到的每一条**都记上；`evaluated` 只记一次（它是"提供者被求值"的计数）。
-      if (built.rules.length > 0) {
-        bumpUsage(picked.dir, { rule: built.rules[0], event: 'evaluated', now: now() });
+      // 并集路径（2026-09-21）：**逐落点记账**（每条纪律记到它自己的落点，规则 41 的对象级形态）。
+      const attribution = Array.isArray(built.attribution) ? built.attribution : [];
+      const contributed = new Set(Array.isArray(built.landings) ? built.landings : []);
+      const ownerOfFirst = attribution.find((a) => a.rules.includes(built.rules[0])) ?? attribution[0] ?? null;
+      if (built.rules.length > 0 && ownerOfFirst !== null && contributed.has(ownerOfFirst.dir)) {
+        bumpUsage(ownerOfFirst.dir, { rule: built.rules[0], event: 'evaluated', now: now() });
         if (step.emitted) {
-          for (const rule of built.rules) bumpUsage(picked.dir, { rule, event: 'emitted', now: now() });
+          for (const a of attribution) {
+            if (!contributed.has(a.dir)) continue;
+            for (const rule of a.rules) bumpUsage(a.dir, { rule, event: 'emitted', now: now() });
+          }
         }
       }
       return step.text;

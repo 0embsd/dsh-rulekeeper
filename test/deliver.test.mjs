@@ -68,6 +68,47 @@ test('判据: 预算生效（maxRules=1 时只提醒一条）', () => {
   assert.equal(built.rules.length, 1, `预算=1 时只应提醒 1 条（实得 ${built.rules.length}）`);
 });
 
+test('判据（并集 + 轮转，F-2 修复）: `landingDirs` 两侧都念到，且项目撑满预算也挤不掉用户级', () => {
+  const { landing: proj } = freshLanding('deliver-union-proj', {
+    entries: [
+      ledgerEntry({ id: 'P1', ts: TS, rule: 'CAT-AAA' }),
+      ledgerEntry({ id: 'P2', ts: TS, rule: 'CAT-BBB' }),
+      ledgerEntry({ id: 'P3', ts: TS, rule: 'CAT-CCC' }),
+    ],
+  });
+  const { landing: user } = freshLanding('deliver-union-user', {
+    entries: [ledgerEntry({ id: 'U1', ts: TS, rule: 'JUDGEMENT-XXX' })],
+  });
+  const built = buildReminderText({ landingDirs: [proj, user], now: new Date(TS), maxRules: 3 });
+  assert.deepEqual(built.rules, ['CAT-AAA', 'JUDGEMENT-XXX', 'CAT-BBB'],
+    `按**轮转**取（项目-first，不许多取）：实得 ${JSON.stringify(built.rules)}`);
+  assert.deepEqual(built.landings, [proj, user], '两个落点都真正出了力');
+  assert.deepEqual(built.attribution.map((a) => a.rules), [['CAT-AAA', 'CAT-BBB'], ['JUDGEMENT-XXX']]);
+  // 同名纪律只念一次，且算**先出现的落点**（项目在前 ⇒ 用户级那条被去重掉，不重复念）
+  const { landing: dupProj } = freshLanding('deliver-union-dup-p', { entries: [ledgerEntry({ id: 'D1', ts: TS, rule: 'CAT-SAME' })] });
+  const { landing: dupUser } = freshLanding('deliver-union-dup-u', { entries: [ledgerEntry({ id: 'D2', ts: TS, rule: 'CAT-SAME' })] });
+  const dup = buildReminderText({ landingDirs: [dupProj, dupUser], now: new Date(TS), maxRules: 3 });
+  assert.equal((dup.text.match(/CAT-SAME/g) ?? []).length, 1, `同名纪律只该念一次；实得 ${JSON.stringify(dup.text)}`);
+  assert.deepEqual(dup.landings, [dupProj], '去重后只有先出现的落点真正出力');
+});
+
+test('判据（单落点逐字不变）: 传 `landingDir` 与传 `landingDirs:[它]` 产出**逐字相同**（向后兼容）', () => {
+  const { landing } = freshLanding('deliver-compat', {
+    entries: [
+      ledgerEntry({ id: 'A', ts: TS, rule: 'CAT-CODE' }),
+      ledgerEntry({ id: 'B', ts: TS, rule: 'CAT-DOC' }),
+    ],
+  });
+  const one = buildReminderText({ landingDir: landing, now: new Date(TS) });
+  const list = buildReminderText({ landingDirs: [landing], now: new Date(TS) });
+  assert.equal(list.text, one.text, '单落点必须逐字一致（否则"旧口径不变"这句话就是假的）');
+  assert.deepEqual(list.rules, one.rules);
+  assert.equal(list.chars, one.chars);
+  // 空集 / 全空字符串 ⇒ 如实 no-landing（不投、不猜）
+  assert.equal(buildReminderText({ landingDirs: [], now: new Date(TS) }).reason, 'no-landing');
+  assert.equal(buildReminderText({ landingDirs: ['', '  '], now: new Date(TS) }).reason, 'no-landing');
+});
+
 test('判据: 文本稳定（同状态两次调用逐字相同）——宿主据此不重复追加', () => {
   const { landing } = freshLanding('deliver-stable', {
     entries: [ledgerEntry({ id: 'L1', ts: TS, rule: 'CAT-CODE' })],

@@ -15,13 +15,22 @@ import { fileURLToPath } from 'node:url';
 import { makeAnchoredApplyHandler } from './handlers.mjs';
 import { appendDiag, bootDiagRecord } from './diag.mjs';
 import { makeErrorSink, safeListener } from './isolation.mjs';
-import { landingCapability, createLandingResolver, liveCwds } from './landing.mjs';
-import { registerAgentScopedDelivery } from './scoped.mjs';
+import { landingCapability, createLandingResolver, liveRootAgents } from './landing.mjs';
+import { agentKeyOf, registerAgentScopedDelivery } from './scoped.mjs';
 import { deliveryCapability, registerDelivery } from './deliver.mjs';
 import { makePreStepHandler, preStepCapability } from './prestep.mjs';
 
 /** 本包根目录（`src/plugin.mjs` 上溯两级）——用于"宿主事件表扫描**排除自身**"（见 `eventTableFromHost`） */
 export const PKG_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+/**
+ * 按会话注册的**有界重试**上限（2026-09-21，F-3 修复配套）。
+ *
+ * 为什么需要：首轮窗口里 `agent.ctx` 可能还没就绪（注册失败 ⇒ 该会话没有自己的通道）；
+ *   若失败即永久放弃，就只能靠根通道**进程级**兜底 —— 那会让**所有**会话都多收一遍。
+ *   有界（3 次）重试既能把绝大多数瞬时失败收敛掉，又不会无限刷诊断。
+ */
+export const SCOPED_MAX_ATTEMPTS = 3;
 
 /**
  * **安全地"看一眼"某个宿主服务在不在**（2026-09-20 事故后的强制写法）。
@@ -339,20 +348,38 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
   // 根通道（`systemPrompt.context` 是进程级一份）拿不到 agent ⇒ 只能猜是哪个项目。
   // 现在每见到一个新会话，就在**它自己的 `agent.ctx`** 里注册一份：provider 用**该会话自己的 cwd**
   // 解析落点（不必猜），跨轮状态（去重/最小间隔）也随之按会话分开。
-  // 幂等：`scopedAgents` 记账，同一会话只注册一次；注册失败**不抛**、如实记账 —— 此时根通道继续兜底。
+  // 幂等：`scopedAgents` 记账，同一会话只注册一次；注册失败**不抛**、如实记账，且**有界重试**
+  // （首轮窗口里 agent.ctx 可能还没就绪；重试上限见 `SCOPED_MAX_ATTEMPTS`）。
   const scopedAgents = new Map();
+  /**
+   * 记账键：**会话 id 优先，拿不到 id 才退回对象身份**（2026-09-21）。
+   *
+   * 为什么不直接用对象身份：宿主 `agents.roots()` 与 `agent/pre-step` 载荷里的 `agent`
+   * **在当前版本里确实是同一个实例**（已核宿主真源码：`dsh-agent/lib/index.js` 的 `agentEvents()`
+   * 里 `fused = (payload) => ({...payload, agent})`，`roots()` 返回 `store` 里登记的 `entry.agent`），
+   * 但那是宿主实现细节，不该由我们假设。按 **id** 记账后：幂等注册与"让路"判定都只依赖会话标识；
+   * 同一会话即便以不同包装对象出现在不同轮次，也不会重复注册（同作用域重名**会抛**）。
+   * 取不到 id（异常形态）⇒ 退回对象身份；两个 id 不明的不同对象会被当成两个会话
+   * （宁可多注册一次并如实失败，也不把别人的通道当成自己的 —— **宁重复，不静默**）。
+   */
+  const scopedKeyOf = (agent) => agentKeyOf(agent, null) ?? agent;
   const scopedReport = () => {
     const rows = [...scopedAgents.values()];
     return {
       registered: rows.filter((r) => r.ok === true).length,
-      failed: rows.filter((r) => r.ok !== true).map((r) => ({ agent: r.agent, reason: r.reason })),
+      failed: rows.filter((r) => r.ok !== true).map((r) => ({ agent: r.agent, reason: r.reason, attempts: r.attempts ?? 1 })),
       mode: rows.length === 0 ? 'root-only' : (rows.every((r) => r.ok === true) ? 'per-agent' : 'mixed'),
     };
   };
   /** 该会话是否已成功注册过自己的提醒位（根通道据此**让路**，避免同一份提醒投两遍） */
-  const scopedFor = (agent) => scopedAgents.get(agent)?.ok === true;
+  const scopedFor = (agent) => scopedAgents.get(scopedKeyOf(agent))?.ok === true;
   const ensureScoped = (agent) => {
-    if (agent === null || typeof agent !== 'object' || scopedAgents.has(agent)) return;
+    if (agent === null || typeof agent !== 'object') return;
+    const key = scopedKeyOf(agent);
+    const prior = scopedAgents.get(key);
+    // 成功 ⇒ 不必再试；失败 ⇒ **有界重试**（首轮窗口里 `agent.ctx` 可能尚未就绪）
+    if (prior !== undefined && (prior.ok === true || (prior.attempts ?? 1) >= SCOPED_MAX_ATTEMPTS)) return;
+    const attempts = (prior?.attempts ?? 0) + 1;
     let out;
     try {
       out = registerAgentScopedDelivery({
@@ -360,6 +387,7 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
         env: process.env,
         onDelivery: (info) => appendDiag(dshRoot, {
           kind: 'delivery', scope: info.scope, agent: info.agent, landing: info.landing,
+          landings: Array.isArray(info.landings) ? info.landings : null,
           rules: info.built?.rules ?? [], chars: info.built?.chars ?? 0,
           emitted: info.step?.emitted === true, reason: info.reason ?? null,
         }),
@@ -367,13 +395,13 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
     } catch (err) {
       out = { ok: false, reason: `register-error:${String(err?.message ?? err)}`, name: null };
     }
-    scopedAgents.set(agent, { ok: out.ok === true, reason: out.reason ?? null, agent: out.name ?? null, mechanism: out.mechanism ?? null });
+    scopedAgents.set(key, { ok: out.ok === true, reason: out.reason ?? null, agent: out.name ?? null, mechanism: out.mechanism ?? null, attempts });
     // 按会话注册的结果**必须落盘**（2026-09-20 教训：上一次失败是"看不见的"——
     // 诊断文件里没有一条 scope=agent 记录，只在别处找原因浪费了一轮）
     appendDiag(dshRoot, {
       kind: 'scoped', agent: out.name ?? '?', ok: out.ok === true,
       mechanism: out.mechanism ?? null, reason: out.reason ?? null,
-      mode: scopedReport().mode,
+      attempts, mode: scopedReport().mode,
     });
   };
 
@@ -427,19 +455,27 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
   //   `system-prompt` 行；插件侧签名见 `@deepseek-ai/dsh-system-prompt/lib/types/index.d.ts:69-77`）。
   // 位置：放在报告对象构造**之前**（否则引用未初始化的 `deliveryReg` 会触 TDZ 报错）。
   // 服务缺失 ⇒ `registerDelivery` 如实返回 `{ok:false, reason}`（**不静默假成功**）。
+  // ── 让路判定（2026-09-21 修 F-2/F-3）─────────────────────────────────────
+  // 语义：**所有在册会话都拿到自己的通道**，根通道才静默；只要有一个会话没有通道
+  //   （还没轮到它注册 / 注册失败 / 拿不到会话表），根通道**继续投递**兜底。
+  // 为什么不能是"任一会话接管就让路"（上一版的写法，两处现场翻车）：
+  //   · F-3（红态样本已构造）：一个会话接管成功 ⇒ 另一个**注册失败**的会话**零提醒且无兜底**；
+  //   · F-2（现场实证）：项目会话的作用域通道只装项目落点（旧口径"项目优先"）⇒ 根通道让路后
+  //     用户级纪律（`JUDGEMENT-*`）在该会话里**静默消失**。F-2 已由"作用域文本 = 项目 ∪ 用户级"
+  //     从根上修掉（`scoped.mjs`），此处只负责"不许静默"。
+  // 代价（如实记账，不藏）：启动竞态窗口里根通道会先出一次话（此时还没有任何会话注册），
+  //   之后该会话自己的通道再出一次 —— 同一份提醒在这些会话里可能被念两遍（定级 nit，见验收报告）。
+  const allAgentsCovered = () => {
+    const agents = liveRootAgents(ctx);
+    if (agents.length === 0) return false;   // 还没有会话（或取不到会话表）⇒ 根通道兜底
+    return agents.every((a) => scopedFor(a) === true);
+  };
   let deliveryReg = { ok: false, reason: 'disabled', name: null };
   if (delivery === true) {
     try {
       const r = registerDelivery(ctx, {
         resolveLanding: () => landing.describe(),
-        // **根通道让路**（方案"乙"）：只要有**任何一个**会话已成功注册自己的作用域提醒位，根通道就闭嘴。
-        // 为什么是"任何一个"而不是"全部"（2026-09-20 线上实测修正）：根通道是**进程级一份**，它一出话，
-        //   **所有**会话的装配都会拿到同一段文本 —— 包括那些已有自己作用域提醒位的会话 ⇒ 那些会话
-        //   **收到两遍**（实测：我自己的上下文里同一段提醒出现两份）。故只要有人接管，根通道就让路；
-        //   尚未注册成功的会话会在它**下一轮** pre-step 时补上自己那份。
-        // 若一个会话都没注册成功（宿主没给 agent.ctx / 装配瀑布挂不上）⇒ 根通道继续兜底
-        //   （配合"甲"的多项目规则：多项目时只投用户级落点，绝不张冠李戴）。
-        shouldStaySilent: () => [...scopedAgents.values()].some((r) => r.ok === true),
+        shouldStaySilent: allAgentsCovered,
         onDelivery: (info) => appendDiag(dshRoot, { kind: 'delivery', scope: 'root', landing: info.landing, rules: info.built?.rules ?? [], chars: info.built?.chars ?? 0, emitted: info.step?.emitted === true, reason: info.reason ?? null }),
         ...(deliveryOptions ?? {}),
       });

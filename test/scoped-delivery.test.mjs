@@ -6,27 +6,45 @@
 //   ③遥测写进**各自的落点**
 //   ④拿不到 `agent.ctx` 或作用域里读不到 systemPrompt ⇒ 如实返回 `{ok:false}`（不抛）
 //      —— 此时**根通道必须继续兜底**（这是"乙"不成立时也不能变哑的底线）
-//   ⑤根通道让路：所有会话都已按作用域注册 ⇒ 根通道出空串（同一份提醒不投两遍）
+//   ⑤根通道让路：**所有在册会话都拿到自己的通道**才让路（F-3 修复后语义；判据⑧⑨）
+//   ⑥跨重启去重：同一会话 + 同一段文本 + 每个贡献落点都记过 ⇒ 不再重投
+//   ⑦（F-2）作用域文本 = **项目落点 ∪ 用户级落点**（项目会话也要收到用户级纪律）
+//   ⑧（F-3）只要有一个在册会话没有自己的通道 ⇒ 根通道**继续投递**（不许静默丢失）
+//   ⑨注册失败**有界重试**：首轮窗口里 `agent.ctx` 之后才就绪时能收敛（随后根通道再让路）
+//
+// ⚠ **污染护栏**（2026-09-21 实测教训）：作用域文本是并集 ⇒ 记账会**同时写两个落点**。
+//   用例必须传**隔离 `env`**（`freshProjectLanding().env`），否则会把测试会话写进**真实**用户级落点
+//   （实测发生过）。文件末尾的 `realUserLandingGuard()` 是机械判据，不靠自觉。
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { agentSessionCwd, landingForAgent, registerAgentScopedDelivery } from '../src/scoped.mjs';
+import { agentSessionCwd, landingForAgent, landingsForAgent, registerAgentScopedDelivery } from '../src/scoped.mjs';
 import { registerDelivery } from '../src/deliver.mjs';
-import { cleanupAll, freshProjectLanding, tempDir } from './helpers/sandbox.mjs';
+import { cleanupAll, freshProjectLanding, isolateProcessUserLanding, realUserLandingGuard, tempDir } from './helpers/sandbox.mjs';
 
-test.after(cleanupAll);
+const landedGuard = realUserLandingGuard();   // 必须在改 DSH_HOME **之前**建（它要的是**真实**落点路径）
+// 本文件整体在**隔离 DSH_HOME**下跑（机制，不靠每处调用自觉）：
+//   投递记账按落点写入，若用真实 env，测试会话的指纹会落进真实用户级 `usage.json`（实测发生过两次，
+//   见 helpers/sandbox.mjs 的 `realUserLandingGuard`）。隔离后本文件的"用户级落点" = 临时目录。
+const isolatedHome = isolateProcessUserLanding('scoped-home');
+test.after(() => {
+  cleanupAll();
+  isolatedHome.restore();
+  landedGuard.assertClean('本文件的用例');
+});
 
 const TS = '2026-09-20T00:00:00.000Z';
 const row = (id, rule) => JSON.stringify({ schema: 1, id, ts: TS, rule, category: '纪律', problem: 'p', root_cause: 'r', solution: 's', evidence: [], mechanism: 'm', recurrence: 1, first_seen: TS, last_seen: TS, status: 'active' });
 
 /** 造一个"项目落点 + 该项目的会话（含自己的作用域 ctx）"
  *  默认给**两种机制都可用**的 ctx：`systemPrompt`（首选，作用域内服务注册）+ `on`（瀑布，仅显式开关时用）。
+ *  `env` 是**隔离**环境（`DSH_HOME` 指向临时目录）—— 用例一律用它解析用户级落点，绝不碰真实落点。
  */
 function projectSession(label, rule) {
-  const { projectRoot, landing } = freshProjectLanding(label, { entries: [] });
+  const { projectRoot, landing, home, env } = freshProjectLanding(label, { entries: [] });
   writeFileSync(join(landing, 'ledger.jsonl'), `${row(`${label}-1`, rule)}\n`, 'utf8');
   const hooks = [];
   const contexts = [];
@@ -48,7 +66,22 @@ function projectSession(label, rule) {
     if (hook === undefined) return assembly;
     return hook.fn(assembly, {}, async () => assembly);
   };
-  return { projectRoot, landing, agent, hooks, contexts, assemble, textOf };
+  return { projectRoot, landing, home, env, agent, hooks, contexts, assemble, textOf };
+}
+
+/** 造"项目落点 **和** 用户级落点**都有**"的会话（F-2 并集判据用；两侧规则可不同） */
+function sessionWithBothLandings(label, projectRules, userRules) {
+  const s = freshProjectLanding(label, { entries: [], userLanding: true });
+  const body = (rules, tag) => (rules.length === 0 ? '' : `${rules.map((r, i) => row(`${label}-${tag}${i}`, r)).join('\n')}\n`);
+  writeFileSync(join(s.landing, 'ledger.jsonl'), body(projectRules, 'p'), 'utf8');
+  writeFileSync(join(s.userLanding, 'ledger.jsonl'), body(userRules, 'u'), 'utf8');
+  const contexts = [];
+  const agent = {
+    id: label,
+    session: { header: { cwd: s.projectRoot } },
+    ctx: { effect: (fn) => fn(), systemPrompt: { context: (def) => { contexts.push(def); return () => {}; } } },
+  };
+  return { ...s, agent, contexts, textOf: () => (contexts.length === 0 ? '' : contexts[contexts.length - 1].text({})) };
 }
 
 test('判据①（根治核心）: 两个会话两个项目 ⇒ 各投**自己**的账本，绝不串台', () => {
@@ -144,18 +177,64 @@ test('判据④: 拿不到 agent.ctx / 两种机制都挂不上 ⇒ 如实 ok:fa
   assert.deepEqual(landingForAgent({ session: { header: { cwd: lonely } } }, { env: { DSH_HOME: join(lonely, 'nohome') } }), { dir: null, source: 'none' });
 });
 
-test('判据⑤: 根通道让路 —— **只要有任何一个会话**接管了自己的提醒位，根通道就闭嘴（防投两遍）', () => {
-  const a = projectSession('sc-yield', 'CAT-AAA');
-  const host = { effect: (fn) => fn(), systemPrompt: { context: (def) => { host.def = def; } } };
-  let anyScoped = false;   // 模拟插件层的判定结果（any，不是 all）
-  registerDelivery(host, {
-    resolveLanding: () => ({ dir: a.landing, source: 'project' }),
-    shouldStaySilent: () => anyScoped,
-  });
-  assert.match(host.def.text({}), /CAT-AAA/, '还没有任何会话接管时，根通道照常投（兜底）');
-  anyScoped = true;
-  assert.equal(host.def.text({}), '', '已有会话接管 ⇒ 根通道让路（空串；否则那个会话会收到两遍 —— 线上实测过）');
-  // 判定函数抛错 ⇒ 照常投递（宁可重复也不静默）
+test('判据⑤+⑧+⑨（F-3 修复）: 让路 = **所有在册会话都有通道**；有一个没通道 ⇒ 根通道继续兜底', async () => {
+  const ns = await import('../src/plugin.mjs');   // **不解构 lastApplyReport**（解构会把它快照成 null）
+  const { apply, PLUGIN_EVENTS, SCOPED_MAX_ATTEMPTS } = ns;
+  const a = projectSession('sc-yield-a', 'CAT-AAA');
+  const listeners = new Map();
+  let rootDef = null;
+  let liveAgents = [];
+  const ctx = {
+    effect: (fn) => fn(),
+    on: (ev, fn) => listeners.set(ev, fn),
+    tools: { register: () => {} },
+    systemPrompt: { context: (def) => { rootDef = def; return () => {}; } },
+    agents: { roots: () => liveAgents },           // 宿主 `agents` 服务（`liveRootAgents` 的唯一入口）
+  };
+  const hostRoot = tempDir('sc-yield-host');
+  mkdirSync(join(hostRoot, 'lib'), { recursive: true });
+  writeFileSync(join(hostRoot, 'lib', 'host.js'), `${[...PLUGIN_EVENTS].map((e) => `ctx.on('${e}', () => {})`).join('\n')}\n`, 'utf8');
+  // 静态落点 = 临时项目落点：保证本用例**只写临时账本**，不碰任何真实落点
+  apply(ctx, { dshRoot: hostRoot, landingDir: a.landing });
+  const prestep = listeners.get('agent/pre-step');
+  const rootText = () => rootDef.text({});
+  const step = (agent) => prestep({ agent, messages: [] }, async () => ({ kind: 'enter', messages: [] }));
+
+  // ①启动窗口：还没有任何会话注册 ⇒ 根通道必须先投（否则首轮是静默的）
+  assert.match(rootText(), /CAT-AAA/, '还没有会话接管时，根通道照常投（兜底）');
+
+  // ②会话 A 注册成功 ⇒ 唯一在册会话都有通道 ⇒ 根通道让路
+  liveAgents = [a.agent];
+  await step(a.agent);
+  assert.equal(ns.lastApplyReport.scoped.mode, 'per-agent');
+  assert.equal(rootText(), '', '全部在册会话都有自己的通道 ⇒ 根通道让路（防投两遍）');
+
+  // ③F-3 红态还原：再来一个会话 B，**没有 agent.ctx** ⇒ 它没有自己的通道
+  const b = { id: 'sc-yield-b', session: { header: { cwd: a.projectRoot } } };   // 无 ctx（首轮窗口/注册失败形态）
+  liveAgents = [a.agent, b];
+  await step(b);
+  assert.equal(ns.lastApplyReport.scoped.registered, 1);
+  assert.equal(ns.lastApplyReport.scoped.failed.length, 1, '注册失败必须如实记账（不静默）');
+  assert.match(rootText(), /CAT-AAA/,
+    'F-3 判据：有会话没有自己的通道 ⇒ 根通道**必须继续投递**（上一版"任一接管就让路"会让它零提醒）');
+
+  // ④有界重试：B 的 ctx 后来就绪（真实成因：首轮窗口里 agent.ctx 尚未挂上）⇒ 下一次 pre-step 收敛
+  b.ctx = { effect: (fn) => fn(), systemPrompt: { context: () => () => {} } };
+  await step(b);
+  assert.equal(ns.lastApplyReport.scoped.registered, 2, '失败后应有界重试并收敛');
+  assert.equal(rootText(), '', '全部会话都拿到自己的通道 ⇒ 根通道再次让路');
+
+  // ⑤重试有上限（不许无限刷）：一直是失败的会话，尝试次数到顶后不再增长
+  const c = { id: 'sc-yield-c', session: { header: { cwd: a.projectRoot } } };
+  liveAgents = [a.agent, b, c];
+  for (let i = 0; i < SCOPED_MAX_ATTEMPTS + 3; i += 1) await step(c);
+  const cRow = ns.lastApplyReport.scoped.failed.find((r) => r.agent === 'rulekeeper/reminders#sc-yield-c');
+  assert.ok(cRow, `诊断报告里应能看到失败会话；实得 ${JSON.stringify(ns.lastApplyReport.scoped)}`);
+  assert.equal(cRow.attempts, SCOPED_MAX_ATTEMPTS, '重试次数必须有界');
+  // 兜底不变：C 始终没有通道 ⇒ 根通道始终在投（这就是"宁重复、不静默"）
+  assert.match(rootText(), /CAT-AAA/);
+
+  // 判定函数抛错 ⇒ 照常投递（宁可重复也不静默；deliver.mjs 的内层 try 契约）
   const host2 = { effect: (fn) => fn(), systemPrompt: { context: (def) => { host2.def = def; } } };
   registerDelivery(host2, { resolveLanding: () => ({ dir: a.landing, source: 'project' }), shouldStaySilent: () => { throw new Error('boom'); } });
   assert.match(host2.def.text({}), /CAT-AAA/);
@@ -221,4 +300,148 @@ test('判据: 插件层真的会为每个会话注册（agent/pre-step 监听器
   assert.ok(scopedRow, '诊断文件里必须有 kind=scoped 的记录');
   assert.equal(scopedRow.ok, true);
   assert.equal(scopedRow.mechanism, 'service-context');
+});
+
+test('判据⑦（F-2 修复）: 作用域文本 = **项目落点 ∪ 用户级落点** —— 项目会话不再丢掉用户级纪律', () => {
+  // 现场形态（验收报告 §2）：会话 cwd 在项目里 ⇒ 旧口径只装项目账本；根通道让路后
+  // 用户级纪律（JUDGEMENT-*）在该会话里**静默消失**。修复后必须两边都念到。
+  const s = sessionWithBothLandings('sc-union', ['CAT-AAA', 'CAT-BBB'], ['JUDGEMENT-XXX', 'JUDGEMENT-YYY']);
+  const r = registerAgentScopedDelivery({ agent: s.agent, env: s.env, now: () => new Date(TS) });
+  assert.equal(r.ok, true, r.reason ?? '');
+  const text = s.textOf();
+  assert.match(text, /CAT-AAA/);
+  assert.match(text, /CAT-BBB/);
+  assert.match(text, /JUDGEMENT-/, 'F-2 判据：项目会话**必须**拿到用户级纪律（否则用户级纪律零通道）');
+  assert.equal((text.match(/JUDGEMENT-/g) ?? []).length, 1,
+    `预算 maxRules=3 时按**轮转**取：2 项目规则 + 用户级 1 条；实得 ${JSON.stringify(text)}`);
+  // 对象级记账（规则 41）：每条纪律只记到**它自己**的落点
+  const proj = JSON.parse(readFileSync(join(s.landing, 'usage.json'), 'utf8'));
+  const user = JSON.parse(readFileSync(join(s.userLanding, 'usage.json'), 'utf8'));
+  assert.ok(proj.rules['CAT-AAA'] && proj.rules['CAT-BBB'], `项目落点该记两条项目纪律；实得 ${JSON.stringify(proj.rules)}`);
+  assert.ok(proj.rules['JUDGEMENT-XXX'] === undefined, '用户级纪律不得记到项目落点');
+  assert.ok(user.rules['JUDGEMENT-XXX'], `用户级落点该记那条用户级纪律；实得 ${JSON.stringify(user.rules)}`);
+  assert.ok(user.rules['CAT-AAA'] === undefined, '项目纪律不得记到用户级落点');
+  // 跨重启去重：两个**贡献过的**落点都记了同一指纹（下次重启才知道"这个会话已经有了"）
+  assert.equal(proj.emissions['sc-union'].sha, user.emissions['sc-union'].sha, '同一段文本的指纹应逐落点落盘');
+  assert.deepEqual(r.report().landingDirs, [s.landing, s.userLanding], '报告要如实给出并集落点');
+});
+
+test('判据⑦b（F-2 饿死面）: 项目落点规则**撑满**预算时，用户级纪律仍必须被念到', () => {
+  // 这是"先项目取满、再取用户级"的失败形态（若实现退化成非轮转，本用例立刻变红）
+  const s = sessionWithBothLandings('sc-union-starve', ['CAT-AAA', 'CAT-BBB', 'CAT-CCC'], ['JUDGEMENT-XXX']);
+  registerAgentScopedDelivery({ agent: s.agent, env: s.env, now: () => new Date(TS) });
+  const text = s.textOf();
+  assert.match(text, /JUDGEMENT-XXX/, `项目规则占满预算也不能把用户级挤掉；实得 ${JSON.stringify(text)}`);
+  assert.equal((text.match(/CAT-/g) ?? []).length, 2, '预算 3 条 = 项目 2 + 用户级 1（轮转）');
+});
+
+test('判据⑦c（并集去重）: 两侧同名的纪律**只念一次**，且只算它第一次出现的落点', () => {
+  const s = sessionWithBothLandings('sc-union-dup', ['CAT-SAME'], ['CAT-SAME']);
+  const r = registerAgentScopedDelivery({ agent: s.agent, env: s.env, now: () => new Date(TS) });
+  const text = s.textOf();
+  assert.equal((text.match(/CAT-SAME/g) ?? []).length, 1, `同名纪律只该念一次；实得 ${JSON.stringify(text)}`);
+  // 去重后用户级落点**没有贡献** ⇒ 指纹只落项目落点（不许给没出力的落点记账）
+  const proj = JSON.parse(readFileSync(join(s.landing, 'usage.json'), 'utf8'));
+  const userUsage = existsSync(join(s.userLanding, 'usage.json'))
+    ? JSON.parse(readFileSync(join(s.userLanding, 'usage.json'), 'utf8'))
+    : {};
+  assert.ok(proj.emissions['sc-union-dup'], '贡献过的落点要记指纹');
+  assert.equal(userUsage.emissions?.['sc-union-dup'], undefined, '没贡献的落点不得被记账（连 usage.json 都不该被创建）');
+  assert.deepEqual(r.report().contributedDirs, [s.landing], '报告要如实区分"候选落点"与"真正被念到的落点"');
+  assert.deepEqual(r.report().landingDirs, [s.landing, s.userLanding], '候选落点仍是并集（两侧都被考查过）');
+});
+
+test('判据⑪（F-2 兜底面）: 根通道兜底时也走并集 —— 未接管/注册失败的项目会话照样拿到用户级纪律', async () => {
+  const ns = await import('../src/plugin.mjs');
+  const { apply, PLUGIN_EVENTS } = ns;
+  const s = sessionWithBothLandings('sc-root-union', ['CAT-AAA'], ['JUDGEMENT-XXX']);
+  const listeners = new Map();
+  let rootDef = null;
+  const ctx = {
+    effect: (fn) => fn(),
+    on: (ev, fn) => listeners.set(ev, fn),
+    tools: { register: () => {} },
+    systemPrompt: { context: (def) => { rootDef = def; return () => {}; } },
+    agents: { roots: () => [s.agent] },          // 单项目在线 ⇒ 是哪个项目**无歧义**
+  };
+  const hostRoot = tempDir('sc-root-union-host');
+  mkdirSync(join(hostRoot, 'lib'), { recursive: true });
+  writeFileSync(join(hostRoot, 'lib', 'host.js'), `${[...PLUGIN_EVENTS].map((e) => `ctx.on('${e}', () => {})`).join('\n')}\n`, 'utf8');
+  const savedHome = process.env.DSH_HOME;
+  process.env.DSH_HOME = s.home;                  // 该会话自己的（隔离目录内的）用户级落点
+  try {
+    apply(ctx, { dshRoot: hostRoot });            // **不传** landingDir ⇒ 走 ctx.agents 解析
+    // 关键：**不跑** pre-step ⇒ 该会话没有自己的通道（注册失败 / 首轮窗口的形态）⇒ 只能靠根通道兜底
+    const text = rootDef.text({});
+    assert.match(text, /CAT-AAA/, '项目纪律必须在兜底文本里');
+    assert.match(text, /JUDGEMENT-XXX/,
+      'F-2 残面：兜底通道也必须带上用户级纪律 —— 否则没有自己通道的项目会话**永远**收不到用户级纪律');
+    // 对象级记账：两条纪律各记到自己的落点（规则 41）
+    const proj = JSON.parse(readFileSync(join(s.landing, 'usage.json'), 'utf8'));
+    const user = JSON.parse(readFileSync(join(s.userLanding, 'usage.json'), 'utf8'));
+    assert.ok(proj.rules['CAT-AAA'], `项目纪律记项目落点；实得 ${JSON.stringify(proj.rules)}`);
+    assert.equal(proj.rules['JUDGEMENT-XXX'], undefined, '用户级纪律不得记到项目落点');
+    assert.ok(user.rules['JUDGEMENT-XXX'], `用户级纪律记用户级落点；实得 ${JSON.stringify(user.rules)}`);
+    assert.equal(user.rules['CAT-AAA'], undefined, '项目纪律不得记到用户级落点');
+  } finally {
+    process.env.DSH_HOME = savedHome;
+  }
+});
+
+test('判据⑦d: 只有用户级落点的会话（项目没落点）行为不变 —— 仍退用户级', () => {
+  const s = freshProjectLanding('sc-useronly', { entries: [], projectLanding: false, userLanding: true });
+  const contexts = [];
+  const agent = {
+    id: 'sc-useronly',
+    session: { header: { cwd: s.projectRoot } },
+    ctx: { effect: (fn) => fn(), systemPrompt: { context: (def) => { contexts.push(def); return () => {}; } } },
+  };
+  const r = registerAgentScopedDelivery({ agent, env: s.env, now: () => new Date(TS) });
+  assert.equal(r.report().landingSource, 'agent-user-fallback');
+  assert.deepEqual(r.report().landingDirs, [s.userLanding]);
+  assert.ok(contexts.length === 1);
+});
+
+test('判据⑩（按会话 id 记账）: 同一 id 的**不同对象包装**只注册一次；id 不明的会话不算"已接管"', async () => {
+  const ns = await import('../src/plugin.mjs');
+  const { apply, PLUGIN_EVENTS } = ns;
+  const a = projectSession('sc-idem', 'CAT-AAA');
+  const listeners = new Map();
+  let rootDef = null;
+  let liveAgents = [];
+  const ctx = {
+    effect: (fn) => fn(),
+    on: (ev, fn) => listeners.set(ev, fn),
+    tools: { register: () => {} },
+    systemPrompt: { context: (def) => { rootDef = def; return () => {}; } },
+    agents: { roots: () => liveAgents },
+  };
+  const hostRoot = tempDir('sc-idem-host');
+  mkdirSync(join(hostRoot, 'lib'), { recursive: true });
+  writeFileSync(join(hostRoot, 'lib', 'host.js'), `${[...PLUGIN_EVENTS].map((e) => `ctx.on('${e}', () => {})`).join('\n')}\n`, 'utf8');
+  apply(ctx, { dshRoot: hostRoot, landingDir: a.landing });
+  const prestep = listeners.get('agent/pre-step');
+  const step = (agent) => prestep({ agent, messages: [] }, async () => ({ kind: 'enter', messages: [] }));
+  const rootText = () => rootDef.text({});
+
+  // 同一会话的**另一个对象**（宿主换包装的形态）：id 相同、ctx 相同
+  const a2 = { ...a.agent };
+  liveAgents = [a.agent];
+  await step(a.agent);
+  liveAgents = [a2];
+  await step(a2);
+  assert.equal(ns.lastApplyReport.scoped.registered, 1, '同一 id 只该注册一次（按 id 幂等，不按对象身份）');
+  assert.equal(ns.lastApplyReport.scoped.failed.length, 0, `不该出现重复注册失败；实得 ${JSON.stringify(ns.lastApplyReport.scoped.failed)}`);
+  assert.equal(a.contexts.length, 1, '同一会话不得注册两份（真实宿主里同作用域重名**会抛**）');
+  assert.equal(rootText(), '', '按 id 记账 ⇒ 同 id 的不同包装仍算"已接管"');
+
+  // id 不明的会话**且没有通道**（注册失败）：不得被当成已接管（否则它的提醒可能一条都没有）
+  const noId = { session: { header: { cwd: a.projectRoot } } };   // 无 ctx ⇒ 注册必失败
+  const noId2 = { session: { header: { cwd: a.projectRoot } } };  // 另一个 id 不明的对象（必须与上一个分开记账）
+  liveAgents = [a2, noId, noId2];
+  await step(noId);
+  await step(noId2);
+  assert.equal(ns.lastApplyReport.scoped.failed.length, 2,
+    `两个 id 不明的会话必须**各记一笔**（退回对象身份），不许被合并成一个；实得 ${JSON.stringify(ns.lastApplyReport.scoped.failed)}`);
+  assert.match(rootText(), /CAT-AAA/, 'id 不明且无通道的会话必须让根通道继续兜底（宁重复，不静默）');
 });

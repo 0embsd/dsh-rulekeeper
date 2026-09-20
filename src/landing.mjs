@@ -19,7 +19,7 @@
 
 import { existsSync } from 'node:fs';
 
-import { resolveProjectLanding, resolveUserLanding } from './platform/paths.mjs';
+import { pathKey, resolveProjectLanding, resolveUserLanding } from './platform/paths.mjs';
 
 /** 宿主 Agent → 会话工作目录（**唯一取值点**；形状见 dsh-agent 的 `session.header.cwd`） */
 export function agentCwd(agent) {
@@ -52,20 +52,31 @@ export function readOptionalService(ctx, name) {
   }
 }
 
-/** `ctx.agents` 注册表里的根 agent cwd（服务形态不符时**当作取不到**，绝不抛） */
-export function registryCwd(ctx) {
+/**
+ * **所有活着的根 agent**（宿主 `agents` 服务的形态**只在这里适配一次**；取不到 ⇒ 空数组，绝不抛）。
+ *
+ * 单一事实源：`liveCwds()`（广域实时判据）、`registryCwd()`（兜底来源）与插件层的
+ * "根通道让路判定"（每个在册会话是否都有自己的通道）**共用**这一处取值逻辑 ——
+ * 三者各自 `agents.roots()/list()` 一遍就会漂移（一处改成 `list` 另一处忘改，判定就静默失效）。
+ * @returns {object[]}
+ */
+export function liveRootAgents(ctx) {
   try {
     const agents = readOptionalService(ctx, 'agents');
-    if (agents === null) return null;
+    if (agents === null) return [];
     const list = typeof agents.roots === 'function' ? agents.roots()
       : (typeof agents.list === 'function' ? agents.list() : null);
-    if (!Array.isArray(list)) return null;
-    for (const agent of list) {
-      const cwd = agentCwd(agent);
-      if (cwd !== null) return cwd;
-    }
+    return Array.isArray(list) ? list : [];
   } catch {
-    return null;
+    return [];
+  }
+}
+
+/** `ctx.agents` 注册表里的根 agent cwd（服务形态不符时**当作取不到**，绝不抛） */
+export function registryCwd(ctx) {
+  for (const agent of liveRootAgents(ctx)) {
+    const cwd = agentCwd(agent);
+    if (cwd !== null) return cwd;
   }
   return null;
 }
@@ -79,9 +90,15 @@ export function landingCapability() {
     sources: ['static', 'project', 'user-fallback', 'user-multi-project', 'multi-project-no-user-landing', 'none'],
     resolution: 'static > agent.session.header.cwd（现场，最准）> noteAgent() 最近 cwd > ctx.agents 根 agent cwd > '
       + 'process.cwd()（宿主进程的工作目录；可观测事实，不是猜路径）；'
-      + '项目落点不存在 ⇒ 退用户级落点（<DSH_HOME>/rulekeeper，老 lessonflow 兼容）',
+      + '解析结果同时给出 `dirs`（**落点集合**，2026-09-21 F-2 修复）：单项目时 = 项目落点 ∪ 用户级落点'
+      + '（用户级纪律在任何项目里都该被提醒；项目落点不存在时就是用户级单独一项），'
+      + '多项目时 = 只用户级（见下条），都没有 ⇒ 空集（reason 记 no-landing）',
+
     multiProject: '**拿不到 agent 的通道**（systemPrompt.context 索引/摘要）在"同时有两个以上不同会话目录在线"时'
       + '只投用户级落点（source=user-multi-project）—— 进程级只有一份注册，按任何一方投递都可能张冠李戴；'
+      + '只有**一个**会话目录在线时不存在歧义，故投"项目落点 ∪ 用户级落点"（并集）——'
+      + '根通道只在"有会话没有自己的通道"（注册失败 / 首轮窗口）时出话，若那时只给项目落点，'
+      + '那个会话就永远收不到用户级纪律（与 F-2 同一失效形态，发生在兜底路径上）；'
       + '有 agent 的通道（agent/pre-step 全文）不受此限，永远按各自会话精确解析',
     unresolved: 'null —— 不投递、不猜路径、不硬编码家目录（reason 记 no-landing）',
   };
@@ -115,17 +132,10 @@ function processCwd() {
  */
 export function liveCwds(ctx) {
   const out = new Set();
-  try {
-    const agents = readOptionalService(ctx, 'agents');
-    if (agents === null) return out;
-    const list = typeof agents.roots === 'function' ? agents.roots()
-      : (typeof agents.list === 'function' ? agents.list() : null);
-    if (!Array.isArray(list)) return out;
-    for (const agent of list) {
-      const cwd = agentCwd(agent);
-      if (cwd !== null) out.add(cwd);
-    }
-  } catch { /* 取不到 ⇒ 空集（看不出"多项目"，与旧版行为一致） */ }
+  for (const agent of liveRootAgents(ctx)) {
+    const cwd = agentCwd(agent);
+    if (cwd !== null) out.add(cwd);
+  }
   return out;
 }
 
@@ -139,7 +149,8 @@ export function createLandingResolver(ctx, { staticLanding = null, env = process
   let notedCwd = null;
   const describe = (agent = null) => {
     if (typeof staticLanding === 'string' && staticLanding.trim() !== '') {
-      return { dir: resolveProjectLanding(notedCwd ?? cwdOf() ?? process.cwd(), staticLanding), source: 'static' };
+      const dir = resolveProjectLanding(notedCwd ?? cwdOf() ?? process.cwd(), staticLanding);
+      return { dir, source: 'static', dirs: [dir] };
     }
     // ── 方案"甲"止血（2026-09-20）：只在**拿不到 agent** 的那条通道上生效 ──────────────────
     // 拿不到 agent ⇒ 无法知道"这次求值是哪场会在问"（进程级一份注册）⇒ 若同时有多个不同项目在线，
@@ -147,17 +158,22 @@ export function createLandingResolver(ctx, { staticLanding = null, env = process
     // 有 agent 时（`agent/pre-step` 全文通道）走下面的精确链，**不受影响**。
     if (agent === null && liveCwds(ctx).size >= 2) {
       const user = resolveUserLanding(env);
-      if (existsSync(user)) return { dir: user, source: 'user-multi-project' };
-      return { dir: null, source: 'multi-project-no-user-landing' };
+      if (existsSync(user)) return { dir: user, source: 'user-multi-project', dirs: [user] };
+      return { dir: null, source: 'multi-project-no-user-landing', dirs: [] };
     }
     const cwd = agentCwd(agent) ?? notedCwd ?? registryCwd(ctx) ?? cwdOf();
-    if (cwd === null) return { dir: null, source: 'none' };
+    if (cwd === null) return { dir: null, source: 'none', dirs: [] };
+    // **并集**（2026-09-21，F-2 残面）：项目落点存在时**也**带上用户级落点。
+    // 为什么：单项目在线时"是哪个项目"没有歧义（不构成张冠李戴），而根通道只在**有会话没有自己的
+    //   通道**（注册失败 / 首轮窗口）时出话 —— 那时若不带上用户级落点，那个会话就**永远收不到
+    //   用户级纪律**（与 F-2 同一失效形态，只是发生在兜底路径上）。
+    const dirs = [];
     const project = resolveProjectLanding(cwd);
-    if (existsSync(project)) return { dir: project, source: 'project' };
-    // 项目自己没有落点 ⇒ 退用户级（用户级纪律本就该在**任何**项目里被提醒）
+    if (existsSync(project)) dirs.push(project);
     const user = resolveUserLanding(env);
-    if (existsSync(user)) return { dir: user, source: 'user-fallback' };
-    return { dir: null, source: 'none' };
+    if (existsSync(user) && !dirs.some((d) => pathKey(d) === pathKey(user))) dirs.push(user);
+    if (dirs.length === 0) return { dir: null, source: 'none', dirs: [] };
+    return { dir: dirs[0], source: existsSync(project) ? 'project' : 'user-fallback', dirs };
   };
   return {
     resolve: (agent = null) => describe(agent).dir,

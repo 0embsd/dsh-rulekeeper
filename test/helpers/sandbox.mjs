@@ -10,6 +10,9 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } f
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import assert from 'node:assert/strict';
+
+import { resolveUserLanding } from '../../src/platform/paths.mjs';
 
 /** dsh-rulekeeper 包根（<pkg>/test/helpers/sandbox.mjs → 上溯 3 级） */
 export const PKG_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
@@ -105,3 +108,101 @@ export function cleanupAll() {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+/**
+ * 把本进程的 `DSH_HOME` 指向一次性临时目录（**用例文件顶层调用一次**），返回恢复函数。
+ *
+ * 为什么需要（2026-09-21 实测教训 L644，两次污染）：投递记账是**按落点**写的。落点解析加了
+ * "项目 ∪ 用户级"并集之后，任何用 `process.env` 解析落点的用例都会把**测试会话**写进**真实**用户级
+ * `usage.json`。靠"每处调用记得传 env"= 靠自觉，实测挡不住 ⇒ 提升为**文件级一次性机制**。
+ * @returns {{dir: string, restore: () => void}}
+ */
+export function isolateProcessUserLanding(label = 'home') {
+  const saved = process.env.DSH_HOME;
+  const dir = tempDir(`rk-${label}`);
+  process.env.DSH_HOME = dir;
+  return {
+    dir,
+    restore: () => {
+      if (saved === undefined) delete process.env.DSH_HOME;
+      else process.env.DSH_HOME = saved;
+    },
+  };
+}
+
+/**
+ * **真实用户级落点污染护栏**（2026-09-21 实测教训，不是预防性猜测）。
+ *
+ * 事故现场：投递记账是**按落点**写的（`bumpUsage` / `writeEmission`）。落点解析加了"项目 ∪ 用户级"
+ * 并集之后，用例若**忘了传隔离 `env`**，`resolveUserLanding(process.env)` 就会解析到**真实的**
+ * 用户级落点 ⇒ 测试会话（`sc-*`）的指纹被写进真实 `usage.json`（本次实测：8 个 `sc-*` 键落进
+ * `~/.dsh/lessonflow/usage.json`，真实落点被污染，且 `emissions` 有 20 键上限——测试键会**挤掉**
+ * 真实会话的去重记录 ⇒ 那些会话重启后会重复收到提醒）。
+ *
+ * 判据（规则 41 的对象级形态）：**真实用户级落点的 `emissions` 里不得出现测试会话键**。
+ * 为什么不比对整文件哈希：活跃宿主进程会并发更新计数/时间戳（比对哈希会假红）；
+ * 而"测试键"只会由测试写入 ⇒ 这条判据既精确又不看别人脸色。
+ * 约定：**测试造的会话 id 一律以 `sc-` 开头**（见 `test/scoped-delivery.test.mjs`）。
+ *
+ * 两条腿（预防 + 检测，缺一不可）：
+ *   · 预防 = `isolateProcessUserLanding()`（用例文件顶层一行）；
+ *   · 检测 = 下面的**进程退出自动核对**（本模块被 import 即生效）+ 需要即时报错时显式 `assertClean`。
+ */
+export const TEST_SESSION_PREFIX = 'sc-';
+
+/** 真实用户级落点（用**改动前**的 env 解析；`:memory:` 兜底见注释） */
+function realUserLandingDir() {
+  const real = process.env.RK_TEST_REAL_DSH_HOME;
+  if (typeof real === 'string' && real !== '') {
+    return resolveUserLanding(real === '(unset)' ? { ...process.env, DSH_HOME: '' } : { ...process.env, DSH_HOME: real });
+  }
+  return resolveUserLanding({ ...process.env });
+}
+
+const GUARD_DIR = realUserLandingDir();
+
+export function realUserLandingGuard() {
+  const file = join(GUARD_DIR, 'usage.json');
+  const readKeys = () => {
+    try {
+      const data = JSON.parse(readFileSync(file, 'utf8'));
+      return Object.keys(data?.emissions ?? {});
+    } catch {
+      return null;   // 文件不存在/不可解析 ⇒ 没有污染可言
+    }
+  };
+  return {
+    dir: GUARD_DIR,
+    file,
+    assertClean(label = '用例') {
+      const keys = readKeys();
+      if (keys === null) return;
+      const leaked = keys.filter((k) => k.startsWith(TEST_SESSION_PREFIX));
+      assert.deepEqual(leaked, [],
+        `${label}把测试会话写进了**真实**用户级落点 ${file}（实际 emissions 键：${JSON.stringify(keys)}）`);
+    },
+  };
+}
+
+/**
+ * **进程退出前的自动核对**（模块加载即生效）：本文件被 import ⇒ 该测试进程的末尾必查一次。
+ *
+ * 为什么要自动（而不是让每个用例文件自己注册）：两次污染都是"忘了注册/忘了传 env"造成的 ——
+ * 靠自觉的护栏等于没有护栏。自动兜底 + 非零退出码 = 漏了会**红**，不会静默。
+ * 边界（如实）：只查 `emissions` 键（对象级）；计数被并发的活跃宿主改动静默放过（那本来就分不清）。
+ */
+process.on('exit', () => {
+  try {
+    const guard = realUserLandingGuard();
+    const keys = (() => {
+      try { return Object.keys(JSON.parse(readFileSync(guard.file, 'utf8'))?.emissions ?? {}); } catch { return null; }
+    })();
+    if (keys === null) return;
+    const leaked = keys.filter((k) => k.startsWith(TEST_SESSION_PREFIX));
+    if (leaked.length > 0) {
+      console.error(`[污染护栏] 本测试进程把测试会话写进了真实用户级落点 ${guard.file}：${JSON.stringify(leaked)}`);
+      console.error('[污染护栏] 修法：用例文件顶层调用 isolateProcessUserLanding()，并显式传 env（见 test/helpers/sandbox.mjs）');
+      process.exitCode = 1;
+    }
+  } catch { /* 护栏自身绝不抛（否则会把测试进程搞崩） */ }
+});

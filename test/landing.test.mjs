@@ -43,7 +43,7 @@ test('判据: noteAgent 记下"最近一轮是哪个会话"（systemPrompt.conte
   const { root: emptyRoot } = freshProjectLanding('landing-note-empty', { projectLanding: false });
   // env 也指向"没有用户级落点"的假 DSH_HOME —— 否则本机真实存在的用户级落点会让这条判据变成空转
   const r = createLandingResolver({}, { cwdOf: () => emptyRoot, env: { DSH_HOME: join(emptyRoot, 'nohome') } });
-  assert.deepEqual(r.describe(), { dir: null, source: 'none' }, '未知会话 + 无落点的进程 cwd ⇒ 不得猜落点');
+  assert.deepEqual(r.describe(), { dir: null, source: 'none', dirs: [] }, '未知会话 + 无落点的进程 cwd ⇒ 不得猜落点');
   r.noteAgent(agentAt(projectRoot));
   assert.equal(r.resolve(), landing, 'note 之后 provider 才解析得出落点');
   assert.equal(r.describe().source, 'project');
@@ -59,7 +59,7 @@ test('判据: 最后一档来源 = 进程工作目录（可观测事实，不是
   // 而"进程 cwd 也没有落点"时仍必须老实返回 none —— 补这一档 ≠ 开始猜路径
   const { root: bare } = freshProjectLanding('landing-procwd-bare', { projectLanding: false });
   const r2 = createLandingResolver({ agents: { roots: () => [] } }, { cwdOf: () => bare, env: { DSH_HOME: join(bare, 'nohome') } });
-  assert.deepEqual(r2.describe(), { dir: null, source: 'none' });
+  assert.deepEqual(r2.describe(), { dir: null, source: 'none', dirs: [] });
 });
 
 test('判据: ctx.agents 注册表兜底（进程刚起、首个 pre-step 之前也能解析）', () => {
@@ -84,8 +84,23 @@ test('判据: 都取不到 ⇒ null + source=none（不猜路径、不硬编码�
   const bare = tempDir('landing-bare');   // 空目录：既无项目落点，也无用户落点
   const r = createLandingResolver({}, { env: { DSH_HOME: join(bare, 'nohome') }, cwdOf: () => bare });
   const d = r.describe(agentAt(bare));
-  assert.deepEqual(d, { dir: null, source: 'none' });
+  assert.deepEqual(d, { dir: null, source: 'none', dirs: [] });
   assert.equal(r.resolve(), null);
+});
+
+test('判据（并集，2026-09-21 F-2 残面）: 单项目在线时兜底通道也带上**用户级落点**（dir 仍是项目，dirs = 项目 ∪ 用户级）', () => {
+  // 为什么：根通道只在"有会话没有自己的通道"时出话（注册失败 / 首轮窗口）。那时若只给项目落点，
+  // 那个会话就**永远收不到用户级纪律** —— 与 F-2 同一失效形态，只是发生在兜底路径上。
+  const { projectRoot, env, userLanding } = freshProjectLanding('landing-union', { userLanding: true, entries: [] });
+  const project = join(projectRoot, '.dsh-ai', 'rulekeeper');
+  const r = createLandingResolver({ agents: { roots: () => [agentAt(projectRoot)] } }, { env });
+  const d = r.describe();                       // 拿不到 agent = provider 的处境
+  assert.equal(d.dir, project, 'dir 仍是第一个（项目）—— 旧口径的单一落点语义不变');
+  assert.equal(d.source, 'project');
+  assert.deepEqual(d.dirs, [project, userLanding], 'dirs 必须是**并集**（用户级纪律在任何项目里都该被提醒）');
+  // 项目落点恰好就是用户级落点（`DSH_HOME` 指到项目的 `.dsh-ai`）⇒ 只算一个（不重复念）
+  const sameDsh = createLandingResolver({ agents: { roots: () => [] } }, { env: { ...env, DSH_HOME: join(projectRoot, '.dsh-ai') }, cwdOf: () => projectRoot });
+  assert.deepEqual(sameDsh.describe().dirs, [project], '同一条路径不得在并集里出现两次');
 });
 
 test('判据: 宿主服务形态不符/抛错 ⇒ 当作取不到（fail-open，绝不让插件装载或求值炸掉）', () => {
