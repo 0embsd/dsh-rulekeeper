@@ -22,6 +22,34 @@ import { makePreStepHandler, preStepCapability } from './prestep.mjs';
 /** 本包根目录（`src/plugin.mjs` 上溯两级）——用于"宿主事件表扫描**排除自身**"（见 `eventTableFromHost`） */
 export const PKG_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
+/**
+ * **安全地"看一眼"某个宿主服务在不在**（2026-09-20 事故后的强制写法）。
+ *
+ * 为什么不能直接写 `ctx.systemPrompt`：cordis 的 ctx 只允许读**在 `inject` 里声明过**的服务，
+ * 否则属性访问**直接抛** `cannot get property "systemPrompt" without inject`。
+ * 在 `apply()` 里抛 = 插件树装载失败 = 整个 profile 起不来（DSH 会退回 web-safe）——
+ * 这正是 2026-09-20 的真实事故：**为了"让失败可见"而加的诊断，本身把插件搞挂了**。
+ *
+ * 为什么不干脆加进 `inject`：`inject` 是**装载前置条件**（缺服务就不装载），把诊断用的服务写进去
+ * 等于让"能装上"依赖它们 —— 诊断应当**只观察、不改变**装载可行性。
+ *
+ * @param {object} ctx 宿主插件上下文
+ * @param {string} name 服务名
+ * @param {string} [method] 可选：还要确认这个方法是函数
+ * @returns {boolean} 服务可用才 true；缺失/未声明/形态不符/抛错 ⇒ false（**永不抛**）
+ */
+export function probeService(ctx, name, method = null) {
+  try {
+    if (ctx === null || typeof ctx !== 'object') return false;
+    const svc = ctx[name];                       // ← 未声明 inject 时**这一行会抛**，故必须包在 try 里
+    if (svc === null || typeof svc !== 'object') return false;
+    if (method !== null && typeof svc[method] !== 'function') return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** 工具名命名空间（宿主里所有本插件注册的工具都必须带这个前缀，避免与其它插件撞名） */
 export const TOOL_PREFIX = 'rulekeeper_';
 
@@ -378,10 +406,13 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
     prestep: prestepReg,
     prestepCapability: preStepCapability(),
     // 诊断用（只报"宿主服务在不在"这一层事实，不把整份报告灌进去）：
+    // **必须用 probeService 读**（2026-09-20 事故）：cordis 的 ctx 对**未在 `inject` 里声明**的服务，
+    // 读属性会**直接抛** `cannot get property "X" without inject` —— 装载期抛错 = 整个插件树加载失败、
+    // DSH 退回 web-safe（用户当天就撞上了）。夹具用普通对象读不到只返回 undefined，所以用例抓不到这类退化。
     services: {
-      systemPrompt: ctx.systemPrompt !== null && typeof ctx.systemPrompt === 'object' && typeof ctx.systemPrompt.context === 'function',
-      agents: ctx.agents !== null && typeof ctx.agents === 'object' && typeof ctx.agents.roots === 'function',
-      userQuestions: ctx.userQuestions !== null && typeof ctx.userQuestions === 'object' && typeof ctx.userQuestions.ask === 'function',
+      systemPrompt: probeService(ctx, 'systemPrompt', 'context'),
+      agents: probeService(ctx, 'agents', 'roots'),
+      userQuestions: probeService(ctx, 'userQuestions', 'ask'),
     },
   };
   // ── 落盘诊断（2026-09-20）────────────────────────────────────────────────

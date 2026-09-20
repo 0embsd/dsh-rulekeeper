@@ -158,8 +158,16 @@ export function registerDelivery(ctx, {
     maxRules,
   });
   if (ctx === null || typeof ctx !== 'object') return { ok: false, reason: 'no-ctx', name, runtime, report };
-  if (ctx.systemPrompt === null || typeof ctx.systemPrompt !== 'object' ||
-      typeof ctx.systemPrompt.context !== 'function') {
+  // **读宿主服务必须包 try**（2026-09-20 事故）：cordis 对**未在 `inject` 里声明**的服务，读属性会直接抛
+  // `cannot get property "systemPrompt" without inject`；装载期抛错 = 插件树加载失败、DSH 退回 web-safe。
+  let hasSystemPrompt = false;
+  try {
+    hasSystemPrompt = ctx.systemPrompt !== null && typeof ctx.systemPrompt === 'object'
+      && typeof ctx.systemPrompt.context === 'function';
+  } catch {
+    hasSystemPrompt = false;
+  }
+  if (hasSystemPrompt !== true) {
     // 如实返回原因（不静默）：宿主未挂 systemPrompt 服务时，提醒只能缺省不投递。
     return { ok: false, reason: 'no-systemPrompt-service', name, runtime, report };
   }

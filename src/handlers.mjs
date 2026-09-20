@@ -229,7 +229,13 @@ export function makeAnchoredApplyHandler({ ctx, cwd = process.cwd(), now = () =>
       : `kind=${binding.kind} carrier=${binding.carrier ?? '-'} patterns=${(planned.additions?.patterns ?? []).join(',') || '(none)'}`;
 
     // ② 问真人（唯一入口）。服务缺失 / 无根 agent / 抛错（含 DELEGATED_CALLER）⇒ 一律不写
-    const svc = ctx !== null && typeof ctx === 'object' ? ctx.userQuestions : null;
+    // **读服务必须包 try**（2026-09-20 事故同族）：cordis 对未在 inject 里声明的服务，读属性会直接抛。
+    let svc = null;
+    try {
+      svc = ctx !== null && typeof ctx === 'object' ? ctx.userQuestions : null;
+    } catch {
+      svc = null;
+    }
     const ask = typeof askFn === 'function' ? askFn : (svc !== null && typeof svc === 'object' && typeof svc.ask === 'function' ? svc.ask.bind(svc) : null);
     if (ask === null) {
       return { ok: false, decision: 'no-answerer', reason: '宿主没有 userQuestions 服务 ⇒ 拿不到真人应答，拒绝落盘（绝不退回 --by human 声明）', proposalId };
