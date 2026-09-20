@@ -39,11 +39,27 @@ test('判据: 静态 landingDir 优先于一切（既有调用方语义不变）
 
 test('判据: noteAgent 记下"最近一轮是哪个会话"（systemPrompt.context 通道的唯一来源）', () => {
   const { projectRoot, landing } = freshProjectLanding('landing-note');
-  const r = createLandingResolver({});
-  assert.deepEqual(r.describe(), { dir: null, source: 'none' }, '未知会话时不得猜落点');
+  // `cwdOf` 注入成"没有落点的空目录"：证明**前几档全空时**确实解析不出落点（不靠 process.cwd() 蒙对）
+  const { root: emptyRoot } = freshProjectLanding('landing-note-empty', { projectLanding: false });
+  // env 也指向"没有用户级落点"的假 DSH_HOME —— 否则本机真实存在的用户级落点会让这条判据变成空转
+  const r = createLandingResolver({}, { cwdOf: () => emptyRoot, env: { DSH_HOME: join(emptyRoot, 'nohome') } });
+  assert.deepEqual(r.describe(), { dir: null, source: 'none' }, '未知会话 + 无落点的进程 cwd ⇒ 不得猜落点');
   r.noteAgent(agentAt(projectRoot));
   assert.equal(r.resolve(), landing, 'note 之后 provider 才解析得出落点');
   assert.equal(r.describe().source, 'project');
+});
+
+test('判据: 最后一档来源 = 进程工作目录（可观测事实，不是猜路径）', () => {
+  const { projectRoot, landing } = freshProjectLanding('landing-procwd');
+  // 前四档全空（无 agent / 没 note 过 / 注册表为空）⇒ 仍靠进程工作目录解析出**项目**落点
+  const r = createLandingResolver({ agents: { roots: () => [] } }, { cwdOf: () => projectRoot });
+  const d = r.describe();
+  assert.equal(d.dir, landing);
+  assert.equal(d.source, 'project');
+  // 而"进程 cwd 也没有落点"时仍必须老实返回 none —— 补这一档 ≠ 开始猜路径
+  const { root: bare } = freshProjectLanding('landing-procwd-bare', { projectLanding: false });
+  const r2 = createLandingResolver({ agents: { roots: () => [] } }, { cwdOf: () => bare, env: { DSH_HOME: join(bare, 'nohome') } });
+  assert.deepEqual(r2.describe(), { dir: null, source: 'none' });
 });
 
 test('判据: ctx.agents 注册表兜底（进程刚起、首个 pre-step 之前也能解析）', () => {
@@ -66,7 +82,7 @@ test('判据: 项目没有落点 ⇒ 退用户级落点（用户级纪律在任�
 
 test('判据: 都取不到 ⇒ null + source=none（不猜路径、不硬编码家目录）', () => {
   const bare = tempDir('landing-bare');   // 空目录：既无项目落点，也无用户落点
-  const r = createLandingResolver({}, { env: { DSH_HOME: join(bare, 'nohome') } });
+  const r = createLandingResolver({}, { env: { DSH_HOME: join(bare, 'nohome') }, cwdOf: () => bare });
   const d = r.describe(agentAt(bare));
   assert.deepEqual(d, { dir: null, source: 'none' });
   assert.equal(r.resolve(), null);

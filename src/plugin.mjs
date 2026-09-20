@@ -13,6 +13,7 @@ import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeAnchoredApplyHandler } from './handlers.mjs';
+import { appendDiag, bootDiagRecord } from './diag.mjs';
 import { makeErrorSink, safeListener } from './isolation.mjs';
 import { landingCapability, createLandingResolver } from './landing.mjs';
 import { deliveryCapability, registerDelivery } from './deliver.mjs';
@@ -346,7 +347,11 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
   let deliveryReg = { ok: false, reason: 'disabled', name: null };
   if (delivery === true) {
     try {
-      const r = registerDelivery(ctx, { resolveLanding: () => landing.describe(), ...(deliveryOptions ?? {}) });
+      const r = registerDelivery(ctx, {
+        resolveLanding: () => landing.describe(),
+        onDelivery: (info) => appendDiag(dshRoot, { kind: 'delivery', landing: info.landing, rules: info.built?.rules ?? [], chars: info.built?.chars ?? 0, emitted: info.step?.emitted === true, reason: info.reason ?? null }),
+        ...(deliveryOptions ?? {}),
+      });
       deliveryReg = r.ok === true ? r.report() : { ok: false, reason: r.reason, name: r.name };
     } catch (error) {
       // 投递注册失败绝不能让插件树装载失败（fail-open）；如实记录原因。
@@ -372,7 +377,19 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
     deliveryCapability: deliveryCapability(),
     prestep: prestepReg,
     prestepCapability: preStepCapability(),
+    // 诊断用（只报"宿主服务在不在"这一层事实，不把整份报告灌进去）：
+    services: {
+      systemPrompt: ctx.systemPrompt !== null && typeof ctx.systemPrompt === 'object' && typeof ctx.systemPrompt.context === 'function',
+      agents: ctx.agents !== null && typeof ctx.agents === 'object' && typeof ctx.agents.roots === 'function',
+      userQuestions: ctx.userQuestions !== null && typeof ctx.userQuestions === 'object' && typeof ctx.userQuestions.ask === 'function',
+    },
   };
+  // ── 落盘诊断（2026-09-20）────────────────────────────────────────────────
+  // 来历：用户重启后两条自动通道一条提醒都没发（全盘无 usage.json），而同一份代码在测试里
+  //   对任何合理 cwd 都能解析出落点 ⇒ "为什么没发"从**进程外面查不出来**（报告只活在内存里）。
+  //   这里把装载报告压成一条写进 `<DSH_HOME>/rulekeeper-boot.jsonl`；投递 provider 在
+  //   **签名变化**时再补一条（不刷屏）。全程 best-effort：写不进去也绝不影响装载。
+  appendDiag(dshRoot, bootDiagRecord({ report, cwd: process.cwd(), pid: process.pid }));
   // **`apply` 的返回值必须符合 cordis 的 effect 规则**（2026-09-15 真装载实测）：
   //   只接受 函数 / null·undefined / thenable / (async)iterable —— 返回**普通对象**会被判
   //   `TypeError: Invalid effect` ⇒ 插件树装载失败、会话起不来。

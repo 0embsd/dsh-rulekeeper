@@ -52,10 +52,26 @@ export function registryCwd(ctx) {
 export function landingCapability() {
   return {
     sources: ['static', 'project', 'user-fallback', 'none'],
-    resolution: 'static > agent.session.header.cwd（现场，最准）> noteAgent() 最近 cwd > ctx.agents 根 agent cwd；'
+    resolution: 'static > agent.session.header.cwd（现场，最准）> noteAgent() 最近 cwd > ctx.agents 根 agent cwd > '
+      + 'process.cwd()（宿主进程的工作目录；可观测事实，不是猜路径）；'
       + '项目落点不存在 ⇒ 退用户级落点（<DSH_HOME>/rulekeeper，老 lessonflow 兼容）',
     unresolved: 'null —— 不投递、不猜路径、不硬编码家目录（reason 记 no-landing）',
   };
+}
+
+/** `process.cwd()` 作为**最后一档**来源（2026-09-20 补）
+ *
+ * 为什么它可以算"事实"而不是"猜路径"：插件跑在**宿主进程**里，进程的工作目录是操作系统给出的可观测值
+ *   （与 CLI 侧 `projectRootOf(args, process.cwd())` 同一口径），不是我们编出来的目录。
+ * 为什么必须补它：线上实测（2026-09-20 重启后）两条自动通道**一条提醒都没发**
+ *   （全盘没有任何 `usage.json`），而同一份代码在测试里对任何合理 cwd 都能解析出落点并产出 589–842 字符
+ *   ⇒ 说明真实进程里前四档来源全都没拿到值（事件还没来 / 注册表为空）。没有这一档，落点解析在
+ *   "刚启动、还没有 agent" 的窗口里恒为 null，通道就是**静默哑的**。
+ * 仍然守住底线：**只把它当来源，不当真相** —— 取不到就返回 null（不投递），并把 source 如实报出来。
+ */
+function processCwd() {
+  const cwd = process.cwd();
+  return typeof cwd === 'string' && cwd.trim() !== '' ? cwd : null;
 }
 
 /**
@@ -64,13 +80,13 @@ export function landingCapability() {
  * @param {{staticLanding?: string|null, env?: object}} [opts]
  * @returns {{resolve: (agent?: object|null) => string|null, describe: (agent?: object|null) => {dir: string|null, source: string}, noteAgent: (agent: object) => void}}
  */
-export function createLandingResolver(ctx, { staticLanding = null, env = process.env } = {}) {
+export function createLandingResolver(ctx, { staticLanding = null, env = process.env, cwdOf = processCwd } = {}) {
   let notedCwd = null;
   const describe = (agent = null) => {
     if (typeof staticLanding === 'string' && staticLanding.trim() !== '') {
-      return { dir: resolveProjectLanding(notedCwd ?? process.cwd(), staticLanding), source: 'static' };
+      return { dir: resolveProjectLanding(notedCwd ?? cwdOf() ?? process.cwd(), staticLanding), source: 'static' };
     }
-    const cwd = agentCwd(agent) ?? notedCwd ?? registryCwd(ctx);
+    const cwd = agentCwd(agent) ?? notedCwd ?? registryCwd(ctx) ?? cwdOf();
     if (cwd === null) return { dir: null, source: 'none' };
     const project = resolveProjectLanding(cwd);
     if (existsSync(project)) return { dir: project, source: 'project' };

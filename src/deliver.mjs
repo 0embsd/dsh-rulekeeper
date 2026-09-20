@@ -118,6 +118,7 @@ export function nextDelivery({ runtime, built, now }) {
 export function registerDelivery(ctx, {
   landingDir = null,
   resolveLanding = null,
+  onDelivery = null,
   order = DEFAULT_ORDER,
   maxRules = DEFAULT_MAX_RULES,
   maxChars = DEFAULT_MAX_CHARS,
@@ -170,6 +171,16 @@ export function registerDelivery(ctx, {
       runtime.lastLanding = picked;
       const built = buildReminderText({ landingDir: picked.dir, now: now(), maxRules, maxChars });
       const step = nextDelivery({ runtime, built, now: now() });
+      // 诊断（2026-09-20）：只在**签名变化**时落一条（landing 来源 / 条数 / 原因变了才写），
+      // 否则每轮都写会把文件刷满、反而没人看。来历见 `diag.mjs` 顶部：
+      // "重启后一条都没发，而同样的代码在测试里一切正常" —— 从进程外查不出来的那种故障。
+      try {
+        const sig = JSON.stringify({ dir: picked.dir, source: picked.source, rules: built.rules, reason: built.reason ?? null });
+        if (sig !== runtime.lastDiagSignature && typeof onDelivery === 'function') {
+          runtime.lastDiagSignature = sig;
+          onDelivery({ landing: picked, built, step, reason: built.reason ?? null });
+        }
+      } catch { /* 诊断绝不打断投递 */ }
       // E3 推演实验抓出的缺陷（2026-09-19）：原先只记 `built.rules[0]`，而 `maxRules` 默认 3
       // ⇒ 单次投递最多只记 1 条，命中账**系统性少记**（拿它做排序/淘汰时判别力天然偏低）。
       // 现在把这一版**实际投递到的每一条**都记上；`evaluated` 只记一次（它是"提供者被求值"的计数）。
