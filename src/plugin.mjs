@@ -367,7 +367,14 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
     } catch (err) {
       out = { ok: false, reason: `register-error:${String(err?.message ?? err)}`, name: null };
     }
-    scopedAgents.set(agent, { ok: out.ok === true, reason: out.reason ?? null, agent: out.name ?? null });
+    scopedAgents.set(agent, { ok: out.ok === true, reason: out.reason ?? null, agent: out.name ?? null, mechanism: out.mechanism ?? null });
+    // 按会话注册的结果**必须落盘**（2026-09-20 教训：上一次失败是"看不见的"——
+    // 诊断文件里没有一条 scope=agent 记录，只在别处找原因浪费了一轮）
+    appendDiag(dshRoot, {
+      kind: 'scoped', agent: out.name ?? '?', ok: out.ok === true,
+      mechanism: out.mechanism ?? null, reason: out.reason ?? null,
+      mode: scopedReport().mode,
+    });
   };
 
   // ── 事件监听（LF-450：四插件同场共存）──
@@ -425,16 +432,14 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
     try {
       const r = registerDelivery(ctx, {
         resolveLanding: () => landing.describe(),
-        // **根通道让路**（方案"乙"）：若**所有**活着的根会话都已成功注册自己的作用域提醒位，
-        // 根通道就不再出话（否则同一份提醒会被投两遍 —— 两次注册是两份不同 name 的 context）。
-        // 只要有**任何一个会话**没注册成功（宿主没给 agent.ctx / 作用域里读不到 systemPrompt），
-        // 根通道就继续兜底（配合"甲"的多项目规则，多项目时只投用户级落点，绝不张冠李戴）。
-        shouldStaySilent: () => {
-          const live = liveCwds(ctx).size;                 // 有几个会话带着目录在跑
-          if (live === 0) return false;                    // 还没有会话 ⇒ 根通道负责（进程 cwd 那一档）
-          const stuck = [...ctx.agents?.roots?.() ?? []].filter((a) => !scopedFor(a));
-          return stuck.length === 0;                        // 全部已按会话注册 ⇒ 让路
-        },
+        // **根通道让路**（方案"乙"）：只要有**任何一个**会话已成功注册自己的作用域提醒位，根通道就闭嘴。
+        // 为什么是"任何一个"而不是"全部"（2026-09-20 线上实测修正）：根通道是**进程级一份**，它一出话，
+        //   **所有**会话的装配都会拿到同一段文本 —— 包括那些已有自己作用域提醒位的会话 ⇒ 那些会话
+        //   **收到两遍**（实测：我自己的上下文里同一段提醒出现两份）。故只要有人接管，根通道就让路；
+        //   尚未注册成功的会话会在它**下一轮** pre-step 时补上自己那份。
+        // 若一个会话都没注册成功（宿主没给 agent.ctx / 装配瀑布挂不上）⇒ 根通道继续兜底
+        //   （配合"甲"的多项目规则：多项目时只投用户级落点，绝不张冠李戴）。
+        shouldStaySilent: () => [...scopedAgents.values()].some((r) => r.ok === true),
         onDelivery: (info) => appendDiag(dshRoot, { kind: 'delivery', scope: 'root', landing: info.landing, rules: info.built?.rules ?? [], chars: info.built?.chars ?? 0, emitted: info.step?.emitted === true, reason: info.reason ?? null }),
         ...(deliveryOptions ?? {}),
       });

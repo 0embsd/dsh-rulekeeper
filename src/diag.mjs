@@ -78,6 +78,7 @@ export function bootDiagRecord({ report = {}, cwd = null, pid = null } = {}) {
     cwd,
     landing: report.landing ?? null,
     delivery: report.delivery ?? null,
+    scoped: report.scoped ?? null,
     prestep: report.prestep ?? null,
     services,
     subscribed: Array.isArray(report.subscribed) ? report.subscribed : [],

@@ -40,7 +40,24 @@ function normalize(raw) {
     schema: USAGE_SCHEMA,
     rules,
     totalEmitted: Number.isFinite(raw.totalEmitted) ? raw.totalEmitted : 0,
+    // `emissions`（跨重启去重的按会话状态）**必须在这里保留**：本函数白名单式重建对象，
+    // 漏一个键就等于"写进去又被吃掉了"（2026-09-20 实测：投递状态写盘后读不回来，
+    // 因为 normalize 只保留 schema/rules/totalEmitted —— 同一族已犯过三次的错）。
+    ...(normalizeEmissions(raw.emissions) === null ? {} : { emissions: normalizeEmissions(raw.emissions) }),
   };
+}
+
+/** `emissions` 的形状归一（非法项丢弃；整体非法 ⇒ null） */
+function normalizeEmissions(src) {
+  if (src === null || typeof src !== 'object' || Array.isArray(src)) return null;
+  const out = {};
+  for (const [k, v] of Object.entries(src)) {
+    if (typeof k !== 'string' || k === '') continue;
+    if (v === null || typeof v !== 'object' || Array.isArray(v)) continue;
+    if (typeof v.sha !== 'string' || v.sha === '') continue;
+    out[k] = { sha: v.sha, at: typeof v.at === 'string' ? v.at : null };
+  }
+  return out;
 }
 
 /** 读用量账；文件缺失/损坏/不可读 ⇒ 空账（不抛） */
@@ -107,4 +124,49 @@ export function usageSummary(landingDir) {
     .sort((a, b) => b.emitted - a.emitted || (a.rule < b.rule ? -1 : 1));
   const totalEvaluated = rows.reduce((sum, r) => sum + (Number(r.evaluated) || 0), 0);
   return { totalEmitted: usage.totalEmitted, totalEvaluated, rows };
+}
+
+/**
+ * **投递状态**（跨进程记忆）：最近投给**某个会话**的文本指纹。
+ *
+ * 为什么需要它（2026-09-20 线上实测到的重复）：插件的跨轮去重（`lastText`）只在**内存**里，
+ *   进程一重启就没了 ⇒ 下一轮同一条文本又被当成"新文本"投一次 ⇒ **同一段提醒在会话里出现两份**。
+ *   实测证据：`rulekeeper-boot.jsonl` 里两次重启各投一次同样的 842 字符文本（都标 `emitted=True`），
+ *   而上下文里那段提醒确实**出现两遍**。
+ * 形状：`usage.json` 顶层 `emissions: { <会话id>: { sha, at } }`（**按会话分开记**——
+ *   只记"最后一条"的话，多会话会互相覆盖，导致每次切回来都重投）。
+ * @returns {{sha: string, at: string|null}|null}
+ */
+export function readEmission(landingDir, agentKey) {
+  const key = typeof agentKey === 'string' && agentKey !== '' ? agentKey : null;
+  if (key === null) return null;
+  const usage = readUsage(landingDir);
+  const row = usage.emissions !== null && typeof usage.emissions === 'object' ? usage.emissions[key] : null;
+  if (row === null || typeof row !== 'object' || typeof row.sha !== 'string' || row.sha === '') return null;
+  return { sha: row.sha, at: typeof row.at === 'string' ? row.at : null };
+}
+
+/** 记下"这个会话收到了什么指纹"（原子写；失败返回 false，**绝不抛**） */
+export function writeEmission(landingDir, agentKey, { sha, at = null } = {}) {
+  const key = typeof agentKey === 'string' && agentKey !== '' ? agentKey : null;
+  if (key === null || typeof sha !== 'string' || sha === '') return false;
+  const usage = readUsage(landingDir);
+  const emissions = usage.emissions !== null && typeof usage.emissions === 'object' ? { ...usage.emissions } : {};
+  emissions[key] = { sha, at: at === null ? new Date().toISOString() : String(at) };
+  // 有界：只留最近 20 个会话（防止无限增长）。
+  // 排序用**码位比较**（S5_LOCALE_COMPARE 禁 localeCompare：跨平台/跨语言环境下结果不稳定）。
+  const keys = Object.keys(emissions);
+  if (keys.length > 20) {
+    const atOf = (k) => String(emissions[k]?.at ?? '');
+    const sorted = keys.slice().sort((a, b) => {
+      const x = atOf(a);
+      const y = atOf(b);
+      if (x < y) return -1;
+      if (x > y) return 1;
+      return a < b ? -1 : (a > b ? 1 : 0);
+    });
+    for (const k of sorted.slice(0, keys.length - 20)) delete emissions[k];
+  }
+  usage.emissions = emissions;
+  return writeUsage(landingDir, usage);
 }

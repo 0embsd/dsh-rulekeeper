@@ -17,10 +17,16 @@
 // 归属：core 模块。零依赖：只用 node:*。
 
 import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 
 import { DEFAULT_MAX_CHARS, DEFAULT_MAX_RULES, DEFAULT_MIN_INTERVAL_MS, DEFAULT_ORDER, REGISTRY_NAME, buildReminderText, createDeliveryRuntime, nextDelivery } from './deliver.mjs';
 import { resolveProjectLanding, resolveUserLanding } from './platform/paths.mjs';
-import { bumpUsage } from './usage.mjs';
+import { bumpUsage, readEmission, writeEmission } from './usage.mjs';
+
+/** 文本指纹（跨重启去重用；sha256 前 16 字节足够区分，且不把正文写进状态文件） */
+export function textSha(text) {
+  return createHash('sha256').update(String(text ?? ''), 'utf8').digest('hex').slice(0, 32);
+}
 
 /** 注册名后缀分隔符（每个会话一个唯一名字：宿主对同一作用域内的重名会抛） */
 export const SCOPED_NAME_SEP = '#';
@@ -87,16 +93,15 @@ export function registerAgentScopedDelivery({
   const name = `${REGISTRY_NAME}${SCOPED_NAME_SEP}${agentKeyOf(agent)}`;
   const actx = agent !== null && typeof agent === 'object' ? agent.ctx : null;
   if (actx === null || typeof actx !== 'object' || typeof actx.effect !== 'function') {
-    return { ok: false, reason: 'no-agent-ctx', name, runtime: null, report: null };
+    return { ok: false, reason: 'no-agent-ctx', mechanism: null, name, runtime: null, report: null };
   }
-  const sp = systemPromptOf(actx);
-  if (sp === null) return { ok: false, reason: 'no-systemPrompt-in-scope', name, runtime: null, report: null };
 
   const runtime = createDeliveryRuntime({ minIntervalMs });
   runtime.lastLanding = landingForAgent(agent, { env });
   const report = () => ({
     ok: true,
     scope: 'agent',
+    mechanism: runtime.mechanism ?? null,
     agent: agentKeyOf(agent),
     name,
     order,
@@ -116,17 +121,33 @@ export function registerAgentScopedDelivery({
       const picked = landingForAgent(agent, { env });      // ← 每次求值都用**这个会话自己**的 cwd
       runtime.lastLanding = picked;
       const built = buildReminderText({ landingDir: picked.dir, now: now(), maxRules, maxChars });
+      // **跨重启不重复投**（2026-09-20 实测到的重复）：内存里去重状态随进程消失，
+      //   重启后同一段文本会被再投一次（上下文里出现两份）。这里查"落盘的上次投递"：
+      //   同一落点 + 同一个会话 + 同一段文本 ⇒ 本会话早就有它了，这次不出话。
+      const selfKey = agentKeyOf(agent);
+      const already = (() => {
+        if (built.text === '') return false;
+        const last = readEmission(picked.dir, selfKey);
+        return last !== null && last.sha === textSha(built.text);
+      })();
+      if (already) {
+        runtime.reasons.push('already-delivered-before-restart');
+        return '';
+      }
       const step = nextDelivery({ runtime, built, now: now() });
       try {
         const sig = JSON.stringify({ dir: picked.dir, source: picked.source, rules: built.rules, reason: built.reason ?? null });
         if (sig !== runtime.lastDiagSignature && typeof onDelivery === 'function') {
           runtime.lastDiagSignature = sig;
-          onDelivery({ scope: 'agent', agent: agentKeyOf(agent), landing: picked, built, step, reason: built.reason ?? null });
+          onDelivery({ scope: 'agent', mechanism: runtime.mechanism ?? null, agent: agentKeyOf(agent), landing: picked, built, step, reason: built.reason ?? null });
         }
       } catch { /* 诊断绝不打断投递 */ }
       if (built.rules.length > 0) {
         bumpUsage(picked.dir, { rule: built.rules[0], event: 'evaluated', now: now() });
-        if (step.emitted) for (const rule of built.rules) bumpUsage(picked.dir, { rule, event: 'emitted', now: now() });
+        if (step.emitted) {
+          for (const rule of built.rules) bumpUsage(picked.dir, { rule, event: 'emitted', now: now() });
+          writeEmission(picked.dir, selfKey, { sha: textSha(built.text), at: now().toISOString() });
+        }
       }
       return step.text;
     } catch {
@@ -134,13 +155,47 @@ export function registerAgentScopedDelivery({
     }
   };
 
-  try {
-    actx.effect(() => {
-      sp.context({ name, order, text: provider });
-      return undefined;   // cordis effect 只接受 函数/null/undefined/thenable/iterable
-    });
-  } catch (err) {
-    return { ok: false, reason: `scope-register-error:${String(err?.message ?? err)}`, name, runtime, report };
+  // ── 机制选择（**显式开关优先**）──────────────────────────────────────────────────
+  // 机制①：作用域内**服务注册**（默认；真 cordis 实测能读到服务、注册能生效）。
+  // 机制②：装配瀑布（`actx.on('system-prompt/assemble')`）——**默认关闭**。
+  //   想法：宿主自己就是用 `agentCtx.on('system-prompt/assemble', …)` 往 assembly 里加东西的，
+  //   这条路不读服务、看起来更稳。但 **2026-09-20 真 cordis 实测否决**：在"两个作用域、两个会话"
+  //   的夹具里，每个装配**都收到了两份文本**（AAA 与 BBB 同时出现）⇒ 我**未能证明**这条路的
+  //   作用域隔离；若它不隔离，多会话下会把别人的提醒塞进你的上下文（比原问题更糟）。
+  //   ⇒ 只留显式开关 `RULEKEEPER_SCOPED_WATERFALL=1` 供后续验证，**不作默认**。
+  const useWaterfall = process.env.RULEKEEPER_SCOPED_WATERFALL === '1' && typeof actx.on === 'function';
+  if (useWaterfall) {
+    try {
+      actx.effect(() => {
+        const off = actx.on('system-prompt/assemble', async (assembly, _context, next) => {
+          const assembled = typeof next === 'function' ? await next() : assembly;
+          const text = provider();
+          if (text === '') return assembled;
+          const contexts = Array.isArray(assembled?.contexts) ? assembled.contexts : [];
+          return { ...assembled, contexts: [...contexts, { name, text }] };
+        });
+        return typeof off === 'function' ? off : undefined;
+      });
+    } catch (err) {
+      return { ok: false, reason: `scope-hook-error:${String(err?.message ?? err)}`, mechanism: null, name, runtime, report };
+    }
+    runtime.mechanism = 'assemble-waterfall';
+    return { ok: true, reason: null, mechanism: 'assemble-waterfall', name, runtime, report };
   }
-  return { ok: true, reason: null, name, runtime, report };
+
+  const sp = systemPromptOf(actx);
+  if (sp !== null) {
+    try {
+      actx.effect(() => {
+        sp.context({ name, order, text: provider });
+        return undefined;   // cordis effect 只接受 函数/null/undefined/thenable/iterable
+      });
+    } catch (err) {
+      return { ok: false, reason: `scope-register-error:${String(err?.message ?? err)}`, mechanism: null, name, runtime, report };
+    }
+    runtime.mechanism = 'service-context';
+    return { ok: true, reason: null, mechanism: 'service-context', name, runtime, report };
+  }
+
+  return { ok: false, reason: 'no-systemPrompt-in-agent-scope', mechanism: null, name, runtime, report };
 }

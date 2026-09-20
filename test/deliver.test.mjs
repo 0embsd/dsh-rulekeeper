@@ -20,7 +20,7 @@ import {
   DEFAULT_MIN_INTERVAL_MS, REGISTRY_NAME, buildReminderText, createDeliveryRuntime,
   deliveryCapability, nextDelivery, registerDelivery,
 } from '../src/deliver.mjs';
-import { bumpUsage, emptyUsage, readUsage, usageSummary, writeUsage } from '../src/usage.mjs';
+import { bumpUsage, emptyUsage, readEmission, readUsage, usageSummary, writeEmission, writeUsage } from '../src/usage.mjs';
 import { cleanupAll, freshLanding, ledgerEntry, tempDir } from './helpers/sandbox.mjs';
 
 test.after(cleanupAll);
@@ -163,6 +163,27 @@ test('判据: 用量账往返 + 损坏降级 + 摘要排序 + 不留 .tmp 残fil
   assert.equal(bumpUsage(dir, { rule: 'X', event: 'emitted' }).ok, true);
   assert.equal(readUsage(dir).totalEmitted, 1);
   assert.equal(writeUsage('', emptyUsage()), false, '空落点应返回 false 而不是抛');
+});
+
+test('判据（白名单吃掉字段的回归）: 按会话的投递状态必须能往返（跨重启去重靠它）', () => {
+  const dir = tempDir('usage-emission');
+  assert.equal(readEmission(dir, 'sess-1'), null, '空账 ⇒ null');
+  assert.equal(writeEmission(dir, 'sess-1', { sha: 'a'.repeat(32), at: '2026-09-20T00:00:00.000Z' }), true);
+  assert.deepEqual(readEmission(dir, 'sess-1'), { sha: 'a'.repeat(32), at: '2026-09-20T00:00:00.000Z' },
+    '写进去又读不回来 = 字段被 normalize 的白名单吃掉了（本仓已犯过三次的错）');
+  // **按会话分开**：会话 2 不受会话 1 的状态影响
+  assert.equal(readEmission(dir, 'sess-2'), null, '别的会话不该看到 sess-1 的状态');
+  writeEmission(dir, 'sess-2', { sha: 'b'.repeat(32) });
+  assert.equal(readEmission(dir, 'sess-1').sha, 'a'.repeat(32), '写 sess-2 不能覆盖 sess-1');
+  // 与用量计数共存：互相不能覆盖
+  bumpUsage(dir, { rule: 'CAT-CODE', event: 'emitted' });
+  assert.equal(readUsage(dir).totalEmitted, 1);
+  assert.equal(readEmission(dir, 'sess-1').sha, 'a'.repeat(32), 'bump 之后状态仍要在');
+  // 非法输入 ⇒ 当作没有 / 返回 false（不放半截数据进去）
+  assert.equal(writeEmission(dir, 'sess-3', { sha: '' }), false);
+  assert.equal(writeEmission('', 'sess-3', { sha: 'x' }), false);
+  assert.equal(writeEmission(dir, '', { sha: 'x' }), false);
+  assert.equal(readEmission(dir, ''), null);
 });
 
 test('判据: 能力声明与实现同源（deliveryCapability 反映真实预算）', () => {
