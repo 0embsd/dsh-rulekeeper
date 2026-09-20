@@ -42,6 +42,7 @@ import { query as queryLedger, readLedger, record, summary as ledgerSummary } fr
 import { listLogFiles, readEntries, rotateIfNeeded, totalBytes } from './log.mjs';
 import { RC, checkRcTable, renderRcTable } from './rc.mjs';
 import { checkSchema, renderSchemaMarkdown } from './schema.mjs';
+import { DEFAULT_NEAR_DUP_THRESHOLD, findNearDuplicates } from './similarity.mjs';
 import { USAGE_FILE, usageSummary } from './usage.mjs';
 import { canonicalRule, dedupe, detectRuleDivergence, ruleFragmentation } from './ruleid.mjs';
 import { redactText, redactValue, scanText, selfTestRules, statsOf } from './redact.mjs';
@@ -263,8 +264,10 @@ export const USAGE_LEDGER = `用法:
   rk-ledger query   --landing <落点> [--id <id>] [--rule <rule>] [--json]
   rk-ledger summary --landing <落点> [--json]
   rk-ledger dedupe  --landing <落点> [--json]
+  rk-ledger near-dup --landing <落点> [--threshold 0.6] [--fields problem] [--fail-on-found] [--json]
+                     （**近似**重复检测：精确键 dedupe 抓不到"同一次事故的第二次记录"；E2 实验依据见 src/similarity.mjs）
   rk-ledger families --landing <落点> --expect <RULE>=<id,id,...>   （校验同族条目归同 rule）
-退出码: 0 成功 / 1 失败（导入写入失败 / families 不符） / 2 用法错误`;
+退出码: 0 成功 / 1 失败（导入写入失败 / families 不符 / near-dup --fail-on-found 且确有近似重复） / 2 用法错误`;
 
 export const USAGE_EFFECT = `用法:
   rk-effect plan   --landing <落点> [--project <项目根>] [--now <ISO>] [--stale-days n] [--json]
@@ -963,7 +966,7 @@ export function runLedger(argv, io = defaultIo(), env = process.env) {
     io.out(`${USAGE_LEDGER}\n`);
     return command === null ? RC.USAGE : RC.OK;
   }
-  if (!['import', 'query', 'summary', 'dedupe', 'families'].includes(command)) {
+  if (!['import', 'query', 'summary', 'dedupe', 'near-dup', 'families'].includes(command)) {
     io.err(`rk-ledger: 未知子命令 "${command}"\n${USAGE_LEDGER}\n`);
     return RC.USAGE;
   }
@@ -972,6 +975,7 @@ export function runLedger(argv, io = defaultIo(), env = process.env) {
     flags = scanFlags(argv.slice(1), {
       '--legacy': 'string', '--landing': 'string', '--id': 'string', '--rule': 'string',
       '--expect': 'string', '--now': 'string', '--dry-run': 'boolean', '--json': 'boolean',
+      '--threshold': 'string', '--fields': 'string', '--fail-on-found': 'boolean',
     });
   } catch (err) {
     if (err instanceof UsageError) {
@@ -1092,6 +1096,37 @@ export function runLedger(argv, io = defaultIo(), env = process.env) {
     }
     io.out(resultLine('DEDUPE', true));
     return RC.OK;
+  }
+
+  if (command === 'near-dup') {
+    // **近似**重复（E2 实验落地，2026-09-19）：精确键 dedupe 抓不到"同一次事故的第二次记录"。
+    // 只读；`--fail-on-found` 时才用 rc=1 表达"确有近似重复"（便于当入库门用）。
+    const threshold = flags.threshold === undefined ? DEFAULT_NEAR_DUP_THRESHOLD : Number(flags.threshold);
+    if (!Number.isFinite(threshold) || threshold <= 0 || threshold > 1) {
+      io.err(`rk-ledger near-dup: --threshold 必须在 (0,1]，实得 ${JSON.stringify(flags.threshold)}\n`);
+      return RC.USAGE;
+    }
+    const fields = flags.fields === undefined ? ['problem'] : flags.fields.split(',').map((s) => s.trim()).filter((s) => s !== '');
+    const read = readLedger(landing);
+    const report = findNearDuplicates(read.values, { threshold, fields });
+    if (flags.json === true) {
+      io.out(jsonStable({ landing, ...report }));
+    } else {
+      io.out(line(`RK_NEAR_DUP_LANDING=${toPosix(landing)}`));
+      io.out(line(`RK_NEAR_DUP_ENTRIES=${report.entries}`));
+      io.out(line(`RK_NEAR_DUP_THRESHOLD=${report.threshold}`));
+      io.out(line(`RK_NEAR_DUP_FIELDS=${report.fields.join(',')}`));
+      io.out(line(`RK_NEAR_DUP_COMPARED=${report.compared}`));
+      io.out(line(`RK_NEAR_DUP_PAIRS=${report.pairs.length}`));
+      io.out(line(`RK_NEAR_DUP_SAME_RULE=${report.pairs.filter((p) => p.sameRule).length}`));
+      if (report.truncated) io.out(line('RK_NEAR_DUP_TRUNCATED=true'));
+      for (const p of report.pairs) {
+        io.out(line(`PAIR ${p.score} ${p.aId} ~ ${p.bId} rule=${p.aRule ?? '-'}/${p.bRule ?? '-'} sameRule=${p.sameRule}`));
+      }
+    }
+    const found = report.pairs.length > 0;
+    io.out(resultLine('LEDGER_NEAR_DUP', flags['fail-on-found'] === true ? !found : true));
+    return flags['fail-on-found'] === true && found ? RC.FAIL : RC.OK;
   }
 
   // families：校验"同族条目必须归同 rule"（LF-210 的红态判据入口）
@@ -2582,9 +2617,25 @@ function runCliRecord(argv, io, env) {
   const parsed = parseSub('record', argv, {
     '--landing': 'string', '--rule': 'string', '--category': 'string', '--problem': 'string',
     '--root-cause': 'string', '--solution': 'string', '--mechanism': 'string', '--evidence': 'string', '--now': 'string',
+    '--on-near-dup': 'string', '--near-dup-threshold': 'string',
   }, io);
   if (parsed.error !== null) return parsed.error;
   const flags = parsed.flags;
+  // 入库近似重复门（E2 实验落地）：默认 **observe**（只报不拦），`--on-near-dup reject` 才拒收。
+  // 为什么默认不拦：仓里一贯"先观察再上闸"（规则 40 的 guard 也是 observe 起步）；但**必须报**
+  // ——E2 的数字说明伤害发生在入库那一刻，报出来才有机会改。
+  const onNearDup = flags['on-near-dup'] ?? 'observe';
+  if (!['observe', 'reject', 'off'].includes(onNearDup)) {
+    io.err(`dsh-rulekeeper record: --on-near-dup 只能是 observe|reject|off，实得 ${JSON.stringify(flags['on-near-dup'])}\n`);
+    return RC.USAGE;
+  }
+  const nearDupThreshold = flags['near-dup-threshold'] === undefined
+    ? DEFAULT_NEAR_DUP_THRESHOLD
+    : Number(flags['near-dup-threshold']);
+  if (!Number.isFinite(nearDupThreshold) || nearDupThreshold <= 0 || nearDupThreshold > 1) {
+    io.err(`dsh-rulekeeper record: --near-dup-threshold 必须在 (0,1]，实得 ${JSON.stringify(flags['near-dup-threshold'])}\n`);
+    return RC.USAGE;
+  }
   const target = resolveLanding('record', flags, io);
   if (target.error !== null) return target.error;
   const missing = ['rule', 'problem', 'root-cause', 'solution'].filter((k) => flags[k] === undefined);
@@ -2603,6 +2654,29 @@ function runCliRecord(argv, io, env) {
     throw err;
   }
   const evidence = flags.evidence === undefined ? [] : flags.evidence.split(',').map((s) => s.trim()).filter((s) => s !== '');
+  // ── 入库门：这条新问题与账本里已有的某条**过于相似**吗？（与已有行比，不含自己）──────
+  if (onNearDup !== 'off') {
+    const existing = readLedger(target.landing).values;
+    const probe = { id: '(new)', rule: flags.rule, problem: flags.problem };
+    const dup = findNearDuplicates([...existing, probe], { threshold: nearDupThreshold });
+    const hits = dup.pairs.filter((p) => p.aId === '(new)' || p.bId === '(new)');
+    if (hits.length > 0) {
+      const top = hits[0];
+      const other = top.aId === '(new)' ? top.bId : top.aId;
+      if (onNearDup === 'reject') {
+        io.err(`dsh-rulekeeper record: 拒收——与已有条目 ${other} 近似重复（相似度 ${top.score} ≥ ${nearDupThreshold}）\n`);
+        io.out(line(`RK_RECORD_NEAR_DUP=${other}@${top.score}`));
+        io.out(line('RK_RECORD_NEAR_DUP_ACTION=reject'));
+        io.out(resultLine('RECORD', false));
+        return RC.FAIL;
+      }
+      io.out(line(`RK_RECORD_NEAR_DUP=${other}@${top.score}`));
+      io.out(line(`RK_RECORD_NEAR_DUP_COUNT=${hits.length}`));
+      io.out(line('RK_RECORD_NEAR_DUP_ACTION=observe'));
+      io.err(`⚠ 近似重复提醒（observe，仍写入）：与 ${other} 相似度 ${top.score} ≥ ${nearDupThreshold}；`
+        + '若确为同一次事故，请改用事件行/supersede 而不是 append 新行（E2：重复条目会把正确教训挤出 top-1）\n');
+    }
+  }
   const result = record({
     rule: flags.rule,
     category: flags.category ?? '未分类',
