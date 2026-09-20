@@ -68,14 +68,24 @@ export function readDiag(dshRoot, { limit = 200 } = {}) {
 
 /**
  * 把插件装载报告压成一条**可读**诊断（只取排查真正需要的字段，避免把整份报告灌进去）。
- * @param {{report?: object, dshRoot?: string, cwd?: string, pid?: number}} opts
+ *
+ * 【2026-09-21 补：`launch`（启动形态）】为什么必须有这一栏：现场出现过"3 次启动里 2 次根通道注册失败
+ * （`no-systemPrompt-service`）、另 1 次正常"，而诊断里只有 pid/cwd ⇒ **分不清那 2 次是哪种启动方式**
+ * （是另一个 profile？还是同一 profile 的启动期竞态？），只能靠 cwd 猜，白花一轮。
+ * 这一栏只记**可观测的启动事实**（argv/execArgv/入口脚本/DSH_HOME），不是推断：
+ *   · `argv`/`execArgv`：宿主怎么被拉起来的（profile 名、模式开关通常就在里面）；
+ *   · `entry`：主脚本路径（区分 dsh CLI / 其它入口）；
+ *   · `dshHome`：落点根（多机器/多用户时区分环境）；
+ *   · `profileHint`：从 argv 里抓 `--profile <name>` / `--profile=<name>`（抓不到就是 null，不猜）。
+ * @param {{report?: object, dshRoot?: string, cwd?: string, pid?: number, launch?: object}} opts
  */
-export function bootDiagRecord({ report = {}, cwd = null, pid = null } = {}) {
+export function bootDiagRecord({ report = {}, cwd = null, pid = null, launch = null } = {}) {
   const services = report.services ?? {};
   return {
     kind: 'boot',
     pid,
     cwd,
+    launch: launch ?? defaultLaunchInfo(),
     landing: report.landing ?? null,
     delivery: report.delivery ?? null,
     scoped: report.scoped ?? null,
@@ -84,6 +94,24 @@ export function bootDiagRecord({ report = {}, cwd = null, pid = null } = {}) {
     subscribed: Array.isArray(report.subscribed) ? report.subscribed : [],
     tools: Array.isArray(report.registered) ? report.registered : [],
     listenerErrors: report.listenerErrors ?? 0,
+  };
+}
+
+/** 启动形态（**只记事实**；任何一项取不到就 null/空数组，绝不推断、绝不抛） */
+export function defaultLaunchInfo({ argv = process.argv, execArgv = process.execArgv, env = process.env } = {}) {
+  const args = Array.isArray(argv) ? argv.map(String) : [];
+  let profileHint = null;
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i];
+    if (a === '--profile' && typeof args[i + 1] === 'string' && args[i + 1].trim() !== '') profileHint = args[i + 1].trim();
+    else if (typeof a === 'string' && a.startsWith('--profile=')) profileHint = a.slice('--profile='.length).trim() || null;
+  }
+  return {
+    argv: args.slice(0, 12),
+    execArgv: (Array.isArray(execArgv) ? execArgv : []).map(String).slice(0, 8),
+    entry: args[1] ?? null,
+    profileHint,
+    dshHome: typeof env?.DSH_HOME === 'string' && env.DSH_HOME.trim() !== '' ? env.DSH_HOME.trim() : null,
   };
 }
 

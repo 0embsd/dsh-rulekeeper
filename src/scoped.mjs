@@ -17,16 +17,28 @@
 // 归属：core 模块。零依赖：只用 node:*。
 
 import { existsSync } from 'node:fs';
-import { createHash } from 'node:crypto';
 
 import { DEFAULT_MAX_CHARS, DEFAULT_MAX_RULES, DEFAULT_MIN_INTERVAL_MS, DEFAULT_ORDER, REGISTRY_NAME, buildReminderText, createDeliveryRuntime, nextDelivery } from './deliver.mjs';
 import { pathKey, resolveProjectLanding, resolveUserLanding } from './platform/paths.mjs';
-import { bumpUsage, readEmission, writeEmission } from './usage.mjs';
+import { ROOT_EMISSION_KEY, bumpUsage, readEmission, textSha, writeEmission } from './usage.mjs';
 
-/** 文本指纹（跨重启去重用；sha256 前 16 字节足够区分，且不把正文写进状态文件） */
-export function textSha(text) {
-  return createHash('sha256').update(String(text ?? ''), 'utf8').digest('hex').slice(0, 32);
-}
+// 文本指纹的实现已移到 `usage.mjs`（它服务的落盘状态就在那里；根通道也要用同一份，避免循环 import）。
+// 这里**继续导出**同名符号：既有调用方与用例不受影响。
+export { textSha };
+
+/**
+ * 跨通道指纹去重的**时间窗**（2026-09-21，用户点选的 F-1 修法）。
+ *
+ * 机制：根通道（进程级一份）投递时把文本指纹落在它用的落点上（键 `(root)`）；作用域通道算出的文本
+ * 与它**逐字相同**且在窗口内 ⇒ 认为这份提醒刚刚已经进过上下文，不再重复投。
+ *
+ * 为什么窗口要短（90 秒，不能照抄"30 分钟最小间隔"）：
+ *   · 竞态窗口只有**毫秒级**（现场实测：根 15:59:17.578 投递，首个作用域注册 15:59:17.633，晚 55ms）；
+ *   · 窗口越长，越可能把"**新会话**的第一份提醒"也当成重复（根通道的投递是进程级的，它进的是
+ *     **当时正在装配的那个会话**的上下文，不保证是后来才建的新会话）⇒ 那会变成静默缺失。
+ *   · 90 秒只覆盖"同一次启动 + 同一轮装配"的范围；超窗一律照投（**宁重复，不静默**）。
+ */
+export const ROOT_DEDUP_WINDOW_MS = 90 * 1000;
 
 /** 注册名后缀分隔符（每个会话一个唯一名字：宿主对同一作用域内的重名会抛） */
 export const SCOPED_NAME_SEP = '#';
@@ -134,6 +146,7 @@ export function registerAgentScopedDelivery({
     evaluations: runtime.evaluations,
     emissions: runtime.emissions,
     holds: runtime.holds,
+    rootDedupSkips: runtime.rootDedupSkips,   // 跨通道去重拦下的次数（0 就是没拦过；>0 说明根通道先投过同样的文本）
     lastChars: runtime.lastText.length,
     maxChars,
     maxRules,
@@ -163,6 +176,23 @@ export function registerAgentScopedDelivery({
       if (already) {
         runtime.reasons.push('already-delivered-before-restart');
         return '';
+      }
+      // **跨通道指纹去重**（2026-09-21，F-1 修法）：根通道刚投过**逐字相同**的一段 ⇒ 不再重复投。
+      // 判据只认两件事：指纹相同 + 在 `ROOT_DEDUP_WINDOW_MS` 窗口内（窗口为什么必须短，见常量注释）。
+      // 命中也**如实记账**（`rootDedupSkips`，可在报告里读）——否则"少投了一次"会变成看不见的行为。
+      if (built.text !== '' && contributing.length > 0) {
+        const mine = textSha(built.text);
+        const rootHit = contributing.some((dir) => {
+          const row = readEmission(dir, ROOT_EMISSION_KEY);
+          if (row === null || row.sha !== mine || typeof row.at !== 'string') return false;
+          const at = Date.parse(row.at);
+          return Number.isFinite(at) && (now().getTime() - at) <= ROOT_DEDUP_WINDOW_MS;
+        });
+        if (rootHit) {
+          runtime.rootDedupSkips += 1;
+          runtime.reasons.push('already-delivered-by-root');
+          return '';
+        }
       }
       const step = nextDelivery({ runtime, built, now: now() });
       try {

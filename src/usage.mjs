@@ -14,10 +14,45 @@
 //   · 只记事实（evaluated=提供者被求值次数；emitted=返回了非空文本的次数），
 //     不臆断"模型看过了"——宿主对相同文本有自己的去重，插件侧观测不到追加结果（如实登记）。
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
 export const USAGE_FILE = 'usage.json';
 export const USAGE_SCHEMA = 1;
+
+/**
+ * **文本指纹**（跨重启去重 + 跨通道去重用；sha256 前 16 字节足够区分，且不把正文写进状态文件）。
+ *
+ * 为什么放在 usage.mjs（2026-09-21 从 `scoped.mjs` 移过来）：它服务的对象就是**落盘的去重状态**
+ * （`emissions`），而根通道（`deliver.mjs`）也要用同一个指纹写/读同一张表 —— 若留在 `scoped.mjs`，
+ * `deliver.mjs` 就得反向 import（`scoped.mjs` 已 import `deliver.mjs` ⇒ 循环依赖）。
+ * `scoped.mjs` 继续 re-export 这个名字（既有用例与调用方不受影响）。
+ */
+export function textSha(text) {
+  return createHash('sha256').update(String(text ?? ''), 'utf8').digest('hex').slice(0, 32);
+}
+
+/**
+ * 根通道（进程级、拿不到 agent）的投递状态记在**这个伪会话键**上。
+ *
+ * 两个用途（同一份状态、两个读者）：
+ *   · **计数器语义诚实化**：根通道的投递此前只计数、不落"投给了谁"⇒ `emitted` 里混着根通道的量，
+ *     而它是**进程级一份**（一次投递进所有会话的装配）。记成 `(root)` 后，"按会话"读数才说得清。
+ *   · **跨通道指纹去重**：作用域通道算出的文本与根通道刚投过的一致 ⇒ 不重复投（见 scoped.mjs 的
+ *     `ROOT_DEDUP_WINDOW_MS`）。键用括号包住，与真实会话 id（宿主形如 `session-<uuid>`）不会撞。
+ */
+export const ROOT_EMISSION_KEY = '(root)';
+
+/**
+ * `emissions` 的保留上限与保鲜期（2026-09-21 修：原来是硬编码 20 键）。
+ *
+ * 为什么必须改：20 键是"单会话单落点"时代拍的数；现在①一个会话会往**它用到的每个落点**各写一条
+ * （并集：项目 + 用户级），②多会话/多项目主机上很容易超过 20 个会话 ⇒ 触顶后按时间淘汰**最早**的会话，
+ * 那些会话下次回来会被当成"没投过" ⇒ 重启后重复一次（正是这张表要防的事）。故：上限提到 200，
+ * 并加**保鲜期**淘汰（只清超过 30 天没动过的），使上限只在真正的大主机上才生效。
+ */
+export const EMISSIONS_CAP = 200;
+export const EMISSIONS_MAX_AGE_DAYS = 30;
 
 /** 空的用量账（也是读失败时的降级值） */
 export function emptyUsage() {
@@ -123,7 +158,21 @@ export function usageSummary(landingDir) {
     .map(([rule, v]) => ({ rule, ...v }))
     .sort((a, b) => b.emitted - a.emitted || (a.rule < b.rule ? -1 : 1));
   const totalEvaluated = rows.reduce((sum, r) => sum + (Number(r.evaluated) || 0), 0);
-  return { totalEmitted: usage.totalEmitted, totalEvaluated, rows };
+  // 按会话读数（2026-09-21 计数器语义）：`emitted` 是"投递动作"计数，混了**通道数**（根通道一次进所有
+  // 会话）与**重启次数**（同一会话跨重启可能再投一次）⇒ 不能直接当"命中了几次"用。
+  // 这里把落盘的去重状态按会话摊开（含 `(root)` 伪会话），让"到底投给过几个会话/多少次"可读。
+  const emissions = usage.emissions !== null && typeof usage.emissions === 'object' ? usage.emissions : {};
+  const sessionRows = Object.entries(emissions)
+    .map(([key, v]) => ({ key, sha: typeof v?.sha === 'string' ? v.sha : null, at: typeof v?.at === 'string' ? v.at : null, root: key === ROOT_EMISSION_KEY }))
+    .sort((a, b) => String(b.at ?? '') < String(a.at ?? '') ? -1 : (String(b.at ?? '') > String(a.at ?? '') ? 1 : (a.key < b.key ? -1 : 1)));
+  return {
+    totalEmitted: usage.totalEmitted,
+    totalEvaluated,
+    rows,
+    sessions: sessionRows.filter((s) => s.root !== true).length,   // 真实会话数（不含根通道伪会话）
+    rootEmission: sessionRows.find((s) => s.root === true) ?? null,
+    sessionRows,
+  };
 }
 
 /**
@@ -153,11 +202,18 @@ export function writeEmission(landingDir, agentKey, { sha, at = null } = {}) {
   const usage = readUsage(landingDir);
   const emissions = usage.emissions !== null && typeof usage.emissions === 'object' ? { ...usage.emissions } : {};
   emissions[key] = { sha, at: at === null ? new Date().toISOString() : String(at) };
-  // 有界：只留最近 20 个会话（防止无限增长）。
+  // 有界（2026-09-21 修）：先按**保鲜期**淘汰久未动过的，再按上限淘汰最旧的。
   // 排序用**码位比较**（S5_LOCALE_COMPARE 禁 localeCompare：跨平台/跨语言环境下结果不稳定）。
+  // `(root)` 键**永不淘汰**：它承载根通道的跨通道去重状态（进程级一份），不是"某个会话的历史"。
+  const atOf = (k) => String(emissions[k]?.at ?? '');
+  const staleBefore = new Date(Date.now() - EMISSIONS_MAX_AGE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  for (const k of Object.keys(emissions)) {
+    if (k === ROOT_EMISSION_KEY) continue;
+    const at = atOf(k);
+    if (at !== '' && at < staleBefore) delete emissions[k];
+  }
   const keys = Object.keys(emissions);
-  if (keys.length > 20) {
-    const atOf = (k) => String(emissions[k]?.at ?? '');
+  if (keys.length > EMISSIONS_CAP) {
     const sorted = keys.slice().sort((a, b) => {
       const x = atOf(a);
       const y = atOf(b);
@@ -165,7 +221,13 @@ export function writeEmission(landingDir, agentKey, { sha, at = null } = {}) {
       if (x > y) return 1;
       return a < b ? -1 : (a > b ? 1 : 0);
     });
-    for (const k of sorted.slice(0, keys.length - 20)) delete emissions[k];
+    let over = keys.length - EMISSIONS_CAP;
+    for (const k of sorted) {
+      if (over <= 0) break;
+      if (k === ROOT_EMISSION_KEY) continue;   // 根通道状态不参与淘汰
+      delete emissions[k];
+      over -= 1;
+    }
   }
   usage.emissions = emissions;
   return writeUsage(landingDir, usage);

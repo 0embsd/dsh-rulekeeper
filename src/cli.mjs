@@ -2515,6 +2515,14 @@ function runCliEffect(argv, io, env) {
       io.out(line(`RK_EFFECT_USAGE_RULES=${us.rows.length}`));
       io.out(line(`RK_EFFECT_USAGE_EMITTED=${us.totalEmitted}`));
       io.out(line(`RK_EFFECT_USAGE_EVALUATED=${us.totalEvaluated}`));
+      // 按会话读数（2026-09-21 计数器语义）：`EMITTED` 是**投递动作**计数（混了通道数与重启次数），
+      // 这里补"到底投给过几个会话 + 根通道最近投过什么"，两个数一起看才不会把动作数当命中数。
+      io.out(line(`RK_EFFECT_USAGE_SESSIONS=${us.sessions}`));
+      io.out(line(`RK_EFFECT_USAGE_ROOT_EMISSION ${us.rootEmission === null ? 'sha=- at=-' : `sha=${String(us.rootEmission.sha).slice(0, 8)} at=${us.rootEmission.at ?? '-'}`}`));
+      for (const s of us.sessionRows.slice(0, 5)) {
+        if (s.root === true) continue;
+        io.out(line(`RK_EFFECT_USAGE_SESSION ${s.key} sha=${s.sha === null ? '-' : String(s.sha).slice(0, 8)} at=${s.at ?? '-'}`));
+      }
       for (const r of us.rows) {
         io.out(line(`RK_EFFECT_USAGE_ROW ${r.rule} emitted=${r.emitted} evaluated=${r.evaluated} lastAt=${r.lastAt ?? '-'}`));
       }
@@ -2547,6 +2555,7 @@ function runCliEffect(argv, io, env) {
       io.out(line(`RK_EFFECT_USAGE_RULES=${us.rows.length}`));
       io.out(line(`RK_EFFECT_USAGE_EMITTED=${us.totalEmitted}`));
       io.out(line(`RK_EFFECT_USAGE_EVALUATED=${us.totalEvaluated}`));
+      io.out(line(`RK_EFFECT_USAGE_SESSIONS=${us.sessions}`));   // 按会话读数（2026-09-21）：动作数 ≠ 会话数
       for (const r of us.rows.slice(0, 3)) io.out(line(`RK_EFFECT_USAGE_TOP ${r.rule} emitted=${r.emitted} evaluated=${r.evaluated}`));
       for (const f of plan.findings) io.out(line(`FINDING ${f.code} ${f.severity ?? 'warn'} ${f.rule ?? '-'} ${f.message}`));
     }

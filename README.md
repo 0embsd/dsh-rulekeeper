@@ -296,6 +296,26 @@ afterward."）⇒ provider 用**该会话自己的 cwd**解析落点，不再需
 >    重复一次，定级 nit —— **宁重复，不静默**。
 > 3. 报告形状随之变为 `{registered, failed:[{agent,reason,attempts}], mode: …}`（失败项多了 `attempts`）。
 
+> **补丁（2026-09-21 第二批，用户点选：彻底消重复 + 计数器语义 + 生命周期）**
+> 1. **会话生命周期接上**：订阅 `agent/created` / `agent/disposed`（两个事件名都已在本机宿主事件表；宿主自己的
+>    `dsh-tool-subagent` 就是这么用的 —— 真源码 `ctx.on("agent/created", ({agent}) => installScoped(agent))`）。
+>    ①`created` 时**就建通道**：宿主顺序是"先装配、后 pre-step"，此前首轮装配永远落在通道建立之前 ⇒ 只能靠
+>    根通道兜底 ⇒ 必然重复一次；现在**首轮就有自己的通道**，竞态从机制上消失。
+>    ②`disposed` 时**回收记账**（此前 `scopedAgents` 只增不减）并落 `kind=scoped-release` 诊断。
+> 2. **跨通道指纹去重**（兜底那一次重复）：根通道投递时把文本指纹落在它用的落点上（键 `(root)`），
+>    作用域通道算出**逐字相同**的文本且在 `ROOT_DEDUP_WINDOW_MS=90s` 内 ⇒ 不再重复投，并记
+>    `rootDedupSkips`（拦了几次可观测）。窗口刻意短：根通道的投递是**进程级**的，窗口太长会把新会话的
+>    第一份提醒也当重复 ⇒ 静默缺失；超窗一律照投（**宁重复，不静默**）。多项目时根投用户级、作用域投并集，
+>    指纹本就不同 ⇒ 去重不介入（如实登记这条边界）。
+> 3. **计数器语义**：`(root)` 伪会话把"进程级一次投递"与"某个会话收到"分开；`rk-effect usage` 新增
+>    `RK_EFFECT_USAGE_SESSIONS` / `RK_EFFECT_USAGE_SESSION <会话> sha=… at=…` / `RK_EFFECT_USAGE_ROOT_EMISSION`。
+>    `emitted` 是**投递动作**数（含通道数与重启次数），不能当"命中几次"用 —— 两个数一起看。
+> 4. **落盘去重表**不再 20 键封顶（`EMISSIONS_CAP=200` + 30 天保鲜期；`(root)` 键永不淘汰）——
+>    20 键在多会话主机上会淘汰最早会话，导致它们重启后重复一次（正是这张表要防的事）。
+> 5. **启动形态进诊断**：装载行新增 `launch`（argv/execArgv/入口/`profileHint`/`DSH_HOME`）——现场出现过
+>    "3 次启动里 2 次根通道注册失败（`no-systemPrompt-service`）"，而旧诊断只有 pid/cwd，分不清是
+>    "另一种 profile"还是"启动期竞态"，白花了一轮。
+
 **真 cordis 实测（乙）**：两个真实作用域（模拟两个会话、两个项目）⇒ 注册名不同、
 各自的 provider **只投自己项目的纪律**（`CAT-AAA` 里没有 `CAT-BBB`，反之亦然）、
 各自落点的 `usage.json` 各记 1 条 emitted、rc=0。

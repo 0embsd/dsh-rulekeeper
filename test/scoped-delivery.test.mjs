@@ -21,8 +21,9 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { agentSessionCwd, landingForAgent, landingsForAgent, registerAgentScopedDelivery } from '../src/scoped.mjs';
+import { agentSessionCwd, landingForAgent, landingsForAgent, registerAgentScopedDelivery, ROOT_DEDUP_WINDOW_MS, textSha } from '../src/scoped.mjs';
 import { registerDelivery } from '../src/deliver.mjs';
+import { ROOT_EMISSION_KEY, readEmission, usageSummary, writeEmission } from '../src/usage.mjs';
 import { cleanupAll, freshProjectLanding, isolateProcessUserLanding, realUserLandingGuard, tempDir } from './helpers/sandbox.mjs';
 
 const landedGuard = realUserLandingGuard();   // 必须在改 DSH_HOME **之前**建（它要的是**真实**落点路径）
@@ -444,4 +445,102 @@ test('判据⑩（按会话 id 记账）: 同一 id 的**不同对象包装**只
   assert.equal(ns.lastApplyReport.scoped.failed.length, 2,
     `两个 id 不明的会话必须**各记一笔**（退回对象身份），不许被合并成一个；实得 ${JSON.stringify(ns.lastApplyReport.scoped.failed)}`);
   assert.match(rootText(), /CAT-AAA/, 'id 不明且无通道的会话必须让根通道继续兜底（宁重复，不静默）');
+});
+
+test('判据（2026-09-21 生命周期）: `agent/created` 就建通道（首轮装配之前）＋ `agent/disposed` 回收记账', async () => {
+  const ns = await import('../src/plugin.mjs');
+  const { apply, PLUGIN_EVENTS } = ns;
+  // 事件名必须先真实存在于宿主事件表（否则 boot 自检会红）——本机已核实，见 plugin.mjs 的注释
+  assert.ok(PLUGIN_EVENTS.includes('agent/created') && PLUGIN_EVENTS.includes('agent/disposed'),
+    '必须在 PLUGIN_EVENTS 里登记（订阅集合 == PLUGIN_EVENTS 的不变量）');
+  const a = projectSession('sc-lifecycle-a', 'CAT-AAA');
+  const b = projectSession('sc-lifecycle-b', 'CAT-BBB');
+  const listeners = new Map();
+  let rootDef = null;
+  let liveAgents = [];
+  const ctx = {
+    effect: (fn) => fn(),
+    on: (ev, fn) => listeners.set(ev, fn),
+    tools: { register: () => {} },
+    systemPrompt: { context: (def) => { rootDef = def; return () => {}; } },
+    agents: { roots: () => liveAgents },
+  };
+  const hostRoot = tempDir('sc-lifecycle-host');
+  mkdirSync(join(hostRoot, 'lib'), { recursive: true });
+  writeFileSync(join(hostRoot, 'lib', 'host.js'), `${[...PLUGIN_EVENTS].map((e) => `ctx.on('${e}', () => {})`).join('\n')}\n`, 'utf8');
+  apply(ctx, { dshRoot: hostRoot, landingDir: a.landing });
+  const created = listeners.get('agent/created');
+  const disposed = listeners.get('agent/disposed');
+  const rootText = () => rootDef.text({});
+
+  // ①创建即注册：**不跑任何 pre-step** ⇒ 通道已就位（这正是"首轮装配之前"的形态）
+  liveAgents = [a.agent];
+  await created({ agent: a.agent }, async () => undefined);
+  assert.equal(ns.lastApplyReport.scoped.registered, 1, 'agent/created 就该注册（首轮装配前就有自己的通道）');
+  assert.equal(a.contexts.length, 1);
+  assert.match(a.textOf(), /CAT-AAA/);
+  assert.equal(rootText(), '', '已创建的会话都有自己的通道 ⇒ 根通道不必再出话（F-1 竞态从机制上消失）');
+  // 诊断要能看出"这次注册是 created 触发的"（否则事后分不清是哪个钩子干的）
+  const diag1 = readFileSync(join(hostRoot, 'rulekeeper-boot.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(diag1.filter((r) => r.kind === 'scoped').at(-1).trigger, 'created');
+
+  // ②销毁即回收：记账删掉（否则"全部在册会话都有通道"会去比对早就死掉的会话）
+  await disposed({ agent: a.agent }, async () => undefined);
+  assert.equal(ns.lastApplyReport.scoped.registered, 0, 'disposed 后不该再把它算作在册');
+  const diag2 = readFileSync(join(hostRoot, 'rulekeeper-boot.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const release = diag2.filter((r) => r.kind === 'scoped-release').at(-1);
+  assert.ok(release, '回收也要落盘（否则"通道为什么没了"又是查不出来的那种故障）');
+  assert.equal(release.reason, 'agent-disposed');
+
+  // ③反事实：新会话还没建通道时，根通道**必须**继续兜底（回收不等于闭麦）
+  liveAgents = [b.agent];
+  assert.match(rootText(), /CAT-AAA/, '还有会话没有通道 ⇒ 根通道继续投（宁重复，不静默）');
+  await created({ agent: b.agent }, async () => undefined);
+  assert.equal(ns.lastApplyReport.scoped.registered, 1);
+  assert.equal(rootText(), '');
+});
+
+test('判据（2026-09-21 跨通道指纹去重）: 根通道刚投过的同一段文本，作用域通道不再重复投', () => {
+  // 现场成因：宿主顺序"先装配、后 pre-step"，根通道先出话、随后该会话自己的通道又出同一段。
+  // 用户点选的修法：根通道把指纹落在它用的落点上（键 `(root)`），作用域通道比对指纹 + 时间窗。
+  const s = projectSession('sc-rootdedup', 'CAT-AAA');
+  const r = registerAgentScopedDelivery({ agent: s.agent, env: s.env, now: () => new Date(TS) });
+  assert.equal(r.ok, true, r.reason ?? '');
+  const first = s.textOf();
+  assert.match(first, /CAT-AAA/);
+  const sha = textSha(first);
+  // 新注册一个同项目会话（模拟竞态现场里"自己的通道后建"的那个会话），把"根通道刚投过同一段"落在**它用的落点**上
+  const s2 = projectSession('sc-rootdedup2', 'CAT-AAA');
+  writeEmission(s2.landing, ROOT_EMISSION_KEY, { sha, at: TS });
+  const r2 = registerAgentScopedDelivery({ agent: s2.agent, env: s2.env, now: () => new Date(TS) });
+  assert.equal(s2.textOf(), '', '根通道刚投过逐字相同的一段 ⇒ 本会话不再重复投');
+  assert.equal(r2.runtime.rootDedupSkips, 1, '拦下的次数必须可观测（否则"少投一次"是看不见的行为）');
+  assert.ok(r2.runtime.reasons.includes('already-delivered-by-root'));
+
+  // 反事实①：**不同文本**（多项目时根通道只投用户级、作用域投并集）⇒ 不拦，照投
+  const s3 = sessionWithBothLandings('sc-rootdedup3', ['CAT-AAA'], ['JUDGEMENT-XXX']);
+  writeEmission(s3.userLanding, ROOT_EMISSION_KEY, { sha: textSha(first), at: TS });
+  const r3 = registerAgentScopedDelivery({ agent: s3.agent, env: s3.env, now: () => new Date(TS) });
+  assert.match(s3.textOf(), /JUDGEMENT-XXX/, '文本不同（并集 vs 用户级）⇒ 指纹对不上 ⇒ 必须照投');
+  assert.equal(r3.runtime.rootDedupSkips, 0);
+
+  // 反事实②：指纹相同但**超出时间窗**（90 秒）⇒ 照投（新会话不能被旧的根投递憋死）
+  const s4 = projectSession('sc-rootdedup4', 'CAT-AAA');
+  writeEmission(s4.landing, ROOT_EMISSION_KEY, { sha: textSha(first), at: new Date(new Date(TS).getTime() - (ROOT_DEDUP_WINDOW_MS + 1000)).toISOString() });
+  const r4 = registerAgentScopedDelivery({ agent: s4.agent, env: s4.env, now: () => new Date(TS) });
+  assert.match(s4.textOf(), /CAT-AAA/, '超窗 ⇒ 照投（宁重复，不静默）');
+  assert.equal(r4.runtime.rootDedupSkips, 0);
+});
+
+test('判据（2026-09-21 根通道落 `(root)` 状态）: 根通道投递时把指纹落盘（跨通道去重与计数器语义共用这一条）', () => {
+  const a = projectSession('sc-rootrecord', 'CAT-AAA');
+  const host = { effect: (fn) => fn(), systemPrompt: { context: (def) => { host.def = def; } } };
+  registerDelivery(host, { landingDir: a.landing });
+  assert.match(host.def.text({}), /CAT-AAA/);
+  const rootRow = readEmission(a.landing, ROOT_EMISSION_KEY);
+  assert.ok(rootRow !== null, '根通道投过 ⇒ 必须留下 `(root)` 指纹（否则跨通道去重没有依据）');
+  assert.equal(rootRow.sha, textSha(host.def.text({})), '指纹必须对应它投的那段文本');
+  const sum = usageSummary(a.landing);
+  assert.equal(sum.sessions, 0, '根通道的投递不算"某个会话收到过"（计数器语义要分清）');
+  assert.equal(sum.rootEmission.sha, rootRow.sha);
 });

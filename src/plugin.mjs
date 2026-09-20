@@ -87,6 +87,20 @@ export const PLUGIN_EVENTS = Object.freeze([
   // 本仓的两条不变量由用例钉死：①订阅集合必须**恰好等于** PLUGIN_EVENTS（plugin.test.mjs:116）
   // ②每个订阅都必须过 `safeListener`（异常隔离 + 透传上游，plugin.test.mjs:120-135）。
   'agent/pre-step',
+  // 2026-09-21（F-1 根治 + F-2/F-3 批的收尾）：**会话生命周期**。
+  // 为什么必须订阅（三个都是实测/真源码得来的理由，不是设计偏好）：
+  //  ①**根治启动竞态**：宿主顺序是"先装配、后 pre-step"（现场实测：根通道 15:59:17.578 投递，
+  //    首个作用域注册 15:59:17.633，晚 55ms）⇒ 只靠 `agent/pre-step` 注册，会话**首轮装配**永远
+  //    落在自己的通道建立之前，只能靠根通道兜底 ⇒ 同一份提醒重复一次。`agent/created` 在**任何**
+  //    装配之前触发 ⇒ 在那里注册，首轮就有自己的通道，根通道不必再为"已存在的会话"出话。
+  //  ②**会话销毁后的回收**：`agent/disposed` 送来回收时机（此前 `scopedAgents` 只增不减）。
+  //  ③宿主自己的写法就是这两件事（真源码 `dsh-tool-subagent/lib/index.js`：
+  //    `ctx.on("agent/created", ({agent}) => installScoped(agent))` /
+  //    `ctx.on("agent/disposed", ({agent}) => removeScoped(agent))`），且 payload 里 `agent` 由
+  //    宿主 `agentEvents()` 的 `fused = (payload) => ({...payload, agent})` **注入**（`agent` 字段必在）。
+  // 这两个事件名已在本机宿主事件表里（`eventTableFromHost` 扫出 71 个事件名，含这两个）⇒ boot 自检能过。
+  'agent/created',
+  'agent/disposed',
 ]);
 
 /** 本插件向宿主注册的工具（名字必须带 TOOL_PREFIX） */
@@ -373,7 +387,7 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
   };
   /** 该会话是否已成功注册过自己的提醒位（根通道据此**让路**，避免同一份提醒投两遍） */
   const scopedFor = (agent) => scopedAgents.get(scopedKeyOf(agent))?.ok === true;
-  const ensureScoped = (agent) => {
+  const ensureScoped = (agent, trigger = 'pre-step') => {
     if (agent === null || typeof agent !== 'object') return;
     const key = scopedKeyOf(agent);
     const prior = scopedAgents.get(key);
@@ -402,6 +416,26 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
       kind: 'scoped', agent: out.name ?? '?', ok: out.ok === true,
       mechanism: out.mechanism ?? null, reason: out.reason ?? null,
       attempts, mode: scopedReport().mode,
+      trigger: trigger ?? 'pre-step',
+    });
+  };
+  /**
+   * **会话销毁后回收记账**（2026-09-21，`agent/disposed`）。
+   *
+   * 为什么必须有：宿主文档逐字说 `Agent.ctx` 的贡献"unwind on disposal"——作用域里的注册由宿主自己
+   * 回卷，但**我们这份 `scopedAgents` 账不会自己消失**（此前只增不减 ⇒ 长驻宿主里随会话数无界增长，
+   * 且会让"全部在册会话都有通道"的判定去比对一个早就死掉的会话）。回收后判定只看**活着的**会话。
+   * 记账行也落盘（`kind=scoped-release`）：以后"某会话的通道为什么没了"能一眼查到。
+   */
+  const forgetScoped = (agent) => {
+    if (agent === null || typeof agent !== 'object') return;
+    const key = scopedKeyOf(agent);
+    const prior = scopedAgents.get(key);
+    if (prior === undefined) return;
+    scopedAgents.delete(key);
+    appendDiag(dshRoot, {
+      kind: 'scoped-release', agent: prior.agent ?? '?', wasOk: prior.ok === true,
+      reason: 'agent-disposed', mode: scopedReport().mode,
     });
   };
 
@@ -430,8 +464,21 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
             // 靠这里记的 cwd 才能解析出落点（landing.mjs 的第③顺位）。
             landing.noteAgent(args[0] && args[0].agent);
             // 方案"乙"：为**这个会话**注册它自己作用域里的提醒位（幂等；失败只记账，不抛）
-            ensureScoped(args[0] && args[0].agent);
+            ensureScoped(args[0] && args[0].agent, 'pre-step');
             if (prestepBuilt !== null) return prestepBuilt.handler(args[0], next);
+          }
+          // 2026-09-21：**会话一创建就建通道**（在此之**前**宿主不会为它装配 ⇒ 首轮就有自己的通道，
+          // 根通道不必再为已存在的会话出话 ⇒ F-1 启动竞态从机制上消失）。
+          if (ev === 'agent/created') {
+            const created = args[0] && args[0].agent;
+            landing.noteAgent(created);          // 也顺手记 cwd（装配早于 pre-step 时靠它解析落点）
+            ensureScoped(created, 'created');
+            return typeof next === 'function' ? await next() : undefined;
+          }
+          // 2026-09-21：**会话销毁就回收记账**（`Agent.ctx` 的贡献由宿主回卷，我们自己这份账要自己删）
+          if (ev === 'agent/disposed') {
+            forgetScoped(args[0] && args[0].agent);
+            return typeof next === 'function' ? await next() : undefined;
           }
           return typeof next === 'function' ? await next() : undefined;
         },

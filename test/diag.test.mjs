@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { DIAG_FILE, appendDiag, bootDiagRecord, diagPath, readDiag } from '../src/diag.mjs';
+import { DIAG_FILE, appendDiag, bootDiagRecord, defaultLaunchInfo, diagPath, readDiag } from '../src/diag.mjs';
 import { createLandingResolver } from '../src/landing.mjs';
 import { registerDelivery } from '../src/deliver.mjs';
 import { cleanupAll, freshLanding, ledgerEntry, tempDir } from './helpers/sandbox.mjs';
@@ -104,4 +104,26 @@ test('判据: 落点解析的最后一档来源是 process.cwd()（宿主进程�
   assert.notEqual(d.source, 'none', `应至少能取到 process.cwd() 这一档（实得 ${JSON.stringify(d)}）`);
   assert.ok(typeof d.dir === 'string' && d.dir !== '', '应解析出落点目录（本项目/用户级任一）');
   assert.ok(existsSync(d.dir), `解析出的落点必须真实存在：${d.dir}`);
+});
+
+test('判据（2026-09-21 补，诊断缺口）: 装载行必须带**启动形态**（profile/argv/入口/落点根）', () => {
+  // 现场事故：3 次启动里 2 次根通道注册失败（no-systemPrompt-service）、1 次正常，而诊断里只有 pid/cwd
+  // ⇒ 分不清那 2 次是"另一种 profile"还是"同一 profile 的启动期竞态"，白花一轮。
+  const rec = bootDiagRecord({
+    report: { landing: { dir: '/x', source: 'project' } },
+    cwd: '/cwd', pid: 42,
+    launch: defaultLaunchInfo({ argv: ['node', '/dsh/bin/dsh', 'web', '--profile', 'rk-test'], execArgv: [], env: { DSH_HOME: '/home/.dsh' } }),
+  });
+  assert.equal(rec.launch.profileHint, 'rk-test', '从 argv 里抓 profile 名（抓不到就 null，不猜）');
+  assert.equal(rec.launch.entry, '/dsh/bin/dsh');
+  assert.equal(rec.launch.dshHome, '/home/.dsh');
+  assert.deepEqual(rec.launch.argv.slice(0, 4), ['node', '/dsh/bin/dsh', 'web', '--profile']);
+  // `--profile=x` 形态也要认；没有就如实 null
+  assert.equal(defaultLaunchInfo({ argv: ['node', 'dsh', '--profile=web'], env: {} }).profileHint, 'web');
+  assert.equal(defaultLaunchInfo({ argv: ['node', 'dsh'], env: {} }).profileHint, null);
+  assert.equal(defaultLaunchInfo({ argv: ['node', 'dsh'], env: {} }).dshHome, null);
+  // 缺省调用（`bootDiagRecord` 不传 launch）也必须自动带上，且**绝不抛**
+  const auto = bootDiagRecord({ report: {} });
+  assert.ok(auto.launch !== null && Array.isArray(auto.launch.argv), '不传 launch 时必须自动采集启动形态');
+  assert.doesNotThrow(() => defaultLaunchInfo({ argv: null, execArgv: null, env: null }));
 });

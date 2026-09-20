@@ -24,7 +24,7 @@
 // fail-open：任何异常（落点坏、依赖缺失、宿主 API 变化）一律返回空串或上一版文本，绝不抛。
 import { effectInjectPlan } from './effect.mjs';
 import { INJECT } from './inject.mjs';
-import { bumpUsage } from './usage.mjs';
+import { bumpUsage, ROOT_EMISSION_KEY, textSha, writeEmission } from './usage.mjs';
 
 export const REGISTRY_NAME = 'rulekeeper/reminders';
 export const DEFAULT_ORDER = 900;           // 与宿主既有段落错开即可（升序拼接）
@@ -129,6 +129,7 @@ export function createDeliveryRuntime({ minIntervalMs = DEFAULT_MIN_INTERVAL_MS 
     evaluations: 0,
     emissions: 0,   // "返回了新文本"的次数（≠ 模型一定看到；宿主可能因去重不追加）
     holds: 0,       // 因最小间隔而继续返回上一版的次数
+    rootDedupSkips: 0, // 因"根通道刚投过同一段"而**不投**的次数（跨通道去重的可观测计数）
     reasons: [],
     lastLanding: { dir: null, source: 'unset' }, // 最近一次求值用的落点与来源（诊断"为什么没话说"）
     lastLandings: [],                            // 最近一次求值用的**落点集合**（并集语义：项目 ∪ 用户级）
@@ -209,6 +210,7 @@ export function registerDelivery(ctx, {
     evaluations: runtime.evaluations,
     emissions: runtime.emissions,
     holds: runtime.holds,
+    rootDedupSkips: runtime.rootDedupSkips,
     lastChars: runtime.lastText.length,
     maxChars,
     maxRules,
@@ -266,6 +268,12 @@ export function registerDelivery(ctx, {
           for (const a of attribution) {
             if (!contributed.has(a.dir)) continue;
             for (const rule of a.rules) bumpUsage(a.dir, { rule, event: 'emitted', now: now() });
+          }
+          // **根通道自己也要落一条"投过什么"**（2026-09-21，两件事共用这一条状态）：
+          //   ①计数器语义诚实化：`(root)` 伪会话把"进程级一次投递"与"某个会话收到"分开记；
+          //   ②跨通道指纹去重：作用域通道见到"根刚投过同一段文本"就不再投（见 `scoped.mjs` 的窗口）。
+          for (const dir of contributed) {
+            writeEmission(dir, ROOT_EMISSION_KEY, { sha: textSha(built.text), at: now().toISOString() });
           }
         }
       }
