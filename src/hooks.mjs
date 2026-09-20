@@ -25,13 +25,18 @@ export const HOOKS_MANIFEST = 'hooks.json';
 export const HOOK_RUNNER = 'hook.mjs';
 export const DEFAULT_HOOKS_PATH = '.githooks';
 /**
- * 默认装两个 hook（LF-520 + LF-510）：
+ * 默认装三个 hook（LF-520 + LF-510 + 2026-09-21 CI 等价）：
  *   `pre-commit`  = 真阻断（LF-500：改受保护路径未留证就拒）
  *   `post-commit` = **绕过可检测**（LF-510）：`--no-verify` **不跳过 post-commit**（本机实测：
  *                   `--no-verify` 时 pre-commit 不跑、post-commit 照跑）⇒ 它是"被绕过"这件事的取证位置。
+ *   `pre-push`    = **CI 等价门禁**（2026-09-21，用户点选 A）：推送前在本机跑与远端 workflow 同一条
+ *                   `rk-gate ci --base <远端已有 sha> --head HEAD`。为什么需要它：仓库的规则面确实要求
+ *                   3 个必需检查，但**所有者推送会被 bypass**（实测远端逐字回报
+ *                   `Bypassed rule violations … 3 of 3 required status checks are expected`）⇒
+ *                   远端门禁管不住自己，只能在本机补一道。
  */
-export const DEFAULT_HOOK_NAMES = Object.freeze(['pre-commit', 'post-commit']);
-export const KNOWN_HOOK_NAMES = Object.freeze(['pre-commit', 'post-commit']);
+export const DEFAULT_HOOK_NAMES = Object.freeze(['pre-commit', 'post-commit', 'pre-push']);
+export const KNOWN_HOOK_NAMES = Object.freeze(['pre-commit', 'post-commit', 'pre-push']);
 /** 生成物一律 LF 无 BOM（清单 §0.1 ㉑ / ⑯：CRLF 会让"逐字比对"假红） */
 const EOL = '\n';
 
@@ -106,6 +111,8 @@ export function hookScriptContent({ name = 'pre-commit' } = {}) {
  * hook runner（本机产物，含 dsh-rulekeeper 绝对路径）：按 hook 名决定**载荷**。
  *   pre-commit  → ① `precommit --repo`（LF-500：暂存区视角，改受保护路径未留证即拒）② `write --project`（LF-530：工作区视角）
  *   post-commit → `postcommit --repo`（LF-510：记录本次提交的取证结论；`--no-verify` 时它仍会跑 ⇒ 绕过留痕）
+ *   pre-push    → `ci --base <远端已有 sha> --head HEAD`（2026-09-21：本机 CI 等价门禁，逐条 ref 比对基点；
+ *                  新分支/删引用时基点全零 ⇒ **如实跳过并喊一声**，不假装通过）
  * 为什么 pre-commit 要两道门：它只看得见暂存区，**未暂存的直写**天生看不见（LF-530 是覆盖那一段的唯一位置）。
  */
 export function hookRunnerContent({ gateBin }) {
@@ -113,16 +120,41 @@ export function hookRunnerContent({ gateBin }) {
     '#!/usr/bin/env node',
     '// dsh-rulekeeper hook runner（由 `rk-gate hooks install` 生成；本机产物，请勿手改）',
     "import { spawnSync } from 'node:child_process';",
+    "import { readFileSync } from 'node:fs';",
     `const GATE_BIN = ${JSON.stringify(toPosix(gateBin))};`,
     'const hook = process.argv[2] ?? \'\';',
     'const repo = process.env.RULEKEEPER_REPO ?? process.cwd();',
+    '// pre-push：refs 从 **stdin** 来（`<localRef> <localSha> <remoteRef> <remoteSha>`），逐个远端 sha 做基点',
+    "if (hook === 'pre-push') {",
+    '  let input = \'\';',
+    "  try { input = readFileSync(0, 'utf8'); } catch { input = ''; }",
+    '  const bases = new Set();',
+    '  let skipped = 0;',
+    "  for (const line of input.split('\\n')) {",
+    "    const parts = line.trim().split(/\\s+/);",
+    '    if (parts.length < 4) continue;',
+    '    const remoteSha = parts[3];',
+    "    if (!/^[0-9a-f]{7,40}$/i.test(remoteSha) || /^0+$/.test(remoteSha)) { skipped += 1; continue; }",
+    '    bases.add(remoteSha);',
+    '  }',
+    '  if (bases.size === 0) {',
+    '    process.stderr.write("dsh-rulekeeper pre-push: 无可用比对基点（新分支/删除引用 " + skipped + " 条）⇒ 跳过 CI 等价门禁（如实告知，不是静默通过）\\n");',
+    '    process.exit(0);',
+    '  }',
+    '  for (const base of bases) {',
+    "    const r = spawnSync(process.execPath, [GATE_BIN, 'ci', '--base', base, '--head', 'HEAD'], { stdio: 'inherit' });",
+    '    if (r.error) { process.stderr.write("dsh-rulekeeper pre-push: 无法执行 ci: " + r.error.message + "\\n"); process.exit(1); }',
+    "    if (typeof r.status !== 'number' || r.status !== 0) process.exit(typeof r.status === 'number' ? r.status : 1);",
+    '  }',
+    '  process.exit(0);',
+    '}',
     'const stepsByHook = {',
     "  'pre-commit': [['precommit', ['--repo', repo]], ['write', ['--project', repo, '--phase', 'close']]],",
     "  'post-commit': [['postcommit', ['--repo', repo]]],",
     '};',
     'const steps = stepsByHook[hook];',
     'if (steps === undefined) {',
-    '  process.stderr.write("dsh-rulekeeper hook: 未知 hook 名 " + hook + "（未装任何门禁；只装过 pre-commit / post-commit）\\n");',
+    '  process.stderr.write("dsh-rulekeeper hook: 未知 hook 名 " + hook + "（未装任何门禁；已装 pre-commit / post-commit / pre-push）\\n");',
     '  process.exit(0);',
     '}',
     'for (const [cmd, args] of steps) {',

@@ -54,7 +54,8 @@ function installed(label, { chmod = '+x', track = true } = {}) {
   const ins = installHooks({ repoRoot: root, gateBin: GATE_BIN });
   assert.equal(ins.ok, true, JSON.stringify(ins.reasons));
   const names = ins.installed.map((h) => h.name);
-  assert.deepEqual(names, ['pre-commit', 'post-commit'], '默认装两个 hook：真阻断 + 绕过可检测');
+  assert.deepEqual(names, ['pre-commit', 'post-commit', 'pre-push'],
+    '默认装三个 hook：真阻断 + 绕过可检测 + **CI 等价门禁**（2026-09-21 补：远端必需检查管不住仓库所有者）');
   if (track) {
     git(root, 'add', ...names.map((n) => `${DEFAULT_HOOKS_PATH}/${n}`), '.dsh-ai/rulekeeper/hook.mjs', '.dsh-ai/rulekeeper/hooks.json');
     if (chmod !== null) for (const n of names) git(root, 'update-index', `--chmod=${chmod}`, `${DEFAULT_HOOKS_PATH}/${n}`);
@@ -70,8 +71,8 @@ test('green: install -> 原样 verify 全过（hooksPath 已设 / sha256 相符 
   assert.deepEqual(v.findings, []);
   assert.equal(v.ok, true);
   assert.equal(v.hooksPath, DEFAULT_HOOKS_PATH);
-  assert.equal(v.hooks.length, 2, 'pre-commit + post-commit');
-  assert.deepEqual(v.hooks.map((h) => h.name), ['pre-commit', 'post-commit']);
+  assert.equal(v.hooks.length, 3, 'pre-commit + post-commit + pre-push');
+  assert.deepEqual(v.hooks.map((h) => h.name), ['pre-commit', 'post-commit', 'pre-push']);
   for (const h of v.hooks) {
     assert.equal(h.present, true);
     assert.equal(h.match, true);
@@ -81,11 +82,12 @@ test('green: install -> 原样 verify 全过（hooksPath 已设 / sha256 相符 
   }
   const c = gate(['hooks', 'verify', '--repo', root]);
   assert.equal(c.rc, RC.OK, c.out);
-  assert.match(c.out, /^RK_GATE_HOOKS_CHECKED=2$/m);
-  assert.match(c.out, /^RK_GATE_HOOKS_OK=2$/m);
+  assert.match(c.out, /^RK_GATE_HOOKS_CHECKED=3$/m);
+  assert.match(c.out, /^RK_GATE_HOOKS_OK=3$/m);
   assert.match(c.out, /^RK_GATE_HOOKS_RESULT=pass$/m);
   assert.match(c.out, /^HOOK pre-commit path=\.githooks\/pre-commit present=true sha256=[0-9a-f]{12} match=true exec=index:100755 exec_ok=true inert=false$/m);
   assert.match(c.out, /^HOOK post-commit path=\.githooks\/post-commit present=true sha256=[0-9a-f]{12} match=true exec=index:100755 exec_ok=true inert=false$/m);
+  assert.match(c.out, /^HOOK pre-push path=\.githooks\/pre-push present=true sha256=[0-9a-f]{12} match=true exec=index:100755 exec_ok=true inert=false$/m);
 });
 
 test('red ①（清单原文）: hook 缺失 -> HOOK_MISSING + exit=1', () => {
@@ -142,7 +144,7 @@ test('red: 可执行位 —— 索引 mode=100644 -> HOOK_NOT_EXECUTABLE；改�
   assert.ok(f, JSON.stringify(v.findings));
   assert.match(f.message, /git update-index --chmod=\+x \.githooks\/pre-commit/);
   assert.equal(gate(['hooks', 'verify', '--repo', root]).rc, RC.FAIL);
-  for (const n of ['pre-commit', 'post-commit']) git(root, 'update-index', '--chmod=+x', `${DEFAULT_HOOKS_PATH}/${n}`);
+  for (const n of ['pre-commit', 'post-commit', 'pre-push']) git(root, 'update-index', '--chmod=+x', `${DEFAULT_HOOKS_PATH}/${n}`);
   const v2 = verifyHooks({ repoRoot: root });
   assert.deepEqual(v2.findings, []);
   assert.equal(v2.ok, true);
@@ -238,7 +240,7 @@ test('--json: verify 计数可机读，且判决类输出不含盘符绝对路�
   const parsed = JSON.parse(c.out);
   assert.equal(parsed.ok, true);
   assert.equal(parsed.hooksPath, DEFAULT_HOOKS_PATH);
-  assert.equal(parsed.hooks.length, 2);
+  assert.equal(parsed.hooks.length, 3);
   assert.equal(parsed.hooks[0].execSource, 'index:100755');
   assert.deepEqual(parsed.findings, []);
   assert.equal(/(^|[^A-Za-z])[A-Za-z]:[\\/]/.test(c.out), false, '判决类输出不得含盘符绝对路径（清单 ㉒）');
@@ -261,4 +263,43 @@ test('green: 真仓（本仓）现状如实报 —— hooksPath 未设 / 无清�
   assert.ok(codes.includes('HOOK_MANIFEST_MISSING') || codes.includes('HOOK_PATH_NOT_SET'), JSON.stringify(codes));
   // 且"没有 hook"时不得凭空编出 hook 条目
   assert.equal(v.hooks.length, 0);
+});
+
+test('判据（2026-09-21 CI 等价门禁）: pre-push 钩子真的会跑 `ci`，门禁红就**拦住推送**；新分支如实跳过', () => {
+  // 为什么需要这条：远端规则面要求 3 个必需检查，但仓库所有者推送会被 bypass（远端逐字回报过）
+  // ⇒ 唯一能约束自己的是**本机**这道。红态样本用"假 gate"构造（规则 42：不依赖现场恰好红）。
+  const root = gitRepo('hk-prepush');
+  const logFile = join(root, '..', 'fake-gate.log');
+  const fakeGate = join(root, '..', 'fake-gate.mjs');
+  writeFileSync(fakeGate, [
+    "import { appendFileSync } from 'node:fs';",
+    'appendFileSync(process.env.FAKE_GATE_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");',
+    "process.exit(process.env.FAKE_GATE_RC === '0' ? 0 : 1);",
+    '',
+  ].join('\n'), 'utf8');
+  const ins = installHooks({ repoRoot: root, gateBin: fakeGate, force: true });
+  assert.equal(ins.ok, true, JSON.stringify(ins.reasons));
+  assert.ok(ins.installed.some((h) => h.name === 'pre-push'), '默认就要装 pre-push');
+  const runner = join(root, DEFAULT_HOOKS_PATH, '..', '.dsh-ai', 'rulekeeper', HOOK_RUNNER);
+  const refs = 'refs/heads/main 1111111 refs/heads/main 2222222\n';
+  const run = (input, rc) => spawnSync(process.execPath, [runner, 'pre-push'], {
+    encoding: 'utf8', input, env: { ...process.env, FAKE_GATE_LOG: logFile, FAKE_GATE_RC: rc },
+  });
+
+  // ①门禁红 ⇒ 钩子必须非零（拦住推送）
+  const red = run(refs, '1');
+  assert.notEqual(red.status, 0, 'CI 等价门禁红时必须拦住推送（否则这道钩子等于没装）');
+  const calls = readFileSync(logFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(calls.at(-1), ['ci', '--base', '2222222', '--head', 'HEAD'],
+    '必须用**远端已有的那个 sha** 当基点（不是本地分支名，也不是 HEAD~1）');
+
+  // ②门禁绿 ⇒ 放行
+  const green = run(refs, '0');
+  assert.equal(green.status, 0, `门禁绿应放行；实得 status=${green.status} err=${green.err}`);
+
+  // ③新分支/删引用（远端 sha 全零）⇒ **如实跳过并喊一声**（不假装通过，也不无谓拦住）
+  const zero = run('refs/heads/new 1111111 refs/heads/new 0000000000000000000000000000000000000000\n', '1');
+  assert.equal(zero.status, 0, '没有比对基点时不该拦住（但也绝不能声称"门禁通过"）');
+  assert.match(zero.stderr, /无可用比对基点/);
+  assert.match(zero.stderr, /NOT|不.*静默|如实/, '必须写明是"跳过"而不是"通过"');
 });

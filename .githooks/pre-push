@@ -1,6 +1,6 @@
 #!/bin/sh
-# dsh-rulekeeper git hook (post-commit) —— 由 `rk-gate hooks install` 生成，请勿手改。
+# dsh-rulekeeper git hook (pre-push) —— 由 `rk-gate hooks install` 生成，请勿手改。
 # 手改会被 `rk-gate hooks verify` 判红（sha256 失配）；要改请改模板后重新 install。
 root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 1
 if [ -f "$root/.dsh-ai/rulekeeper/hook.mjs" ]; then L="rulekeeper"; else L="lessonflow"; fi
-exec node "$root/.dsh-ai/$L/hook.mjs" post-commit "$@"
+exec node "$root/.dsh-ai/$L/hook.mjs" pre-push "$@"
