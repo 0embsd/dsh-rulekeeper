@@ -150,6 +150,7 @@ export function appendRowsVerified(opts = {}) {
   try {
     writeFileSync(tmp, nextText, 'utf8');
   } catch (err) {
+    rmSync(tmp, { force: true });
     return { ok: false, code: 'WRITE_FAILED', reason: `写临时件失败: ${String(err?.message ?? err)}`, backup: toPosix(backup.path), beforeSha, afterSha: null, lines: 0 };
   }
   const checked = readBackValidate(tmp, {
@@ -161,6 +162,33 @@ export function appendRowsVerified(opts = {}) {
     rmSync(tmp, { force: true });
     return { ok: false, code: 'TMP_INVALID', reason: `临时件回读不通过（未替换生效文件）: ${checked.reason}`, backup: toPosix(backup.path), beforeSha, afterSha: null, lines: 0 };
   }
+
+  // ── **写前重读**（2026-09-21，交接：record/mutate 加写前重读）────────────────────────────
+  // 为什么必须有：本通路是"整文件重写"。若在**读出 beforeText 之后、rename 之前**有别的写者
+  // （另一个会话的 `record`、或本会话的另一次 mutate）追加了行，我们的 rename 会把它的行**抹掉**
+  // —— 典型的 lost update，而且**无声**（对方的行就那么没了）。
+  // 测法：比 sha256。变了就**放弃本次写入**（fail-closed），让人**重跑命令**。
+  //
+  // 为什么不自动重试：重试必须重算"归档行 / 状态事件行"的内容与 id（它们依赖读到的快照），
+  // 在写通路里悄悄重算 = 让人拿到一份自己没看过的 diff。宁可让人重跑一次（重跑会基于新内容算）。
+  // 测试缝（与 `src/effect.mjs` 的 `_inject.failAfterReplace` 同族）：用来**实测**并发写入会被拒，
+  // 而不是靠"读了代码觉得应该拦得住"。生产路径不传它就是空操作。
+  if (typeof opts._inject?.beforeReplace === 'function') opts._inject.beforeReplace({ file, tmp, beforeSha });
+  const liveSha = sha256File(file);
+  if (liveSha !== beforeSha) {
+    rmSync(tmp, { force: true });
+    return {
+      ok: false,
+      code: 'CONCURRENT_WRITE_DETECTED',
+      reason: `写前重读发现账本已被别的写者改动（读时 ${String(beforeSha).slice(0, 12)} → 现在 ${String(liveSha).slice(0, 12)}）`
+        + ' ⇒ **放弃本次写入**（否则会抹掉对方刚追加的行）；请重跑本命令（重跑会基于新内容重新计算）',
+      backup: toPosix(backup.path),
+      beforeSha,
+      afterSha: null,
+      lines: 0,
+    };
+  }
+
   const afterSha = sha256File(tmp);
   try {
     renameSync(tmp, file);

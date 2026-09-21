@@ -13,7 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { runRulekeeper } from '../src/cli.mjs';
@@ -195,4 +195,22 @@ test('判据⑥b: 纯函数层（parseSets / planMutation / appendRowsVerified�
   const res = appendRowsVerified({ landingDir: empty, rows: [row({ id: 'X' })] });
   assert.equal(res.ok, false);
   assert.equal(res.code, 'NO_LEDGER');
+});
+
+test('判据⑦（写前重读）: 读出之后、替换之前有别的写者追加 ⇒ **放弃写入**，对方的行必须还在', () => {
+  const dir = fixture('mut-race', { rows: [row({})] });
+  const ledger = join(dir, 'ledger.jsonl');
+  const foreign = JSON.stringify(row({ id: 'L-FOREIGN', problem: '别的写者在我读完之后追加的行' }));
+  const res = appendRowsVerified({
+    landingDir: dir,
+    rows: [row({ id: 'L-MINE', problem: '我要追加的行' })],
+    // 测试缝：就在"读完了、准备替换"那一刻插进一次外部追加（模拟另一个会话的 record）
+    _inject: { beforeReplace: ({ file }) => appendFileSync(file, `${foreign}\n`, 'utf8') },
+  });
+  assert.equal(res.ok, false, '检出并发写入后必须拒绝，不许静默覆盖');
+  assert.equal(res.code, 'CONCURRENT_WRITE_DETECTED');
+  assert.match(res.reason, /重跑本命令/);
+  const after = readFileSync(ledger, 'utf8');
+  assert.ok(after.includes('L-FOREIGN'), '对方的行必须**原样还在**（这正是这条判据存在的理由）');
+  assert.ok(!after.includes('L-MINE'), '我的行一个都不该落进去（fail-closed）');
 });

@@ -432,9 +432,10 @@ export function ledgerGroups(landingDir) {
     // **状态事件行**同理：它是"这条历史行被取代了"的**迁移记录**，不是一条新教训
     // （否则一条 `STATUS_SUPERSEDE` 事件就会让那个 rule 重新出现在体检里、并报 TEXT_ONLY）。
     if (row.category === STATUS_EVENT_CATEGORY) continue;
-    // **归档行**（`rk mutate` 写的改写行）也不是"又踩了一次"：它改的是**同一条**教训的内容
-    // （旧行已被同批写下的状态事件取代）⇒ 计入复发会把"改个错别字"变成"复发一次"。
-    if (row.mechanism === MUTATE_MECHANISM) continue;
+    // **归档行**（`rk mutate` 的改写行）在这里**保留**（2026-09-21 修正，交接：给 mutate 补 fold）：
+    //   · 它承载**改后的内容**——若排掉它，等于"改了但没人读"（实测确认过这个缺口，用例：mutate-fold）；
+    //   · 被它取代的旧行已由 `supersededIds` 排除 ⇒ 不会同一条教训数两遍；
+    //   · 复发计数另行排除它（那在 `recurrenceIdentity` 里做），因为"改个错别字"不该算"又踩了一次"。
     const rule = canonicalRule(row.rule);
     const g = groups.get(rule) ?? { rule, count: 0, withActivation: 0, firstSeen: null, lastSeen: null, variants: new Set() };
     g.count += 1;
@@ -471,7 +472,10 @@ export function recurrenceIdentity(rows = [], rule, activationTs, {
   const isLesson = (r) => r !== null && typeof r === 'object'
     && String(r.rule ?? '') === rule
     && r.category !== EFFECT_EVENT_CATEGORY && r.category !== EFFECT_RETIRE_CATEGORY
-    && r.category !== STATUS_EVENT_CATEGORY && r.mechanism !== MUTATE_MECHANISM
+    && r.category !== STATUS_EVENT_CATEGORY
+    // 归档行不进复发比较：它的内容是"同一条教训的改写"，把它算成"新条目"会让"改个错别字"变复发。
+    // （注意：它在 `ledgerGroups` 里**是保留的** —— 那里要读改后的内容；两处口径不同是刻意的，见各自注释。）
+    && r.mechanism !== MUTATE_MECHANISM
     && typeof r.problem === 'string' && r.problem.trim() !== '';
   const fresh = rows.filter((r) => isLesson(r) && (r.ts ?? '') > activationTs);
   const prior = rows.filter((r) => isLesson(r) && (r.ts ?? '') <= activationTs);
