@@ -575,6 +575,44 @@ function stripMessageForScan(raw) {
   return lines;
 }
 
+/**
+ * **引用名（分支 / tag）的公开面门禁**（2026-09-21，形状同一个洞的第三块）。
+ *
+ * 为什么必须有：公开面 = **一切随推送离开本机的内容**。除文件与提交正文外，**引用名**同样会公开
+ * （`refs/heads/<名字>` 会出现在 GitHub 的分支列表里，且常被写进 release/PR）。本地能管的就这一块：
+ * `pre-push` 的 stdin 里本来就带着 `<localRef> <localSha> <remoteRef> <remoteSha>`，顺手扫即可。
+ * 边界（如实）：PR 描述、issue 正文、CI 日志属**远端 API 面**，本机钩子天生看不见。
+ * @param {{text?: string, refs?: string[]}} opts
+ * @returns {{ok: boolean, refs: string[], findings: object[]}}
+ */
+export function refsGate(opts = {}) {
+  const rows = Array.isArray(opts.refs) ? opts.refs.map(String)
+    : String(opts.text ?? '').split(/\r?\n/);
+  const names = [];
+  for (const row of rows) {
+    const parts = row.trim().split(/\s+/).filter((s) => s !== '');
+    if (parts.length < 4) continue;             // git 的 stdin 形态：四段
+    for (const name of [parts[0], parts[2]]) {
+      // 只把"像引用名"的字段当引用名：`refs/...`、`(delete)`，或不是 7–40 位十六进制（那是 sha）
+      const looksLikeSha = /^[0-9a-f]{7,40}$/i.test(name);
+      if (name === '' || looksLikeSha) continue;
+      if (!names.includes(name)) names.push(name);
+    }
+  }
+  const findings = [];
+  for (const name of names) {
+    for (const leak of findPublicFaceLeaks('REFS', name)) {
+      findings.push({
+        code: 'GATE_REF_INTERNAL_LEAK',
+        message: `推送的引用名出现${leak.why}「${leak.match}」（引用名同样是公开面：会出现在远端分支/tag 列表里）`,
+        ref: name,
+        match: leak.match,
+      });
+    }
+  }
+  return { ok: findings.length === 0, refs: names, findings };
+}
+
 /** 某次提交里某个路径的内容 sha256（提交态，不是工作区） */
 export function commitBlobSha(repoRoot, sha, relPath, runGitRaw = defaultRunGitRaw) {
   const r = runGitRaw(repoRoot, ['show', `${sha}:${relPath}`]);

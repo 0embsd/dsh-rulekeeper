@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 
 import { runGate, runRulekeeper } from '../src/cli.mjs';
-import { commitMessageGate } from '../src/gate.mjs';
+import { commitMessageGate, refsGate } from '../src/gate.mjs';
 import { DEFAULT_HOOKS_PATH, HOOK_RUNNER, hookScriptContent, installHooks, verifyHooks } from '../src/hooks.mjs';
 import { RC } from '../src/rc.mjs';
 import { cleanupAll, tempDir } from './helpers/sandbox.mjs';
@@ -288,6 +288,33 @@ test('判据（2026-09-21 区间模式，离机前最后一道）: `commitmsg --
   assert.match(broken.findings[0].code, /GATE_COMMITMSG_RANGE_UNREADABLE/);
 });
 
+test('判据（2026-09-21 引用名脱敏）: 推送的分支/tag 名也过公开面模式表（本地能管的第三块）', () => {
+  // 公开面 = 一切随推送离机的内容：文件 + 提交正文 + **引用名**（会出现在远端分支/tag 列表）。
+  // PR 描述/CI 日志属远端 API 面，本机钩子天生看不见（已如实登记边界）。
+  // 夹具里的"可疑串"**运行时拼装**：检测器的 deny 列表不该为测试文件开例外（开了就是把安全边界越开越大），
+  // 而 `rk-selfcheck` 的 S8 是扫**文件正文**的 ⇒ 字面量写在这里会把自己的自检判红（实测踩过一次）。
+  const HOST_NO = '1' + '01';                                              // 源码里不出现宿主编号本体
+  const TOOL_NAME = 'myx' + '-secret-branch';                              // 源码里不出现内部工具名前缀
+  const CLEAN_REF = 'refs/heads/feature/fix-reminder';
+  const clean = refsGate({ text: `${CLEAN_REF} aaa1111 ${CLEAN_REF} bbb2222\n` });
+  assert.equal(clean.ok, true, JSON.stringify(clean.findings));
+  assert.deepEqual(clean.refs, [CLEAN_REF], '同名 local/remote 只记一次');
+  const leak = refsGate({ text: `refs/heads/内部项目-${HOST_NO} aaa1111 refs/heads/内部项目-${HOST_NO} 0000000\n` });
+  assert.equal(leak.ok, false, '引用名里有内部主机编号/项目名必须拦住');
+  assert.ok(leak.findings.some((f) => f.code === 'GATE_REF_INTERNAL_LEAK'));
+  assert.match(leak.findings[0].message, /远端分支/);
+  // 字段错位（把 sha 写进引用名位置）不得把 sha 当引用名报出来；非法行不参与判定、也不抛
+  assert.deepEqual(refsGate({ text: 'refs/heads/x 1111111 2222222 3333333\n' }).refs, ['refs/heads/x']);
+  assert.equal(refsGate({ text: 'garbage\n\n' }).ok, true);
+  assert.equal(refsGate({}).ok, true);
+  // 与 CLI 同源：`rk-gate refs --file` 走同一份实现
+  const f = join(tempDir('hk-refs'), 'refs.txt');
+  writeFileSync(f, `refs/heads/${TOOL_NAME} aaa1111 refs/heads/${TOOL_NAME} bbb2222\n`, 'utf8');
+  const cli = gate(['refs', '--file', f]);
+  assert.equal(cli.rc, RC.FAIL);
+  assert.match(cli.out, /GATE_REF_INTERNAL_LEAK/);
+});
+
 test('usage: hooks 缺动作 / 未知动作 / --repo 不存在 / 未知 flag -> rc=2', () => {  assert.equal(gate(['hooks']).rc, RC.USAGE);
   assert.equal(gate(['hooks', 'bogus']).rc, RC.USAGE);
   assert.equal(gate(['hooks', 'verify', '--repo', join(tempDir('hk-usage'), 'nope')]).rc, RC.USAGE);
@@ -330,21 +357,24 @@ test('判据（2026-09-21 CI 等价门禁）: pre-push 钩子真的会跑 `ci`�
   const red = run(refs, '1');
   assert.notEqual(red.status, 0, 'CI 等价门禁红时必须拦住推送（否则这道钩子等于没装）');
   const calls = readFileSync(logFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  // 推送前**先扫未推提交的正文**（`commitmsg --range`）——这是"离机之前最后一道"，且必须先于 CI 门禁；
-  // 红态时它在第一步就非零退出（后面的 ci 不再跑），这正是"最先拦最要紧的那道"。
-  assert.deepEqual(calls[0], ['commitmsg', '--repo', root, '--range', '2222222..HEAD'],
-    'pre-push 必须先扫"未推提交的正文"（离机之前最后一道）');
+  // 推送前顺序：①扫**引用名**（公开面第三块）②扫未推提交的**正文** ③跑 CI 等价门禁
+  // 红态（假 gate 返回 1）在第一步就非零退出 ⇒ 只能断言"第一步是 refs"（这正是"最先拦最要紧的"）
+  assert.equal(calls[0][0], 'refs', 'pre-push 第一步必须是引用名扫描（分支/tag 名同样是公开面）');
+  assert.match(calls[0][2], /rk-prepush-refs-\d+\.txt$/, 'refs 文件由本次 stdin 落临时文件生成');
 
-  // ②门禁绿 ⇒ 放行，且两道按"先正文、后 CI"的顺序都跑过
+  // ②门禁绿 ⇒ 放行，且三道按"refs → commitmsg → ci"的顺序都跑过
   const green = run(refs, '0');
   assert.equal(green.status, 0, `门禁绿应放行；实得 status=${green.status} err=${green.err}`);
   const greenCalls = readFileSync(logFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  assert.deepEqual(greenCalls.at(-2), ['commitmsg', '--repo', root, '--range', '2222222..HEAD']);
+  assert.equal(greenCalls.at(-3)[0], 'refs');
+  assert.deepEqual(greenCalls.at(-2), ['commitmsg', '--repo', root, '--range', '2222222..HEAD'],
+    '正文区间扫描必须在 CI 门禁**之前**（先拦不可逆的那道）');
   assert.deepEqual(greenCalls.at(-1), ['ci', '--base', '2222222', '--head', 'HEAD'],
     '必须用**远端已有的那个 sha** 当基点（不是本地分支名，也不是 HEAD~1）');
 
   // ③新分支/删引用（远端 sha 全零）⇒ **如实跳过并喊一声**（不假装通过，也不无谓拦住）
-  const zero = run('refs/heads/new 1111111 refs/heads/new 0000000000000000000000000000000000000000\n', '1');
+  //    注意：引用名扫描**仍然会跑**（公开面与有没有基点无关），故这里让假 gate 返回 0（引用名干净）。
+  const zero = run('refs/heads/new aaa1111 refs/heads/new 0000000000000000000000000000000000000000\n', '0');
   assert.equal(zero.status, 0, '没有比对基点时不该拦住（但也绝不能声称"门禁通过"）');
   assert.match(zero.stderr, /无可用比对基点/);
   assert.match(zero.stderr, /NOT|不.*静默|如实/, '必须写明是"跳过"而不是"通过"');

@@ -69,6 +69,10 @@ node bin/rk-gate.mjs hooks install --repo <仓库根>
 # 手动扫正文（两道检查点都能单独跑）
 node bin/rk-gate.mjs commitmsg --file .git/COMMIT_EDITMSG          # 单条
 node bin/rk-gate.mjs commitmsg --repo <仓库根> --range origin/main..HEAD   # 区间（推送前自检）
+# 补（2026-09-21 同日，第三块）：**引用名（分支/tag）**也是公开面 —— 它会出现在远端的分支/tag 列表里。
+# pre-push 的 stdin 本来就带 refs，顺手扫；`rk-gate refs --file <refs 文件>` 可单独跑。
+# 边界（如实）：PR 描述 / issue 正文 / CI 日志属**远端 API 面**，本机钩子天生看不见。
+node bin/rk-gate.mjs refs --file <refs 文件>
 
 # 4) 生成服务端入口（GitHub Actions，事件感知范围）
 node bin/rk-gate.mjs ci --repo <仓库根> --write-workflow

@@ -19,7 +19,7 @@ import { runReplayAll } from './replay.mjs';
 import { recordBaseline, verifyBaseline } from './baseline.mjs';
 import { applyGc, planGc, shardLedger } from './shard.mjs';
 import { reconSnapshots, restoreSnapshot, takeSnapshot } from './snap.mjs';
-import { bypassRecon, ciGate, closeGate, commitMessageGate, parseHit, postCommitRecon, precommitGate, reconWrite, writeCiWorkflow, CI_WORKFLOW_REL } from './gate.mjs';
+import { bypassRecon, ciGate, closeGate, commitMessageGate, parseHit, postCommitRecon, precommitGate, reconWrite, refsGate, writeCiWorkflow, CI_WORKFLOW_REL } from './gate.mjs';
 import { DEFAULT_HOOKS_PATH, defaultRunGitRaw, installHooks, verifyHooks } from './hooks.mjs';
 import { uninstallHooks } from './uninstall.mjs';
 import { exportLanding, isInside, rebuildLanding, writeBundle } from './portable.mjs';
@@ -1429,6 +1429,7 @@ export function runGate(argv, io = defaultIo(), env = process.env) {
   if (sub === 'write') return runGateWrite(rest, io, env);
   if (sub === 'precommit') return runGatePrecommit(rest, io, env);
   if (sub === 'commitmsg') return runGateCommitmsg(rest, io, env);
+  if (sub === 'refs') return runGateRefs(rest, io, env);
   if (sub === 'postcommit') return runGatePostcommit(rest, io, env);
   if (sub === 'bypass') return runGateBypass(rest, io, env);
   if (sub === 'ci') return runGateCi(rest, io, env);
@@ -1481,6 +1482,46 @@ export function runGateCommitmsg(argv, io = defaultIo(), env = process.env) {
   for (const f of r.findings) io.out(line(`FINDING ${f.code} ${f.commit ?? '-'} ${f.match ?? '-'} ${f.message}`));
   io.out(resultLine('COMMITMSG', r.ok === true));
   if (r.ok !== true) io.err(`rk-gate commitmsg: 提交正文未过公开面脱敏（${r.findings.map((f) => f.code).join(',')}）——**推送前**改掉（amend / rebase 改消息），一旦推送就撤不回来\n`);
+  return r.ok === true ? RC.OK : RC.FAIL;
+}
+
+/** `rk-gate refs`（2026-09-21）：**引用名**（分支/tag）的公开面门禁（由 `pre-push` 调用，refs 来自 stdin） */
+export function runGateRefs(argv, io = defaultIo(), env = process.env) {
+  let flags;
+  try {
+    flags = scanFlags(argv, { '--file': 'string', '--json': 'boolean', '--help': 'boolean' });
+  } catch (err) {
+    if (err instanceof UsageError) {
+      io.err(`rk-gate refs: ${err.message}\n用法: rk-gate refs --file <refs 文件（每行 <localRef> <localSha> <remoteRef> <remoteSha>）> [--json]\n`);
+      return RC.USAGE;
+    }
+    throw err;
+  }
+  if (flags.help === true) {
+    io.out('用法: rk-gate refs --file <refs 文件> [--json]\n'
+      + '作用: 扫**推送引用名**（分支/tag）的公开面；有泄漏 ⇒ exit≠0。refs 文件就是 `pre-push` 的 stdin 内容。\n');
+    return RC.OK;
+  }
+  if (typeof flags.file !== 'string' || flags.file.trim() === '') {
+    io.err('rk-gate refs: 必须给 --file <refs 文件>（pre-push 的 stdin 内容）\n');
+    return RC.USAGE;
+  }
+  const file = resolve(flags.file);
+  let text = '';
+  if (existsSync(file)) {
+    try { text = readFileSync(file, 'utf8'); } catch { text = ''; }
+  }
+  const r = refsGate({ text });
+  if (flags.json === true) {
+    io.out(jsonStable(r));
+    return r.ok === true ? RC.OK : RC.FAIL;
+  }
+  io.out(line(`RK_GATE_REFS_FILE=${toPosix(file)}`));
+  io.out(line(`RK_GATE_REFS_CHECKED=${r.refs.length}`));
+  io.out(line(`RK_GATE_REFS_LEAKS=${r.findings.length}`));
+  for (const f of r.findings) io.out(line(`FINDING ${f.code} ${f.ref ?? '-'} ${f.match ?? '-'} ${f.message}`));
+  io.out(resultLine('REFS', r.ok === true));
+  if (r.ok !== true) io.err('rk-gate refs: 推送的引用名未过公开面脱敏——**推送前**改名（改名后旧名仍可能留在远端，别用内部名建分支）\n');
   return r.ok === true ? RC.OK : RC.FAIL;
 }
 
