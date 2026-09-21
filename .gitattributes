@@ -11,3 +11,8 @@
 *.ps1    text eol=lf
 # 夹具一律按二进制对待：不让 git 做任何行尾转换（字节即判据）
 test/fixtures/**  -text
+
+# git hook 脚本**没有扩展名**（pre-commit / post-commit / pre-push）⇒ 上面按扩展名钉 LF 的规则管不到它们。
+# 现场（2026-09-21）：autocrlf=true 的机器上 checkout 会把它们转成 CRLF ⇒ ①与 hooks.json 的 sha256 清单不符
+# （verify 判 HOOK_MODIFIED）②POSIX 上 `#!/bin/sh\r` 直接坏掉 ⇒ 闸门变哑。显式钉 LF，别再靠机器配置。
+.githooks/*  text eol=lf
