@@ -16,7 +16,7 @@
 
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 
 import { LANDING_DIRNAME, LEGACY_LANDING_DIRNAME, resolveProjectLanding, toPosix } from './platform/paths.mjs';
@@ -356,6 +356,27 @@ export function verifyHooks(opts = {}) {
   if (!existsSync(hooksDir)) findings.push({ code: 'HOOK_PATH_MISSING', message: `hooks 目录不存在: ${hooksPath}/` });
 
   const names = (manifest?.hooks ?? []).map((h) => h.name).filter((n) => typeof n === 'string');
+
+  // ── 清单**完整性**（2026-09-21，交接：补全落点 hooks.json 清单）──────────────────────────
+  // 现场问题：另一个落点的清单里只有 2 条（pre-commit / post-commit），而 `.githooks/` 里实际有 4 个
+  // 脚本、`hook.mjs` 也**真的**在处理 commit-msg 与 pre-push。于是 `hooks verify` 只核 2/4 ——
+  // **在用的 pre-push（真拦截面）根本没被核**：它被改坏/被清空，verify 照样 pass。
+  // 判据：清单里缺了"磁盘上存在且属于已知钩子"的那几条 ⇒ 报 `HOOK_MANIFEST_INCOMPLETE`。
+  // （只认 KNOWN_HOOK_NAMES，避免把别的工具装的 hook 也算成"我们的清单漏了"。）
+  const onDisk = existsSync(hooksDir)
+    ? readdirSync(hooksDir).filter((n) => KNOWN_HOOK_NAMES.includes(n))
+    : [];
+  const unlisted = onDisk.filter((n) => !names.includes(n));
+  if (unlisted.length > 0) {
+    findings.push({
+      code: 'HOOK_MANIFEST_INCOMPLETE',
+      message: `清单漏了磁盘上已有的钩子: ${unlisted.join(' / ')}（清单里只有 ${names.join(' / ') || '（空）'}）`
+        + ' ⇒ 这些钩子**不会被 verify 核**（被改坏也看不见）。修法：`rk-gate hooks install --force` 重写清单',
+    });
+  }
+  details.push({ key: 'HOOKS_ON_DISK', value: onDisk.length });
+  details.push({ key: 'HOOKS_UNLISTED', value: unlisted.length });
+
   const report = [];
   for (const entry of manifest?.hooks ?? []) {
     const name = entry.name;
