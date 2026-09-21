@@ -102,9 +102,11 @@ node bin/rk-migrate.mjs --project <项目根>
 
 ```bash
 rk-effect plan   --landing <落点>                       # 只读体检：每条纪律 none/injected/mechanized/verified/recurred
+rk-effect adopt  --landing <落点> --project <项目根>     # 自动管线三段（默认 dry-run）：机制面必填 + 可机械化类目出绑定草稿
+rk-effect adopt  --landing <落点> --project <项目根> --apply   # 把草稿写进 proposals/（**不碰** rules.json）
 rk-effect apply  --landing <落点> --proposal <id> --by human            # 默认 dry-run，先看要写什么
 rk-effect apply  --landing <落点> --proposal <id> --by human --apply    # 真写：备份 + 回读 + 失败回滚
-rk-effect verify --landing <落点> --all                 # 三项验证：命中红 / 反事实唯一性 / 误报面绿
+rk-effect verify --landing <落点> --all --allow-exec    # 四项验证：命中红 / 误报面绿 / 反事实唯一性 / 确定性
 rk-effect inject --landing <落点>                       # 把"只写下来了"的纪律变成会话提醒（纯计算，零落点写入）
 ```
 
@@ -115,6 +117,29 @@ rk-effect inject --landing <落点>                       # 把"只写下来了"
 > `writeFileSync('rules.json')` 在 `src/stoploss.mjs` 的 `verifyRunbook()` 里 —— 那是它为自己造的
 > **临时工作目录夹具**（`{workdir}/proj/.dsh-ai/rulekeeper/rules.json`），不碰任何真实落点。
 
+
+**机制面必填（四选一，2026-09-21）**：`record --mechanism` 只接受 `text`（承认仅文本，会被
+`RK_EFFECT_TEXT_ONLY` **计数**）/ `mechanized`（有机械判据 ⇒ `checks` 里必须真有绑定）/ `guard`
+（有插件拦截 ⇒ `gates` 里必须真有绑定）/ `question`（靠人工问句）。其余取值一律**用法错误** ——
+此前「我写了机械判据」这类**自称**也能进账本，体检面没有任何东西能据此判定。
+
+**`checkerRef`（判据只有一份）**：`kind:"checker"` 绑定来自规格文件（`*.spec.json`）。规格里可写
+`"checkerRef": "@self/scripts/checkers/x.mjs"`（自举：用本包内的检查器）或 `"<包名>/<包内路径>"`
+（被治理项目引用装在依赖里的插件包检查器）⇒ 免去在每个项目里放一份检查器副本（N 份副本必然漂移）。
+解析不到就**拒绝落盘**（`EFFECT_CHECKER_REF_MISSING`），不写「指向不存在对象」的判据。
+
+**绑定的载体标识**：`kind:"checker"` 没有文件载体，它的载体 = `checker:<违规样本目录>`（口径在
+`src/checker.mjs` 的 `carrierOfBinding`；`verify` 写凭证与 `plan` 判 verified **读同一份**）。
+2026-09-21 实测教训：此前 verify 写 `checker:node`、绑定上又没有载体字段 ⇒ 载体集合为空 ⇒
+四条真跑过验证的绑定全被报成「没跑过 verify」（verify PASSED=5 / plan VERIFIED=0）。
+凭证还要求**晚于最后一次生效登记**，防止「先跑验证、后改绑定」冒充已核实。
+
+**状态事件（append-only 的正解）**：账本行不可原地改写。「这条记错了/被后一条取代了」写成一条
+`category: 状态事件` 的行，`problem` 里写 `STATUS_SUPERSEDE <被取代的 id>[,…]`；读侧
+（`src/ledger.mjs` 的 `supersededIds` 与各派生段）把它 fold 成 superseded，不进复发计数。
+
+**事件类目不是教训类目**：`生效登记` / `生效退役` / `状态事件` / `登记缺口` 是**工具与迁移**用的
+类目（派生段跳过它们）。人工教训占用这些类目会污染复发判定（2026-09-21 实测踩过一次）。
 **验证三项为什么是三项**（对齐"反向红 + 正对照"）：只有"①命中红"的话，把判据整条删掉也照样全绿——
 **②反事实唯一性**要求"把这个绑定摘掉之后同一载体必须转绿"，才证明拦住它的**确实是这条判据**
 （否则报 `EFFECT_CHECK_NOT_THE_STOPPER`，即挂名生效）。判据载体必须显式写成 `path:<相对路径>`：
