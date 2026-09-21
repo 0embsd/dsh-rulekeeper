@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 
 import { runGate, runRulekeeper } from '../src/cli.mjs';
+import { commitMessageGate } from '../src/gate.mjs';
 import { DEFAULT_HOOKS_PATH, HOOK_RUNNER, hookScriptContent, installHooks, verifyHooks } from '../src/hooks.mjs';
 import { RC } from '../src/rc.mjs';
 import { cleanupAll, tempDir } from './helpers/sandbox.mjs';
@@ -54,8 +55,8 @@ function installed(label, { chmod = '+x', track = true } = {}) {
   const ins = installHooks({ repoRoot: root, gateBin: GATE_BIN });
   assert.equal(ins.ok, true, JSON.stringify(ins.reasons));
   const names = ins.installed.map((h) => h.name);
-  assert.deepEqual(names, ['pre-commit', 'post-commit', 'pre-push'],
-    '默认装三个 hook：真阻断 + 绕过可检测 + **CI 等价门禁**（2026-09-21 补：远端必需检查管不住仓库所有者）');
+  assert.deepEqual(names, ['pre-commit', 'commit-msg', 'post-commit', 'pre-push'],
+    '默认装四个 hook：真阻断 + **提交正文脱敏** + 绕过可检测 + **CI 等价门禁**（后两个都是 2026-09-21 事故/实测补的）');
   if (track) {
     git(root, 'add', ...names.map((n) => `${DEFAULT_HOOKS_PATH}/${n}`), '.dsh-ai/rulekeeper/hook.mjs', '.dsh-ai/rulekeeper/hooks.json');
     if (chmod !== null) for (const n of names) git(root, 'update-index', `--chmod=${chmod}`, `${DEFAULT_HOOKS_PATH}/${n}`);
@@ -71,8 +72,8 @@ test('green: install -> 原样 verify 全过（hooksPath 已设 / sha256 相符 
   assert.deepEqual(v.findings, []);
   assert.equal(v.ok, true);
   assert.equal(v.hooksPath, DEFAULT_HOOKS_PATH);
-  assert.equal(v.hooks.length, 3, 'pre-commit + post-commit + pre-push');
-  assert.deepEqual(v.hooks.map((h) => h.name), ['pre-commit', 'post-commit', 'pre-push']);
+  assert.equal(v.hooks.length, 4, 'pre-commit + commit-msg + post-commit + pre-push');
+  assert.deepEqual(v.hooks.map((h) => h.name), ['pre-commit', 'commit-msg', 'post-commit', 'pre-push']);
   for (const h of v.hooks) {
     assert.equal(h.present, true);
     assert.equal(h.match, true);
@@ -82,8 +83,8 @@ test('green: install -> 原样 verify 全过（hooksPath 已设 / sha256 相符 
   }
   const c = gate(['hooks', 'verify', '--repo', root]);
   assert.equal(c.rc, RC.OK, c.out);
-  assert.match(c.out, /^RK_GATE_HOOKS_CHECKED=3$/m);
-  assert.match(c.out, /^RK_GATE_HOOKS_OK=3$/m);
+  assert.match(c.out, /^RK_GATE_HOOKS_CHECKED=4$/m);
+  assert.match(c.out, /^RK_GATE_HOOKS_OK=4$/m);
   assert.match(c.out, /^RK_GATE_HOOKS_RESULT=pass$/m);
   assert.match(c.out, /^HOOK pre-commit path=\.githooks\/pre-commit present=true sha256=[0-9a-f]{12} match=true exec=index:100755 exec_ok=true inert=false$/m);
   assert.match(c.out, /^HOOK post-commit path=\.githooks\/post-commit present=true sha256=[0-9a-f]{12} match=true exec=index:100755 exec_ok=true inert=false$/m);
@@ -144,7 +145,7 @@ test('red: 可执行位 —— 索引 mode=100644 -> HOOK_NOT_EXECUTABLE；改�
   assert.ok(f, JSON.stringify(v.findings));
   assert.match(f.message, /git update-index --chmod=\+x \.githooks\/pre-commit/);
   assert.equal(gate(['hooks', 'verify', '--repo', root]).rc, RC.FAIL);
-  for (const n of ['pre-commit', 'post-commit', 'pre-push']) git(root, 'update-index', '--chmod=+x', `${DEFAULT_HOOKS_PATH}/${n}`);
+  for (const n of ['pre-commit', 'commit-msg', 'post-commit', 'pre-push']) git(root, 'update-index', '--chmod=+x', `${DEFAULT_HOOKS_PATH}/${n}`);
   const v2 = verifyHooks({ repoRoot: root });
   assert.deepEqual(v2.findings, []);
   assert.equal(v2.ok, true);
@@ -240,7 +241,7 @@ test('--json: verify 计数可机读，且判决类输出不含盘符绝对路�
   const parsed = JSON.parse(c.out);
   assert.equal(parsed.ok, true);
   assert.equal(parsed.hooksPath, DEFAULT_HOOKS_PATH);
-  assert.equal(parsed.hooks.length, 3);
+  assert.equal(parsed.hooks.length, 4);
   assert.equal(parsed.hooks[0].execSource, 'index:100755');
   assert.deepEqual(parsed.findings, []);
   assert.equal(/(^|[^A-Za-z])[A-Za-z]:[\\/]/.test(c.out), false, '判决类输出不得含盘符绝对路径（清单 ㉒）');
@@ -248,8 +249,46 @@ test('--json: verify 计数可机读，且判决类输出不含盘符绝对路�
   assert.equal(bad.rc, RC.OK);
 });
 
-test('usage: hooks 缺动作 / 未知动作 / --repo 不存在 / 未知 flag -> rc=2', () => {
-  assert.equal(gate(['hooks']).rc, RC.USAGE);
+test('判据（2026-09-21 区间模式，离机前最后一道）: `commitmsg --range` 逐个扫未推提交的正文；泄漏拦住、当场 amend 即放行', () => {
+  // 为什么必须有区间模式：`commit-msg` 只能扫"正在提交的那一条"——`--no-verify` 绕过、钩子装上之前的旧提交、
+  // amend 过的正文都从它眼皮下过去。**推送那一刻**把整个区间的正文再扫一遍，才是"泄漏离机之前"的最后一道
+  // （过了这道就出机器了，远端分支保护还禁止强推 ⇒ 撤不回来）。
+  const root = gitRepo('hk-msg-range');
+  const g = (...args) => git(root, ...args);
+  g('config', 'user.email', 'test@example.com');
+  g('config', 'user.name', 'test');
+  writeFileSync(join(root, 'a.txt'), 'x\n', 'utf8');
+  g('add', '-A');
+  g('commit', '-q', '-m', 'fix: 干净的第一条');
+  writeFileSync(join(root, 'b.txt'), 'y\n', 'utf8');
+  g('add', '-A');
+  g('commit', '-q', '-m', 'fix: 第二条\n\n凭证：D:\\opt\\somewhere\\verify\\x.txt');
+
+  const bad = commitMessageGate({ repoRoot: root, range: 'HEAD~1..HEAD' });
+  assert.equal(bad.ok, false, '区间里那条泄漏的正文必须被发现');
+  assert.equal(bad.commits.length, 1);
+  assert.equal(bad.commits[0].leaks, 1);
+  const codes = bad.findings.map((f) => f.code);
+  assert.ok(codes.includes('GATE_COMMITMSG_INTERNAL_LEAK'), JSON.stringify(codes));
+  assert.match(bad.findings[0].message, /推送前/);
+
+  // 当场补救：**amend 改消息**（还在本机、还没推）⇒ 再扫就干净了 —— 这就是"彻底解决"的正确位置
+  g('commit', '-q', '--amend', '-m', 'fix: 第二条（正文已脱敏）');
+  const fixed = commitMessageGate({ repoRoot: root, range: 'HEAD~1..HEAD' });
+  assert.equal(fixed.ok, true, `amend 后应放行；实得 ${JSON.stringify(fixed.findings)}`);
+  assert.equal(fixed.commits[0].leaks, 0);
+
+  // 整段历史一起扫（真实形态是 `origin/main..HEAD`；这里两条提交用 `HEAD` 单引用即可覆盖全部可达提交）
+  const whole = commitMessageGate({ repoRoot: root, range: 'HEAD' });
+  assert.equal(whole.ok, true, `两条都干净时整段应放行；实得 ${JSON.stringify(whole.findings)}`);
+  assert.equal(whole.commits.length, 2);
+  // 读不到区间 ⇒ fail-closed（不许假装扫过）
+  const broken = commitMessageGate({ repoRoot: root, range: 'no-such-ref..HEAD' });
+  assert.equal(broken.ok, false);
+  assert.match(broken.findings[0].code, /GATE_COMMITMSG_RANGE_UNREADABLE/);
+});
+
+test('usage: hooks 缺动作 / 未知动作 / --repo 不存在 / 未知 flag -> rc=2', () => {  assert.equal(gate(['hooks']).rc, RC.USAGE);
   assert.equal(gate(['hooks', 'bogus']).rc, RC.USAGE);
   assert.equal(gate(['hooks', 'verify', '--repo', join(tempDir('hk-usage'), 'nope')]).rc, RC.USAGE);
   assert.equal(gate(['hooks', 'verify', '--bogus']).rc, RC.USAGE);
@@ -283,23 +322,76 @@ test('判据（2026-09-21 CI 等价门禁）: pre-push 钩子真的会跑 `ci`�
   const runner = join(root, DEFAULT_HOOKS_PATH, '..', '.dsh-ai', 'rulekeeper', HOOK_RUNNER);
   const refs = 'refs/heads/main 1111111 refs/heads/main 2222222\n';
   const run = (input, rc) => spawnSync(process.execPath, [runner, 'pre-push'], {
-    encoding: 'utf8', input, env: { ...process.env, FAKE_GATE_LOG: logFile, FAKE_GATE_RC: rc },
+    // 真实 git 调钩子时 cwd = 仓库根；用例显式给 RULEKEEPER_REPO（runner 认这个变量）等价模拟
+    encoding: 'utf8', input, env: { ...process.env, FAKE_GATE_LOG: logFile, FAKE_GATE_RC: rc, RULEKEEPER_REPO: root },
   });
 
   // ①门禁红 ⇒ 钩子必须非零（拦住推送）
   const red = run(refs, '1');
   assert.notEqual(red.status, 0, 'CI 等价门禁红时必须拦住推送（否则这道钩子等于没装）');
   const calls = readFileSync(logFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  assert.deepEqual(calls.at(-1), ['ci', '--base', '2222222', '--head', 'HEAD'],
-    '必须用**远端已有的那个 sha** 当基点（不是本地分支名，也不是 HEAD~1）');
+  // 推送前**先扫未推提交的正文**（`commitmsg --range`）——这是"离机之前最后一道"，且必须先于 CI 门禁；
+  // 红态时它在第一步就非零退出（后面的 ci 不再跑），这正是"最先拦最要紧的那道"。
+  assert.deepEqual(calls[0], ['commitmsg', '--repo', root, '--range', '2222222..HEAD'],
+    'pre-push 必须先扫"未推提交的正文"（离机之前最后一道）');
 
-  // ②门禁绿 ⇒ 放行
+  // ②门禁绿 ⇒ 放行，且两道按"先正文、后 CI"的顺序都跑过
   const green = run(refs, '0');
   assert.equal(green.status, 0, `门禁绿应放行；实得 status=${green.status} err=${green.err}`);
+  const greenCalls = readFileSync(logFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(greenCalls.at(-2), ['commitmsg', '--repo', root, '--range', '2222222..HEAD']);
+  assert.deepEqual(greenCalls.at(-1), ['ci', '--base', '2222222', '--head', 'HEAD'],
+    '必须用**远端已有的那个 sha** 当基点（不是本地分支名，也不是 HEAD~1）');
 
   // ③新分支/删引用（远端 sha 全零）⇒ **如实跳过并喊一声**（不假装通过，也不无谓拦住）
   const zero = run('refs/heads/new 1111111 refs/heads/new 0000000000000000000000000000000000000000\n', '1');
   assert.equal(zero.status, 0, '没有比对基点时不该拦住（但也绝不能声称"门禁通过"）');
   assert.match(zero.stderr, /无可用比对基点/);
   assert.match(zero.stderr, /NOT|不.*静默|如实/, '必须写明是"跳过"而不是"通过"');
+});
+
+test('判据（2026-09-21 提交正文脱敏）: `commit-msg` 钩子扫正文 —— 泄漏拦住、干净放行、注释与 diff 不算正文', () => {
+  // 事故：文件全过、**正文**里带绝对路径与内部项目名 ⇒ 推送后才发现，远端分支保护**禁止强推** ⇒ 撤不回来。
+  const root = gitRepo('hk-commitmsg');
+  const ins = installHooks({ repoRoot: root, gateBin: GATE_BIN, force: true });
+  assert.equal(ins.ok, true, JSON.stringify(ins.reasons));
+  assert.ok(ins.installed.some((h) => h.name === 'commit-msg'), '默认就要装 commit-msg');
+  const runner = join(root, '.dsh-ai', 'rulekeeper', HOOK_RUNNER);
+  const msgFile = join(root, '..', 'COMMIT_EDITMSG');
+  const run = () => spawnSync(process.execPath, [runner, 'commit-msg', msgFile], { encoding: 'utf8' });
+
+  // ①正文里出现内部项目名/盘符路径 ⇒ 必须拦住（这一条正是漏掉的那个洞）
+  //    注：钩子 runner 用 `stdio:'inherit'`（让门禁输出直接进终端），故**只断言退出码**；
+  //    输出行断言走同一条 CLI 的直接调用（`gate([...])`，可捕获）。
+  writeFileSync(msgFile, 'fix: 收尾\n\n凭证：D:\\opt\\somewhere\\verify\\x.txt\n', 'utf8');
+  const leak = run();
+  assert.notEqual(leak.status, 0, `正文有泄漏必须拦住提交；实得 status=${leak.status}`);
+  const leakCli = gate(['commitmsg', '--file', msgFile]);
+  assert.equal(leakCli.rc, RC.FAIL);
+  assert.match(leakCli.out, /GATE_COMMITMSG_INTERNAL_LEAK/);
+  assert.match(leakCli.out, /RK_GATE_COMMITMSG_LEAKS=1/);
+
+  // ②干净正文 ⇒ 放行
+  writeFileSync(msgFile, 'fix: 收尾\n\n凭证：.dsh-ai/verify/x.txt（相对路径）\n', 'utf8');
+  const clean = run();
+  assert.equal(clean.status, 0, `干净正文应放行；实得 status=${clean.status}`);
+  const cleanCli = gate(['commitmsg', '--file', msgFile]);
+  assert.equal(cleanCli.rc, RC.OK);
+  assert.match(cleanCli.out, /^RK_COMMITMSG_RESULT=pass$/m);
+
+  // ③`#` 注释行与 `git commit -v` 的剪刀线之后**不算正文**（否则模板/ diff 会误伤）
+  writeFileSync(msgFile, [
+    'fix: 收尾', '',
+    '# 这是模板注释：D:\\opt\\内部路径\\不该算正文', '',
+    '# ------------------------ >8 ------------------------',
+    'diff --git a/x b/x', '+++ b/D:\\opt\\内部路径\\y', '',
+  ].join('\n'), 'utf8');
+  const stripped = run();
+  assert.equal(stripped.status, 0, `注释与 diff 不得当成正文；实得 status=${stripped.status}`);
+
+  // ④读不到正文 ⇒ **fail-closed**（不许假装扫过了）
+  const missing = spawnSync(process.execPath, [runner, 'commit-msg', join(root, '..', 'no-such-msg')], { encoding: 'utf8' });
+  assert.notEqual(missing.status, 0, '读不到正文必须非零（fail-closed）');
+  const missingCli = gate(['commitmsg', '--file', join(root, '..', 'no-such-msg')]);
+  assert.match(missingCli.out, /GATE_COMMITMSG_UNREADABLE/);
 });

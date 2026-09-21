@@ -25,8 +25,11 @@ export const HOOKS_MANIFEST = 'hooks.json';
 export const HOOK_RUNNER = 'hook.mjs';
 export const DEFAULT_HOOKS_PATH = '.githooks';
 /**
- * 默认装三个 hook（LF-520 + LF-510 + 2026-09-21 CI 等价）：
+ * 默认装四个 hook（LF-520 + LF-510 + 2026-09-21 两件）：
  *   `pre-commit`  = 真阻断（LF-500：改受保护路径未留证就拒）
+ *   `commit-msg`  = **提交正文的公开面门禁**（2026-09-21，教训 L652）：暂存文件过了不等于公开面干净——
+ *                   实测事故是"文件全过、**正文**里带了绝对路径与内部项目名"，推上去才发现、
+ *                   而远端分支保护**禁止强推** ⇒ 泄漏撤不回来。修法只能在这里拦。
  *   `post-commit` = **绕过可检测**（LF-510）：`--no-verify` **不跳过 post-commit**（本机实测：
  *                   `--no-verify` 时 pre-commit 不跑、post-commit 照跑）⇒ 它是"被绕过"这件事的取证位置。
  *   `pre-push`    = **CI 等价门禁**（2026-09-21，用户点选 A）：推送前在本机跑与远端 workflow 同一条
@@ -35,8 +38,8 @@ export const DEFAULT_HOOKS_PATH = '.githooks';
  *                   `Bypassed rule violations … 3 of 3 required status checks are expected`）⇒
  *                   远端门禁管不住自己，只能在本机补一道。
  */
-export const DEFAULT_HOOK_NAMES = Object.freeze(['pre-commit', 'post-commit', 'pre-push']);
-export const KNOWN_HOOK_NAMES = Object.freeze(['pre-commit', 'post-commit', 'pre-push']);
+export const DEFAULT_HOOK_NAMES = Object.freeze(['pre-commit', 'commit-msg', 'post-commit', 'pre-push']);
+export const KNOWN_HOOK_NAMES = Object.freeze(['pre-commit', 'commit-msg', 'post-commit', 'pre-push']);
 /** 生成物一律 LF 无 BOM（清单 §0.1 ㉑ / ⑯：CRLF 会让"逐字比对"假红） */
 const EOL = '\n';
 
@@ -124,6 +127,13 @@ export function hookRunnerContent({ gateBin }) {
     `const GATE_BIN = ${JSON.stringify(toPosix(gateBin))};`,
     'const hook = process.argv[2] ?? \'\';',
     'const repo = process.env.RULEKEEPER_REPO ?? process.cwd();',
+    "// commit-msg：正文文件路径由 git 作为**第一个参数**传进来（`$1`），扫同一份公开面模式表",
+    "if (hook === 'commit-msg') {",
+    "  const msgFile = process.argv[3] ?? '';",
+    "  const r = spawnSync(process.execPath, [GATE_BIN, 'commitmsg', '--file', msgFile], { stdio: 'inherit' });",
+    '  if (r.error) { process.stderr.write("dsh-rulekeeper commit-msg: 无法执行 commitmsg: " + r.error.message + "\\n"); process.exit(1); }',
+    "  process.exit(typeof r.status === 'number' ? r.status : 1);",
+    '}',
     '// pre-push：refs 从 **stdin** 来（`<localRef> <localSha> <remoteRef> <remoteSha>`），逐个远端 sha 做基点',
     "if (hook === 'pre-push') {",
     '  let input = \'\';',
@@ -142,6 +152,11 @@ export function hookRunnerContent({ gateBin }) {
     '    process.exit(0);',
     '  }',
     '  for (const base of bases) {',
+    "    // ①**先扫未推提交的正文**（离机之前的最后一道；兜住 --no-verify 提交、钩子装上之前的旧提交、amend 改过的正文）",
+    "    const m = spawnSync(process.execPath, [GATE_BIN, 'commitmsg', '--repo', repo, '--range', base + '..HEAD'], { stdio: 'inherit' });",
+    '    if (m.error) { process.stderr.write("dsh-rulekeeper pre-push: 无法执行 commitmsg: " + m.error.message + "\\n"); process.exit(1); }',
+    "    if (typeof m.status !== 'number' || m.status !== 0) process.exit(typeof m.status === 'number' ? m.status : 1);",
+    "    // ②再跑与远端 workflow 同一条 CI 等价门禁",
     "    const r = spawnSync(process.execPath, [GATE_BIN, 'ci', '--base', base, '--head', 'HEAD'], { stdio: 'inherit' });",
     '    if (r.error) { process.stderr.write("dsh-rulekeeper pre-push: 无法执行 ci: " + r.error.message + "\\n"); process.exit(1); }',
     "    if (typeof r.status !== 'number' || r.status !== 0) process.exit(typeof r.status === 'number' ? r.status : 1);",

@@ -57,7 +57,18 @@ node bin/dsh-rulekeeper.mjs init --project <项目根>
 #    没配保护面 = 空转闸：rk-gate ci 会直接判 CI_VACUOUS_NO_PROTECTION
 
 # 3) 装钩子（默认装到 .githooks 并设置 core.hooksPath）
+#    默认四件：pre-commit（留证真阻断）/ commit-msg（**提交正文**公开面门禁）
+#              post-commit（绕过可检测）/ pre-push（**未推提交正文**再扫 + CI 等价门禁）
+#    公开面 = 文件 + **提交正文**；正文的两道检查点见下（2026-09-21 事故后补，教训 L652）：
+#      · commit-msg：提交那一刻扫一条；人能当场改消息重来。
+#      · pre-push  ：推送那一刻把 **origin..HEAD 区间全部提交的正文**再扫一遍
+#                    （兜住 --no-verify 提交 / 钩子装上之前的旧提交 / amend 过的正文）——
+#                    这是"泄漏离机之前"的最后一道：过了它就出机器，而远端分支保护**禁止强推** ⇒ 撤不回来。
 node bin/rk-gate.mjs hooks install --repo <仓库根>
+
+# 手动扫正文（两道检查点都能单独跑）
+node bin/rk-gate.mjs commitmsg --file .git/COMMIT_EDITMSG          # 单条
+node bin/rk-gate.mjs commitmsg --repo <仓库根> --range origin/main..HEAD   # 区间（推送前自检）
 
 # 4) 生成服务端入口（GitHub Actions，事件感知范围）
 node bin/rk-gate.mjs ci --repo <仓库根> --write-workflow
@@ -71,7 +82,7 @@ node bin/rk-migrate.mjs --project <项目根>
 
 ## 命令面（23 个入口）
 
-`dsh-rulekeeper`（init/check/snap/record/rules/evolve/report/gate/redact/migrate）｜`rk-gate`（write/precommit/postcommit/bypass/ci/close/hooks）
+`dsh-rulekeeper`（init/check/snap/record/rules/evolve/report/gate/redact/migrate）｜`rk-gate`（write/precommit/**commitmsg**/postcommit/bypass/ci/close/hooks）
 ｜`rk-check`｜`rk-snap`｜`rk-ledger`｜`rk-rules`｜`rk-doctor`｜`rk-schema`｜`rk-rc`｜`rk-replay`｜`rk-crossplat`｜`rk-selfcheck`｜`rk-shard`｜`rk-baseline`｜`rk-backup`｜`rk-log`｜`rk-env`｜`rk-migrate`｜`rk-redact`｜`rk-stop-loss`｜`rk-shell-revert`｜`rk-dshcompat`｜`rk-effect`（plan/verify/apply/inject —— 生效闭环，见下节）
 
 ## 入账 ≠ 生效（`rk-effect`：生效闭环，2026-09-19）

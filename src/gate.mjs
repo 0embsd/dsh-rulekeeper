@@ -30,7 +30,7 @@ import { validateUncheckableDeclaration } from './uncheckable.mjs';
 import { redactValue } from './redact.mjs';
 import { offGuard } from './mode.mjs';
 import { pathKey, resolveProjectLanding, toPosix } from './platform/paths.mjs';
-import { scanPublicFacePaths } from './selfcheck.mjs';
+import { findPublicFaceLeaks, scanPublicFacePaths } from './selfcheck.mjs';
 
 /** 工具自产物/非项目目录：任何判据都不得把它们当"项目文件"（㉚） */
 export const SELF_ARTIFACT_DIRS = Object.freeze(['.git', 'node_modules', '.dsh-ai']);
@@ -480,6 +480,99 @@ export function commitPaths(repoRoot, sha, runGitRaw = defaultRunGitRaw) {
   const r = runGitRaw(repoRoot, ['show', '--name-only', '--pretty=format:', '--diff-filter=ACMR', sha]);
   if (!r.ok) return { ok: false, paths: [], reason: r.stderr || r.error || `git exit=${r.status}` };
   return { ok: true, paths: r.buffer.toString('utf8').split('\n').map((s) => s.trim()).filter((s) => s !== ''), reason: null };
+}
+
+/**
+ * **提交正文的公开面门禁**（`commit-msg` / `pre-push` 两道钩子共用；2026-09-21 事故后补，教训 L652）。
+ *
+ * 为什么必须有：`precommitGate` 的脱敏扫描只看**暂存文件**——公开面还有一块**正文**（提交消息）。
+ *   实测事故：两个提交的文件全过、正文里各带一行绝对路径凭证（含内部项目名）⇒ 推送后才发现；
+ *   想改写历史时被远端分支保护拒绝（`Cannot force-push to this branch`）⇒ **泄漏撤不回来**。
+ *   ⇒ 只能把判据**前移到离机之前**，两个检查点缺一不可：
+ *     · `commit-msg`（单条）：提交那一刻拦；人能当场改消息重来。
+ *     · `pre-push`（**区间**）：推送那一刻把"所有未推提交的正文"再扫一遍 —— 它兜住
+ *       ①`--no-verify` 绕过的提交 ②钩子装上**之前**就已经存在的提交 ③改过正文的 amend。
+ *       这是最后一道：**过了这道，泄漏就出机器了**。
+ *
+ * 清洗规则（照 git 自己的口径，别把"模板注释"和 `-v` 的 diff 当正文）：
+ *   · 丢弃以 `#` 开头的行（`git commit` 的模板/注释行）；
+ *   · 丢弃剪刀线 `# ------------------------ >8 ------------------------` **之后**的所有内容
+ *     （`git commit -v` 会把 diff 附在消息文件里）；
+ *   · 其余按原样扫描（多行、含缩进都算）。
+ * @param {{messageFile?: string, repoRoot?: string, range?: string, runGit?: Function}} opts
+ * @returns {{ok: boolean, mode: string, files: string[], scannedLines: number, commits: object[], findings: object[]}}
+ */
+export function commitMessageGate(opts = {}) {
+  const runGit = opts.runGit ?? defaultRunGit;
+  // ── 区间模式（pre-push）：把区间里**每个提交**的正文都扫一遍 ─────────────────────
+  if (typeof opts.range === 'string' && opts.range.trim() !== '') {
+    const range = opts.range.trim();
+    const repoRoot = resolve(opts.repoRoot ?? process.cwd());
+    const r = runGit(repoRoot, ['log', '--format=%H%x1f%B%x1e', range]);
+    if (r.ok !== true) {
+      return {
+        ok: false, mode: 'range', range, files: [], scannedLines: 0, commits: [],
+        findings: [{ code: 'GATE_COMMITMSG_RANGE_UNREADABLE', message: `读不到区间 ${range} 的提交正文: ${r.stderr || r.error || `git exit=${r.status}`}` }],
+      };
+    }
+    const chunks = String(r.stdout ?? '').split('\x1e').map((s) => s.trim()).filter((s) => s !== '');
+    const findings = [];
+    const commits = [];
+    let scannedLines = 0;
+    for (const chunk of chunks) {
+      const sep = chunk.indexOf('\x1f');
+      const sha = (sep < 0 ? '' : chunk.slice(0, sep)).trim();
+      const body = sep < 0 ? chunk : chunk.slice(sep + 1);
+      const stripped = stripMessageForScan(body);
+      scannedLines += stripped.length;
+      const leaks = findPublicFaceLeaks('COMMIT_EDITMSG', stripped.join('\n')).map((leak) => ({
+        code: 'GATE_COMMITMSG_INTERNAL_LEAK',
+        message: `提交 ${sha.slice(0, 8)} 的正文出现${leak.why}「${leak.match}」（公开仓的正文同样算公开面；**推送前**改掉：amend 或 rebase 改消息）`,
+        commit: sha.slice(0, 8),
+        match: leak.match,
+      }));
+      commits.push({ sha: sha.slice(0, 8), scannedLines: stripped.length, leaks: leaks.length });
+      findings.push(...leaks);
+    }
+    return { ok: findings.length === 0, mode: 'range', range, files: [], scannedLines, commits, findings };
+  }
+  // ── 单文件模式（commit-msg）────────────────────────────────────────────────────
+  const messageFile = typeof opts.messageFile === 'string' ? opts.messageFile : '';
+  if (messageFile === '' || !existsSync(messageFile)) {
+    // fail-closed：读不到正文 = 这道判据不可信。宁可让人把路径给对，也不假装"扫过了"。
+    return {
+      ok: false, mode: 'file', files: [], scannedLines: 0, commits: [],
+      findings: [{ code: 'GATE_COMMITMSG_UNREADABLE', message: `读不到提交正文文件（--file 未给或不存在）: ${messageFile || '(空)'}` }],
+    };
+  }
+  let raw;
+  try {
+    raw = readFileSync(messageFile, 'utf8');
+  } catch (error) {
+    return {
+      ok: false, mode: 'file', files: [], scannedLines: 0, commits: [],
+      findings: [{ code: 'GATE_COMMITMSG_UNREADABLE', message: `读提交正文失败: ${String(error?.message ?? error)}` }],
+    };
+  }
+  const lines = stripMessageForScan(raw);
+  const findings = findPublicFaceLeaks('COMMIT_EDITMSG', lines.join('\n')).map((leak) => ({
+    code: 'GATE_COMMITMSG_INTERNAL_LEAK',
+    message: `提交正文出现${leak.why}「${leak.match}」（公开仓的正文同样算公开面；改掉措辞再提交）`,
+    match: leak.match,
+  }));
+  return { ok: findings.length === 0, mode: 'file', files: [messageFile], scannedLines: lines.length, commits: [], findings };
+}
+
+/** 正文里"哪些行算正文"：丢掉 `#` 注释行与剪刀线之后的 diff（git 自己的口径） */
+function stripMessageForScan(raw) {
+  const SCISSORS = /^#\s*-+\s*>8\s*-+/;
+  const lines = [];
+  for (const line of String(raw ?? '').split(/\r?\n/)) {
+    if (SCISSORS.test(line)) break;
+    if (line.startsWith('#')) continue;
+    lines.push(line);
+  }
+  return lines;
 }
 
 /** 某次提交里某个路径的内容 sha256（提交态，不是工作区） */

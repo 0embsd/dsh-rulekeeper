@@ -19,7 +19,7 @@ import { runReplayAll } from './replay.mjs';
 import { recordBaseline, verifyBaseline } from './baseline.mjs';
 import { applyGc, planGc, shardLedger } from './shard.mjs';
 import { reconSnapshots, restoreSnapshot, takeSnapshot } from './snap.mjs';
-import { bypassRecon, ciGate, closeGate, parseHit, postCommitRecon, precommitGate, reconWrite, writeCiWorkflow, CI_WORKFLOW_REL } from './gate.mjs';
+import { bypassRecon, ciGate, closeGate, commitMessageGate, parseHit, postCommitRecon, precommitGate, reconWrite, writeCiWorkflow, CI_WORKFLOW_REL } from './gate.mjs';
 import { DEFAULT_HOOKS_PATH, defaultRunGitRaw, installHooks, verifyHooks } from './hooks.mjs';
 import { uninstallHooks } from './uninstall.mjs';
 import { exportLanding, isInside, rebuildLanding, writeBundle } from './portable.mjs';
@@ -1428,6 +1428,7 @@ export function runGate(argv, io = defaultIo(), env = process.env) {
   }
   if (sub === 'write') return runGateWrite(rest, io, env);
   if (sub === 'precommit') return runGatePrecommit(rest, io, env);
+  if (sub === 'commitmsg') return runGateCommitmsg(rest, io, env);
   if (sub === 'postcommit') return runGatePostcommit(rest, io, env);
   if (sub === 'bypass') return runGateBypass(rest, io, env);
   if (sub === 'ci') return runGateCi(rest, io, env);
@@ -1435,6 +1436,52 @@ export function runGate(argv, io = defaultIo(), env = process.env) {
   if (sub === 'hooks') return runGateHooks(rest, io, env);
   io.err(`rk-gate: 未知子命令 "${sub}"\n${USAGE_GATE}\n`);
   return RC.USAGE;
+}
+
+/** `rk-gate commitmsg`（2026-09-21，教训 L652）：**提交正文**的公开面门禁（由 `commit-msg` / `pre-push` 钩子调用） */
+export function runGateCommitmsg(argv, io = defaultIo(), env = process.env) {
+  let flags;
+  try {
+    flags = scanFlags(argv, { '--file': 'string', '--range': 'string', '--repo': 'string', '--json': 'boolean', '--help': 'boolean' });
+  } catch (err) {
+    if (err instanceof UsageError) {
+      io.err(`rk-gate commitmsg: ${err.message}\n用法: rk-gate commitmsg --file <提交正文文件> | --repo <仓库根> --range <A..B> [--json]\n`);
+      return RC.USAGE;
+    }
+    throw err;
+  }
+  if (flags.help === true) {
+    io.out('用法: rk-gate commitmsg --file <提交正文文件> [--json]\n'
+      + '      rk-gate commitmsg --repo <仓库根> --range <A..B> [--json]\n'
+      + '作用: 用公开面模式表扫**提交正文**（丢弃 `#` 注释行与剪刀线之后的 diff）；有泄漏 ⇒ exit≠0。\n'
+      + '两道检查点: `commit-msg`（单条，提交那刻）与 `pre-push`（区间，**离机之前**最后一道）。\n');
+    return RC.OK;
+  }
+  const hasFile = typeof flags.file === 'string' && flags.file.trim() !== '';
+  const hasRange = typeof flags.range === 'string' && flags.range.trim() !== '';
+  if (hasFile === hasRange) {
+    io.err('rk-gate commitmsg: 二选一 —— `--file <提交正文文件>`（commit-msg）或 `--repo <仓库根> --range <A..B>`（pre-push）\n');
+    return RC.USAGE;
+  }
+  const r = hasFile
+    ? commitMessageGate({ messageFile: resolve(flags.file) })
+    : commitMessageGate({ repoRoot: resolve(flags.repo ?? process.cwd()), range: flags.range.trim() });
+  if (flags.json === true) {
+    io.out(jsonStable(r));
+    return r.ok === true ? RC.OK : RC.FAIL;
+  }
+  io.out(line(`RK_GATE_COMMITMSG_MODE=${r.mode}`));
+  if (hasFile) io.out(line(`RK_GATE_COMMITMSG_FILE=${toPosix(resolve(flags.file))}`));
+  if (hasRange) {
+    io.out(line(`RK_GATE_COMMITMSG_RANGE=${r.range}`));
+    io.out(line(`RK_GATE_COMMITMSG_COMMITS=${r.commits.length}`));
+  }
+  io.out(line(`RK_GATE_COMMITMSG_LINES=${r.scannedLines}`));
+  io.out(line(`RK_GATE_COMMITMSG_LEAKS=${r.findings.length}`));
+  for (const f of r.findings) io.out(line(`FINDING ${f.code} ${f.commit ?? '-'} ${f.match ?? '-'} ${f.message}`));
+  io.out(resultLine('COMMITMSG', r.ok === true));
+  if (r.ok !== true) io.err(`rk-gate commitmsg: 提交正文未过公开面脱敏（${r.findings.map((f) => f.code).join(',')}）——**推送前**改掉（amend / rebase 改消息），一旦推送就撤不回来\n`);
+  return r.ok === true ? RC.OK : RC.FAIL;
 }
 
 /** `rk-gate precommit`（LF-500） */
