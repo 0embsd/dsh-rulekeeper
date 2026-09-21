@@ -30,6 +30,19 @@ export const REQUIRED_STRING_FIELDS = Object.freeze([
   'rule', 'category', 'problem', 'root_cause', 'solution', 'mechanism',
 ]);
 
+/**
+ * **机制面四选一**（规则 46 的落地口径；`record` 的入库校验、`adopt` 的体检、`rk-check` 的
+ * adoption-contract 检查器都读这一份，避免三处口径漂移）。
+ *
+ *   text        承认仅文本、不拦（必须被**计数**暴露，不得静默）
+ *   mechanized  有机械判据 ⇒ `rules.json` 的 `checks` 里必须有这条绑定
+ *   guard       有插件拦截 ⇒ `rules.json` 的 `gates` 里必须有这条绑定
+ *   question    靠人工问句（收尾/CR 清单里的固定问句）
+ */
+export const MECHANISM_FACES = Object.freeze(['text', 'mechanized', 'guard', 'question']);
+/** 未显式给机制面时的默认档（**仍会被计数**，不是"免检"） */
+export const MECHANISM_FACE_DEFAULT = 'text';
+
 export function ledgerPath(landingDir) {
   return join(landingDir, LEDGER_FILE);
 }
@@ -190,6 +203,36 @@ export function deriveStatus(entries) {
     const ts = typeof entry.ts === 'string' ? entry.ts : '';
     if (prev === undefined || ts >= prev.ts) {
       out.set(entry.rule, { rule: entry.rule, ts, status: typeof entry.status === 'string' ? entry.status : 'active' });
+    }
+  }
+  return out;
+}
+
+/** 状态迁移事件行的类目（schema 的 `event:fold-status-events` 契约：迁移写事件行，**不覆写**历史行） */
+export const STATUS_EVENT_CATEGORY = '状态事件';
+
+/**
+ * **状态 fold**：把"哪些行已被取代"算出来（schema 契约 `event:fold-status-events` 的读侧）。
+ *
+ * 为什么需要它：账本是 append-only，"这条记错了/被后一条取代了"没法靠删行表达。schema 早就写明
+ * 正解是**状态迁移事件行**，但**读侧一直没实现** ⇒ 被取代的历史行仍然计入复发、仍然让根通道说话
+ * （2026-09-21 实测：本会话把一条教训先记到未绑定的 CAT-VERIFY 下，连根通道都开始为它注入提醒，
+ *  `test/plugin.test.mjs` 的"都注册成功时不说话"判据当场变红）。
+ *
+ * 形状：`{category:'状态事件', rule, problem:'STATUS_SUPERSEDE <被取代的条目 id>[,<id>…]'}`。
+ * 语义：被点名的条目视为 `superseded`（**只影响派生读数**，历史行逐字节不变）。
+ * @returns {Set<string>} 被取代的条目 id
+ */
+export function supersededIds(entries) {
+  const out = new Set();
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== 'object') continue;
+    if (entry.category !== STATUS_EVENT_CATEGORY) continue;
+    const m = /STATUS_SUPERSEDE\s+([A-Za-z0-9._,-]+)/.exec(String(entry.problem ?? ''));
+    if (m === null) continue;
+    for (const id of m[1].split(',')) {
+      const t = id.trim();
+      if (t !== '') out.add(t);
     }
   }
   return out;

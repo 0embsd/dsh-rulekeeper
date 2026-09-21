@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "rule": "CONCURRENCY-IO",
+  "checkerRef": "@self/scripts/checkers/test-isolation.mjs",
+  "command": [
+    "node",
+    "scripts/checkers/test-isolation.mjs"
+  ],
+  "expectRed": {
+    "exitCode": 1
+  },
+  "expectGreen": {
+    "exitCode": 0
+  },
+  "redSample": {
+    "kind": "tree",
+    "source": "test-fixtures/red",
+    "note": "被检对象=当前项目根；红态样本由检查器每次现造（见脚本头部注释）"
+  },
+  "greenSample": {
+    "kind": "tree",
+    "source": "."
+  },
+  "checkerVersion": "test-isolation@1",
+  "timeoutMs": 20000,
+  "notes": "用例不得写真实落点：判据钉在\"真实落点来源 + 写动作\"同处，且整套用例必须有进程级隔离机制面（isolateProcessUserLanding）。红态样本每次现造。"
+}

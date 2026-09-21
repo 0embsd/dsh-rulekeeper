@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "rule": "GATE-DISCIPLINE",
+  "command": [
+    "node",
+    "scripts/checkers/hooks-integrity.mjs"
+  ],
+  "expectRed": {
+    "exitCode": 1
+  },
+  "expectGreen": {
+    "exitCode": 0
+  },
+  "redSample": {
+    "kind": "tree",
+    "source": "test-fixtures/red"
+  },
+  "greenSample": {
+    "kind": "tree",
+    "source": "test/fixtures/checker/hooks-lf-green"
+  },
+  "checkerVersion": "hooks-integrity@1",
+  "timeoutMs": 20000,
+  "notes": "hook 完整性：行尾必须纯 LF / .gitattributes 必须显式钉 .githooks/* eol=lf / 真 git 仓时索引 mode 必须 100755（非 git 样本如实跳过）"
+}

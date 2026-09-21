@@ -17,6 +17,7 @@
 //   根因不是"没检查"，而是**分文件跑绿被当成交付判据**。故：只要带了参数，就在**首尾**各打一次
 //   醒目提示（写进输出流，不靠自觉记着）——交付判据是「全量 `rk-test` + `rk-selfcheck`」。
 import { spawnSync } from 'node:child_process';
+import { globSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -30,13 +31,23 @@ if (args.includes('--help') || args.includes('-h')) {
   process.exit(0);
 }
 
+// **为什么改成"显式列文件"而不是裸 `node --test`**（2026-09-21 实测）：
+//   node 默认会**发现**任意深度下匹配测试命名约定的文件，于是 `test-fixtures/red/**` 里那份
+//   **故意违规的样本**也被当成用例执行 ⇒ 全量跑多一条"失败"（而那条"失败"恰恰是夹具的本意）。
+//   样本是判据的**输入**，不是用例。故无参数时只跑 `test/**/*.test.mjs`（用例面），
+//   其余深度（含 `.dsh-ai/tmp/` 与 `test-fixtures/`）不进用例面。
+const discovered = args.length > 0
+  ? []
+  : globSync('test/**/*.test.mjs', { cwd: ROOT }).sort();
+const runArgs = args.length > 0 ? args : discovered;
+
 const partial = args.length > 0;
 if (partial) {
   console.error(`⚠ rk-test: **部分**运行（只跑 ${args.length} 个指定路径）——这**不是**交付凭证。`);
   console.error('   交付判据 = 全量 `rk-test`（不带参数）+ `rk-selfcheck --root <包根>`（S8 脱敏 / S9 可达性 / 文档漂移等**包级**不变量）。');
 }
 
-const res = spawnSync(process.execPath, ['--test', ...args], { cwd: ROOT, stdio: 'inherit' });
+const res = spawnSync(process.execPath, ['--test', ...runArgs], { cwd: ROOT, stdio: 'inherit' });
 if (res.error) {
   console.error(`rk-test: 无法启动 node --test: ${String(res.error.message || res.error)}`);
   process.exit(1);

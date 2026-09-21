@@ -28,12 +28,23 @@ import { dirname, join } from 'node:path';
 import { appendLine, readLines } from './append.mjs';
 import { activationsById, mergeActivation } from './annotations.mjs';
 import { describeApproval, validateAnchoredApproval } from './approval.mjs';
-import { verifyChecker, validateCheckerBinding, treeHash } from './checker.mjs';
+import { carrierOfBinding, verifyChecker, validateCheckerBinding, treeHash } from './checker.mjs';
+import { fileURLToPath as fileUrlToPathOf } from 'node:url';
+
+/** 本模块所在**包根**（用于 `checkerRef` 的 `@self/…` 与"包内 node_modules"回退）
+ *
+ * 口径与 `test/helpers/sandbox.mjs` 的 `PKG_ROOT` 一致：本模块在 `<包根>/src/effect.mjs`，
+ * 故包根 = 本文件目录再上一层（写这行时踩过一次：少升一层 ⇒ 解析成 `<包根>/src/scripts/...`，
+ * 引用永远解析不到 —— 用例①当场把它抓出来了）。
+ */
+function packageRootOfThisModule() {
+  return dirname(dirname(fileUrlToPathOf(import.meta.url)));
+}
 import { backupFile } from './backup.mjs';
 import { CHECK_KINDS } from './checks.mjs';
 import { CLOSE_KNOWN_GATES, effectiveProtection, readGateLedger, reconWrite } from './gate.mjs';
 import { injectPlan } from './inject.mjs';
-import { record as ledgerRecord, readLedger } from './ledger.mjs';
+import { STATUS_EVENT_CATEGORY, record as ledgerRecord, readLedger, supersededIds } from './ledger.mjs';
 import { acquireLock, releaseLock } from './lock.mjs';
 import { offGuard } from './mode.mjs';
 import { toPosix } from './platform/paths.mjs';
@@ -49,6 +60,14 @@ export const EFFECT_STATES = Object.freeze(['none', 'injected', 'mechanized', 'v
 export const EFFECT_EVENT_CATEGORY = '生效登记';
 /** 生效**退役**事件行的事务名（与登记同族：退役也是一次可审计的状态迁移） */
 export const EFFECT_RETIRE_CATEGORY = '生效退役';
+/**
+ * **凭据缺口登记**行的事务名（账本里的 `category`）。
+ *
+ * 语义：这条纪律的某条历史凭据**确属仓库外**（验收现场/会话期一次性产物），手里没有可复核的对象
+ * ⇒ 另起一行把缺口逐条登记下来（账本 append-only，不能改历史行）。它是**登记行为**，不是"又踩了一次"
+ * ⇒ 与生效登记/退役同族：不进复发计数（`effectPlan` 的派生段跳过它）。
+ */
+export const REGISTERED_GAP_CATEGORY = '登记缺口';
 /** 退役提案的机器标记（写在 `redCriteria` 前缀）：`planActivation` 据此走"摘绑定"而不是"加绑定" */
 export const RETIRE_MARK = 'EFFECT_RETIRE_CANDIDATE';
 /** 验证记录的机器标记（写在 findings.jsonl 的 evidence 里） */
@@ -198,27 +217,52 @@ export function normalizeGateBinding(entry) {
   return { rule: canonicalRule(entry.rule), gate: entry.gate.trim() };
 }
 
-/** 生效登记事件行 → `rule -> [activation]`（**派生**，不原地改账本） */
+/** 生效登记事件行 → `rule -> [activation]`（**派生**，不原地改账本）
+ *
+ * **只认真正的生效登记（绑定事实）**：`生效登记` 类目里既有 `EFFECT_ACTIVATE`/`EFFECT_RETIRE`
+ * 事件行，也可能混进**登记行为**行（本会话实测：把两条"登记缺口"教训记成该事件类目后，
+ * 它们被当成了新的"生效登记" ⇒ 复发判定与"凭证须晚于生效"判定双双被污染）。
+ * 判据：`problem` 必须以 `EFFECT_ACTIVATE` 或 `EFFECT_RETIRE` 开头 —— 那是本模块自己写的格式。
+ */
 export function activationsFromLanding(landingDir) {
-  return eventRowsOf(landingDir, EFFECT_EVENT_CATEGORY);
+  const out = eventRowsOf(landingDir, EFFECT_EVENT_CATEGORY);
+  for (const [rule, list] of out) {
+    const kept = list.filter((a) => /^EFFECT_(ACTIVATE|RETIRE)\b/.test(String(a?.problem ?? '')));
+    if (kept.length === 0) out.delete(rule);
+    else out.set(rule, kept);
+  }
+  return out;
 }
 
-/** 生效**退役**事件行 → `rule -> [retirement]`（同族派生；退役后不再报"登记了却没绑定"） */
+/** 生效**退役**事件行 → `rule -> [retirement]`（同族派生；退役后不再报"登记了却没绑定"）
+ *
+ * 与 `activationsFromLanding` 同口径：只认 `EFFECT_RETIRE` 开头的事件行（防"登记行为"混进事件类目）。
+ */
 export function retirementsFromLanding(landingDir) {
-  return eventRowsOf(landingDir, EFFECT_RETIRE_CATEGORY);
+  const out = eventRowsOf(landingDir, EFFECT_RETIRE_CATEGORY);
+  for (const [rule, list] of out) {
+    const kept = list.filter((a) => /^EFFECT_RETIRE\b/.test(String(a?.problem ?? '')));
+    if (kept.length === 0) out.delete(rule);
+    else out.set(rule, kept);
+  }
+  return out;
 }
 
 function eventRowsOf(landingDir, category) {
   const out = new Map();
   const read = readLedger(landingDir);
+  // 被状态事件取代的行不进事件派生（同 `ledgerGroups`）：否则一条"误挂在事件类目下的教训"
+  // 会一直被当成新的生效登记（本会话实测：它把复发判定与"凭证须晚于生效"判定双双污染）。
+  const superseded = supersededIds(read.values);
   for (const row of read.values) {
     if (row === null || typeof row !== 'object') continue;
     if (row.category !== category) continue;
+    if (typeof row.id === 'string' && superseded.has(row.id)) continue;
     if (typeof row.rule !== 'string' || row.rule.trim() === '') continue;
     const rule = canonicalRule(row.rule);
     const m = /proposal=([A-Za-z0-9._-]+)/.exec(String(row.problem ?? ''));
     const list = out.get(rule) ?? [];
-    list.push({ rule, ts: typeof row.ts === 'string' ? row.ts : null, proposal: m === null ? null : m[1], evidence: Array.isArray(row.evidence) ? row.evidence : [] });
+    list.push({ rule, ts: typeof row.ts === 'string' ? row.ts : null, proposal: m === null ? null : m[1], problem: typeof row.problem === 'string' ? row.problem : '', evidence: Array.isArray(row.evidence) ? row.evidence : [] });
     out.set(rule, list);
   }
   return out;
@@ -355,11 +399,22 @@ export function ledgerGroups(landingDir) {
   const groups = new Map();
   const read = readLedger(landingDir);
   const byId = activationsById(landingDir);
+  // **被状态事件取代的行不进派生读数**（schema 契约 `event:fold-status-events` 的读侧）：否则
+  // "记错了/被后一条取代"的历史行会一直计入复发、一直让根通道说话（2026-09-21 实测）。
+  const superseded = supersededIds(read.values);
   for (const row of read.values) {
     if (row === null || typeof row !== 'object' || Array.isArray(row)) continue;
+    if (typeof row.id === 'string' && superseded.has(row.id)) continue;
     if (typeof row.rule !== 'string' || row.rule.trim() === '') continue;
     if (row.category === EFFECT_EVENT_CATEGORY) continue; // 生效登记不是"又踩了一次"
     if (row.category === EFFECT_RETIRE_CATEGORY) continue; // 生效退役同理
+    // **登记缺口**也不是"又踩了一次"：那是"我手里没有可复核的凭据，特此登记"（见 adopt 的
+    // 凭据缺口登记行）。它与事件行同类**对象错位**：拿"复发"去数"登记行为"会把
+    // `EFFECT_RECURRED_AFTER_ACTIVATION` 变成噪声（2026-09-21 实测：登记 2 条缺口立刻报 2 条 error）。
+    if (row.category === REGISTERED_GAP_CATEGORY) continue;
+    // **状态事件行**同理：它是"这条历史行被取代了"的**迁移记录**，不是一条新教训
+    // （否则一条 `STATUS_SUPERSEDE` 事件就会让那个 rule 重新出现在体检里、并报 TEXT_ONLY）。
+    if (row.category === STATUS_EVENT_CATEGORY) continue;
     const rule = canonicalRule(row.rule);
     const g = groups.get(rule) ?? { rule, count: 0, withActivation: 0, firstSeen: null, lastSeen: null, variants: new Set() };
     g.count += 1;
@@ -409,12 +464,17 @@ export function effectPlan(opts = {}) {
     const lastActivation = acts.length === 0 ? null : acts.map((a) => a.ts ?? '').sort().pop();
     // 验证凭证**必须与绑定对齐**（对抗性 QA 7 号发现）：此前只要 findings.jsonl 里有一行带
     // `EFFECT_VERIFIED` 就判 verified，**从不比对 target** —— 拿一行指向别的文件的伪造记录即可翻盘。
-    // 现在要求 `target` 恰是某条绑定的 carrier，否则"可核对"这句话就是假的。
-    const carriers = new Set(b.checks.map((c) => c.carrier).filter((c) => typeof c === 'string' && c !== ''));
+    // 现在要求 `target` 恰是某条绑定的载体（载体口径见 src/checker.mjs 的 carrierOfBinding），
+    // 且**必须晚于最后一次生效登记**：否则"先跑验证、后改绑定"也能冒充已核实（同 `recurred` 的自净口径）。
+    const carriers = new Set(b.checks.map((c) => carrierOfBinding(c)).filter((c) => typeof c === 'string' && c !== ''));
     // **复发**：只在"生效之后"入账的同 rule 条目才算（生效前踩的坑是提案的来历，不算判据失效）
     const recurred = lastActivation === null ? 0 : (g.lastSeen !== null && g.lastSeen > lastActivation ? 1 : 0);
-    const verified = vers.some((v) => v.passed === true && v.target !== null && carriers.has(v.target));
-    const targetMismatch = vers.some((v) => v.passed === true && (v.target === null || !carriers.has(v.target)));
+    const verified = vers.some((v) => v.passed === true && v.target !== null && carriers.has(v.target)
+      && (lastActivation === null || (v.ts ?? '') > lastActivation));
+    // 同族的"口径不一致"告警也要**只看本次生效之后的记录**：历史行（旧口径写的 target，如
+    // `checker:node`）不该在每次体检里重复喊；那属"已修好的旧账"，不是当前绑定的问题。
+    const targetMismatch = vers.some((v) => v.passed === true && (v.target === null || !carriers.has(v.target))
+      && (lastActivation === null || (v.ts ?? '') > lastActivation));
     const openProposal = proposals.find((p) => typeof p.rule === 'string' && canonicalRule(p.rule) === rule && p.status === 'proposed') ?? null;
 
     let state;
@@ -474,7 +534,12 @@ export function effectPlan(opts = {}) {
     if (state === 'mechanized') {
       findings.push({ code: 'EFFECT_NOT_VERIFIED', severity: 'warn', rule, message: `${rule}: 已绑判据但没跑过 effect verify（无验证凭证）` });
     }
-    if (targetMismatch && state !== 'mechanized') {
+    // 只在"**这一次生效之后没有任何对得上载体的通过记录**"时才喊：那才是"凭证对不上、可能被冒充"。
+    // 已经有一条口径一致的通过记录时，更早的旧口径行属**历史噪声**（append-only 的 findings.jsonl
+    // 不会因为改了口径就把旧行删掉）—— 每次体检都重复喊会把这条告警变成背景噪音，进而被忽略。
+    const hasAlignedPass = vers.some((v) => v.passed === true && v.target !== null && carriers.has(v.target)
+      && (lastActivation === null || (v.ts ?? '') > lastActivation));
+    if (targetMismatch && state !== 'mechanized' && !hasAlignedPass) {
       findings.push({ code: 'EFFECT_VERIFY_TARGET_MISMATCH', severity: 'warn', rule, message: `${rule}: findings.jsonl 里有"通过"记录，但其 target 与绑定的 carrier（${[...carriers].join(',') || '(无)'}）不一致——不计入 verified` });
     }
     // 绑定的来源可审计（对抗性 QA 14 号发现）：绑定里写着 proposal=<id>，就该真的存在且已批准
@@ -751,6 +816,7 @@ export function planActivation(opts = {}) {
   if (problems.length > 0) return { ok: false, findings: problems.map((p) => ({ code: 'EFFECT_PLAN_UNQUALIFIED', message: p })), candidate: null, additions: null };
 
   const rule = canonicalRule(proposal.rule);
+  const project = opts.projectRoot ?? process.cwd();
   const loaded = loadLandingRules(landingDir);
   const before = loaded.rulesResult.rules ?? { schema: SCHEMA_VERSION, project: 'unknown', protected_paths: [], gates: [], checks: [], inject: [] };
 
@@ -819,10 +885,41 @@ export function planActivation(opts = {}) {
     if (spec !== null && typeof spec === 'object' && spec.rule !== undefined && canonicalRule(String(spec.rule)) !== rule) {
       return { ok: false, findings: [{ code: 'EFFECT_CHECKER_SPEC_RULE_MISMATCH', message: `规格文件的 rule=${JSON.stringify(spec.rule)} 与提案的 rule=${rule} 不一致（防止把 A 的检查器挂到 B 上）` }], candidate: null, additions: null };
     }
+    // ── `checkerRef`（P3 反哺）：规格**不写 `command`**，改引用**插件包内**的检查器 ──────────────
+    // 为什么要它：检查器脚本在每个被治理项目里放一份副本 ⇒ N 份会漂移（改一处、别处还是旧判据），
+    // 而"判据漂移"正是这套机制最不该有的东西。引用形态：`<包名>/<包内路径>`，在本包内直接跑
+    // （自举：本仓用自己包里的检查器）时也支持 `@self/<包内路径>`。
+    // fail-closed：解析不到就**不落盘**（不许退回"写个不存在的路径"）。
+    let command = spec.command;
+    let viaCheckerRef = null;
+    if (spec.checkerRef !== undefined && spec.checkerRef !== null) {
+      if (!Array.isArray(command) || command.length < 2 || command[0] !== 'node') {
+        return { ok: false, findings: [{ code: 'EFFECT_CHECKER_REF_COMMAND_SHAPE', message: `${rule}: 写了 checkerRef 时 command 必须是 ["node","<占位路径>",…]（判据要能核对两者同源）` }], candidate: null, additions: null };
+      }
+      const refText = String(spec.checkerRef).trim();
+      const m = /^(@self|[A-Za-z0-9@][A-Za-z0-9._@\/-]*)\/(.+)$/.exec(refText);
+      if (m === null) {
+        return { ok: false, findings: [{ code: 'EFFECT_CHECKER_REF_INVALID', message: `${rule}: checkerRef 形态不合法（应形如 <包名>/<包内路径> 或 @self/<包内路径>）: ${JSON.stringify(spec.checkerRef)}` }], candidate: null, additions: null };
+      }
+      const candidates = m[1] === '@self'
+        ? [join(packageRootOfThisModule(), m[2])]
+        : [join(project, 'node_modules', m[1], m[2]), join(packageRootOfThisModule(), 'node_modules', m[1], m[2])];
+      const resolved = candidates.find((p) => existsSync(p)) ?? null;
+      if (resolved === null) {
+        return { ok: false, findings: [{ code: 'EFFECT_CHECKER_REF_MISSING', message: `${rule}: checkerRef=${refText} 解析不到（试过 ${candidates.map((p) => toPosix(p)).join(' | ')}）⇒ 拒绝落盘（不写"指向不存在对象"的判据）` }], candidate: null, additions: null };
+      }
+      command = [command[0], resolved, ...command.slice(2)];
+      viaCheckerRef = refText;
+    }
     const binding = {
       kind: 'checker',
       rule,
-      command: spec.command,
+      // `spec` = 这条判据的**载体标识**（`checker:<规格文件>`）。verify 写凭证的 target 与 plan 判
+      // verified 时的载体集合都读它 ⇒ 两边同源（此前 verify 写 `checker:node`、绑定上无载体字段，
+      // 导致四条真跑过的绑定全被报成"没跑过 verify"）。
+      spec: ce.value,
+      ...(viaCheckerRef === null ? {} : { checkerRef: viaCheckerRef }),
+      command,
       expectRed: spec.expectRed,
       expectGreen: spec.expectGreen,
       redSample: spec.redSample,

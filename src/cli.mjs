@@ -36,9 +36,11 @@ import {
   effectInjectPlan, effectPlan, parseCarrier, ruleBindings, verifyBinding,
 } from './effect.mjs';
 import { isSafeId } from './proposal.mjs';
+import { carrierOfBinding } from './checker.mjs';
+import { adoptionReport, writeDrafts } from './adopt.mjs';
 import { importLedger } from './importer.mjs';
 import { landingFingerprint, migrateLanding, planMigration } from './migrate.mjs';
-import { query as queryLedger, readLedger, record, summary as ledgerSummary } from './ledger.mjs';
+import { MECHANISM_FACE_DEFAULT, MECHANISM_FACES, query as queryLedger, readLedger, record, summary as ledgerSummary } from './ledger.mjs';
 import { listLogFiles, readEntries, rotateIfNeeded, totalBytes } from './log.mjs';
 import { RC, checkRcTable, renderRcTable } from './rc.mjs';
 import { checkSchema, renderSchemaMarkdown } from './schema.mjs';
@@ -194,6 +196,9 @@ export const USAGE_RULEKEEPER = `dsh-rulekeeper 0.1.0
   dsh-rulekeeper check   --landing <dir> [--project <dir>]     自检：账本/落点可信性（doctor）+ 计数
   dsh-rulekeeper snap    --landing <dir>                       pre-image 快照（**未实现**，属 LF-300）
   dsh-rulekeeper record  --landing <dir> --rule <r> --problem <p> --root-cause <r> --solution <s> [--category c] [--mechanism m] [--evidence a,b]
+                         · --mechanism 四选一：text（承认仅文本，会被计数）/ mechanized（有机械判据）/ guard（有插件拦截）/ question（靠人工问句）
+                         · --category 默认「纪律」；**生效登记 / 生效退役** 是工具自己的事件类目（事件行不进复发计数），
+                           人工教训别占用它们 —— 实测教训：占用后复发判定与"凭证须晚于生效"判定双双被污染
   dsh-rulekeeper rules   <check|is-protected|effective> …      规则包校验 / 单点判定 / 生效配置
   dsh-rulekeeper evolve  --landing <dir> [--quality <file.json>] [--source auto|human] [--escalate-gate] [--rule r] [--dry-run]  自进化提案（**只写 proposals/**）
   dsh-rulekeeper report  --landing <dir> [--now <ISO>]         报告（账本摘要 + 自检 + 生效配置，可复现）
@@ -2504,7 +2509,7 @@ function projectRootOfLanding(landing) {
  *   2 = 用法错误（缺子命令/未知参数/缺 --by/--by 取值非法/--proposal 不存在）
  */
 function runCliEffect(argv, io, env) {
-  const EFFECT_SUBS = ['plan', 'verify', 'apply', 'inject', 'usage', 'draft-activation'];
+  const EFFECT_SUBS = ['plan', 'verify', 'apply', 'inject', 'usage', 'draft-activation', 'adopt'];
   const sub = argv[0] ?? null;
   if (sub === null || !EFFECT_SUBS.includes(sub)) {
     io.err(`dsh-rulekeeper effect: 需要子命令（${EFFECT_SUBS.join('|')}）\n${USAGE_EFFECT}\n`);
@@ -2590,6 +2595,40 @@ function runCliEffect(argv, io, env) {
     }
     io.out(resultLine('EFFECT_DRAFT_ACTIVATION', true));
     return RC.OK;
+  }
+
+  if (sub === 'adopt') {
+    // P2 自动管线三段（2026-09-21）：机制面必填 + 可机械化类目自动出绑定草稿。
+    // 默认 dry-run；`--apply` 才把草稿写进 `proposals/<id>.json`（**不碰** rules.json —— 唯一写通路仍是 apply）。
+    const report = adoptionReport({ landingDir: landing, projectRoot, now });
+    if (report.ok !== true) {
+      for (const f of report.findings) io.err(`rk-effect adopt: ${f.code}: ${f.message}\n`);
+      io.out(resultLine('EFFECT_ADOPT', false));
+      return RC.FAIL;
+    }
+    let written = [];
+    let skipped = [];
+    if (flags.apply === true) {
+      const out = writeDrafts(landing, report.drafts);
+      written = out.written;
+      skipped = [...report.drafts.filter((d) => out.skipped.some((s) => s.rule === d.rule)).map((d) => ({ rule: d.rule })), ...out.skipped];
+      for (const f of out.findings) io.out(line(`FINDING ${f.code} error ${f.rule ?? '-'} ${f.message}`));
+    }
+    const s = report.stats;
+    io.out(line(`RK_ADOPT_LANDING=${toPosix(landing)}`));
+    io.out(line(`RK_ADOPT_ENTRIES=${s.entries} EVENT_ROWS=${s.eventRows} RULES=${s.rules}`));
+    io.out(line(`RK_ADOPT_FACE text=${s.faceCount.text} mechanized=${s.faceCount.mechanized} guard=${s.faceCount.guard} question=${s.faceCount.question} unregistered=${s.faceCount.unregistered}`));
+    io.out(line(`RK_ADOPT_SPECS=${s.specs} DRAFTS=${s.drafts} ALREADY_BOUND=${s.alreadyBound} OPEN_PROPOSAL=${s.openProposal}`));
+    io.out(line(`RK_ADOPT_APPLIED=${flags.apply === true ? 1 : 0} WRITTEN=${written.length} SKIPPED=${skipped.length}`));
+    for (const p of report.plans) io.out(line(`RK_ADOPT_PLAN rule=${p.rule} entries=${p.entries} spec=${p.spec} decision=${p.decision}`));
+    for (const d of report.drafts) io.out(line(`RK_ADOPT_DRAFT rule=${d.rule} spec=${d.spec} proposal=${d.proposal.id}`));
+    for (const w of written) io.out(line(`RK_ADOPT_WROTE ${w.rule} ${w.id} ${w.path}`));
+    for (const f of report.findings) io.out(line(`FINDING ${f.code} ${f.rule === undefined ? 'warn' : 'error'} ${f.rule ?? '-'} ${f.message}`));
+    if (flags.json === true) io.out(jsonStable({ stats: report.stats, plans: report.plans, drafts: report.drafts.map((d) => d.proposal), written }));
+    // rc：有 error 级 finding（机制面未登记 / 规格坏了）⇒ 1；否则 0（草稿本身不是失败）
+    const hasError = report.findings.some((f) => f.rule !== undefined);
+    io.out(resultLine('EFFECT_ADOPT', !hasError));
+    return hasError ? RC.FAIL : RC.OK;
   }
 
   if (sub === 'usage') {
@@ -2705,11 +2744,14 @@ function runCliEffect(argv, io, env) {
       if (report.state !== undefined) io.out(line(`RK_EFFECT_STATE rule=${e.rule} state=${report.state}`));
       for (const f of report.findings) io.out(line(`FINDING ${f.code} ${f.severity ?? 'error'} ${e.rule} ${f.message}`));
       const wrote = appendVerification(landing, {
-        rule: e.rule, target: e.binding.carrier ?? (e.binding.kind === 'checker' ? `checker:${e.binding.command?.[0] ?? '?'}` : ''),
+        // target 与 plan 的"载体集合"**必须同源**（都走 carrierOfBinding）—— 见 src/checker.mjs 的注释：
+        // 此前这里写 `checker:${command[0]}`（=`checker:node`），绑定上又没有 carrier 字段 ⇒
+        // plan 的载体集合为空 ⇒ 真跑过验证的绑定被报成"没跑过 verify"。
+        rule: e.rule, target: carrierOfBinding(e.binding) ?? '',
         ok: report.ok,
         evidence: [
           `kind=${e.binding.kind}`,
-          `carrier=${e.binding.carrier ?? '(none)'}`,
+          `carrier=${carrierOfBinding(e.binding) ?? '(none)'}`,
           `gate=${e.binding.gate ?? '(none)'}`,
           ...(e.binding.kind === 'checker' ? [`checkerVersion=${e.binding.checkerVersion ?? '(none)'}`, `state=${report.state ?? 'inconclusive'}`] : []),
         ], now,
@@ -2828,6 +2870,20 @@ function runCliRecord(argv, io, env) {
     throw err;
   }
   const evidence = flags.evidence === undefined ? [] : flags.evidence.split(',').map((s) => s.trim()).filter((s) => s !== '');
+  // ── 机制面必填（四选一）────────────────────────────────────────────────────────
+  // 为什么在这里拦：`mechanism` 决定这条纪律**有没有机械面**（见规则 46）。此前它可以是任意自由文本
+  // （空 → 默认 `text`，拼错 → 原样入库），于是"我写了机械判据"这类**自称**也能进账本，
+  // 体检面没有任何东西能据此判定 ⇒ 免责成本太低 = 等于没登记。四选一：
+  //   text        承认仅文本（会被计入 `RK_EFFECT_TEXT_ONLY`，可见、不静默）
+  //   mechanized  有机械判据（adopt 会要求 rules.json 里真有这条绑定）
+  //   guard       有插件拦截（同上，要求 gates 里有绑定）
+  //   question    靠人工问句（收尾/CR 清单里的固定问句）
+  const mechanism = flags.mechanism === undefined ? MECHANISM_FACE_DEFAULT : String(flags.mechanism).trim();
+  if (!MECHANISM_FACES.includes(mechanism)) {
+    io.err(`dsh-rulekeeper record: --mechanism 只能是四选一 ${MECHANISM_FACES.join('|')}（实得 ${JSON.stringify(flags.mechanism)}）\n`
+      + '  说明: text=承认仅文本(会被计数) / mechanized=有机械判据 / guard=有插件拦截 / question=靠人工问句\n');
+    return RC.USAGE;
+  }
   // ── 入库门：这条新问题与账本里已有的某条**过于相似**吗？（与已有行比，不含自己）──────
   if (onNearDup !== 'off') {
     const existing = readLedger(target.landing).values;
@@ -2857,7 +2913,7 @@ function runCliRecord(argv, io, env) {
     problem: flags.problem,
     root_cause: flags['root-cause'],
     solution: flags.solution,
-    mechanism: flags.mechanism ?? 'text',
+    mechanism,
     evidence,
   }, { landingDir: target.landing, now });
   if (!result.ok) {

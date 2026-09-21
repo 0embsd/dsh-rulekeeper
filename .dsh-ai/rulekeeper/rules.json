@@ -6,6 +6,151 @@
     "test/fixtures/**"
   ],
   "gates": [],
-  "checks": [],
+  "checks": [
+    {
+      "kind": "checker",
+      "rule": "CAT-PROC",
+      "command": [
+        "node",
+        "scripts/checkers/gate-finality.mjs"
+      ],
+      "expectRed": {
+        "exitCode": 1
+      },
+      "expectGreen": {
+        "exitCode": 0
+      },
+      "redSample": {
+        "kind": "tree",
+        "source": "test-fixtures/red",
+        "note": "被检对象=当前项目根；红态样本由检查器每次现造（见脚本头部注释）"
+      },
+      "greenSample": {
+        "kind": "tree",
+        "source": "."
+      },
+      "checkerVersion": "gate-finality@1",
+      "timeoutMs": 20000,
+      "notes": "收尾门禁四件齐备且真能跑：.gitattributes 显式钉 eol=lf / 四件齐备且子命令传对 / 索引 mode 100755 / 行尾纯 LF。红态样本每次现造。",
+      "proposal": "P-20260921-catproc-gate",
+      "activatedAt": "2026-09-21T11:16:00.851Z",
+      "spec": "scripts/checkers/gate-finality.mjs"
+    },
+    {
+      "kind": "checker",
+      "rule": "CONCURRENCY-IO",
+      "command": [
+        "node",
+        "scripts/checkers/test-isolation.mjs"
+      ],
+      "expectRed": {
+        "exitCode": 1
+      },
+      "expectGreen": {
+        "exitCode": 0
+      },
+      "redSample": {
+        "kind": "tree",
+        "source": "test-fixtures/red",
+        "note": "被检对象=当前项目根；红态样本由检查器每次现造（见脚本头部注释）"
+      },
+      "greenSample": {
+        "kind": "tree",
+        "source": "."
+      },
+      "checkerVersion": "test-isolation@1",
+      "timeoutMs": 20000,
+      "notes": "用例不得写真实落点：判据钉在\"真实落点来源 + 写动作\"同处，且整套用例必须有进程级隔离机制面（isolateProcessUserLanding）。红态样本每次现造。",
+      "proposal": "P-20260921-concurrency-io-isolation",
+      "activatedAt": "2026-09-21T11:16:01.209Z",
+      "spec": "scripts/checkers/test-isolation.mjs"
+    },
+    {
+      "kind": "checker",
+      "rule": "CAT-TECH",
+      "command": [
+        "node",
+        "scripts/checkers/no-test-exception.mjs"
+      ],
+      "expectRed": {
+        "exitCode": 1
+      },
+      "expectGreen": {
+        "exitCode": 0
+      },
+      "redSample": {
+        "kind": "tree",
+        "source": "test-fixtures/red",
+        "note": "被检对象=当前项目根；红态样本由检查器每次现造（见脚本头部注释）"
+      },
+      "greenSample": {
+        "kind": "tree",
+        "source": "."
+      },
+      "checkerVersion": "no-test-exception@1",
+      "timeoutMs": 20000,
+      "notes": "deny 列表不得为测试方便开例外：src/** 的豁免表里不得出现 test/ 路径。红态样本每次现造。",
+      "proposal": "P-20260921-cat-tech-no-test-exception",
+      "activatedAt": "2026-09-21T11:16:01.540Z",
+      "spec": "scripts/checkers/no-test-exception.mjs"
+    },
+    {
+      "kind": "checker",
+      "rule": "CRED-FRESHNESS",
+      "command": [
+        "node",
+        "scripts/checkers/ledger-live-verdict.mjs"
+      ],
+      "expectRed": {
+        "exitCode": 1
+      },
+      "expectGreen": {
+        "exitCode": 0
+      },
+      "redSample": {
+        "kind": "tree",
+        "source": "test-fixtures/red",
+        "note": "被检对象=当前项目根；红态样本由检查器每次现造（见脚本头部注释）"
+      },
+      "greenSample": {
+        "kind": "tree",
+        "source": "."
+      },
+      "checkerVersion": "ledger-live-verdict@1",
+      "timeoutMs": 20000,
+      "notes": "判据必须落在被测对象自身：凭据引用即须存在（仓库外历史凭据须登记缺口）；落点级故障与对象级判据分开报。红态样本每次现造。",
+      "proposal": "P-20260921-cred-freshness-evidence",
+      "activatedAt": "2026-09-21T11:16:02.037Z",
+      "spec": "scripts/checkers/ledger-live-verdict.mjs"
+    },
+    {
+      "kind": "checker",
+      "rule": "GATE-DISCIPLINE",
+      "command": [
+        "node",
+        "scripts/checkers/hooks-integrity.mjs"
+      ],
+      "expectRed": {
+        "exitCode": 1
+      },
+      "expectGreen": {
+        "exitCode": 0
+      },
+      "redSample": {
+        "kind": "tree",
+        "source": "test-fixtures/red"
+      },
+      "greenSample": {
+        "kind": "tree",
+        "source": "test/fixtures/checker/hooks-lf-green"
+      },
+      "checkerVersion": "hooks-integrity@1",
+      "timeoutMs": 20000,
+      "notes": "hook 完整性：行尾必须纯 LF / .gitattributes 必须显式钉 .githooks/* eol=lf / 真 git 仓时索引 mode 必须 100755（非 git 样本如实跳过）",
+      "proposal": "P-20260921-gate-discipline-hooks",
+      "activatedAt": "2026-09-21T11:16:02.346Z",
+      "spec": "scripts/checkers/hooks-integrity.mjs"
+    }
+  ],
   "inject": []
 }

@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "rule": "CRED-FRESHNESS",
+  "checkerRef": "@self/scripts/checkers/ledger-live-verdict.mjs",
+  "command": [
+    "node",
+    "scripts/checkers/ledger-live-verdict.mjs"
+  ],
+  "expectRed": {
+    "exitCode": 1
+  },
+  "expectGreen": {
+    "exitCode": 0
+  },
+  "redSample": {
+    "kind": "tree",
+    "source": "test-fixtures/red",
+    "note": "被检对象=当前项目根；红态样本由检查器每次现造（见脚本头部注释）"
+  },
+  "greenSample": {
+    "kind": "tree",
+    "source": "."
+  },
+  "checkerVersion": "ledger-live-verdict@1",
+  "timeoutMs": 20000,
+  "notes": "判据必须落在被测对象自身：凭据引用即须存在（仓库外历史凭据须登记缺口）；落点级故障与对象级判据分开报。红态样本每次现造。"
+}

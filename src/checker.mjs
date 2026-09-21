@@ -38,6 +38,32 @@ import { toPosix } from './platform/paths.mjs';
 export const CHECKER_SAMPLE_KINDS = Object.freeze(['tree']);
 export const DEFAULT_CHECKER_TIMEOUT_MS = 20000;
 
+/**
+ * checker 绑定的**载体标识**（单一权威源）。
+ *
+ * 为什么需要它：`verify` 写"验证凭证"时记的是 `target`，`plan` 判 verified 时要求"凭证 target 必须
+ * **恰是**某条绑定的载体"（对抗性 QA 7 号）。此前 verify 写的是 `checker:${command[0]}`（即
+ * `checker:node`），而绑定上**根本没有 `carrier` 字段** ⇒ plan 的"载体集合"为空 ⇒ 四条真跑过
+ * 验证的绑定全被报成"没跑过 verify"（实测：verify PASSED=5，plan VERIFIED=0）。
+ *
+ * 现在两边都读这一份：checker 的载体 = `checker:<规格文件>`（规格就是那条判据的"身份"），
+ * 没有规格时退回违规样本目录；两处口径**必须同源**，否则"可核对"这句话就是假的。
+ */
+export function carrierOfBinding(binding) {
+  if (binding === null || typeof binding !== 'object') return null;
+  if (binding.kind !== 'checker') {
+    return typeof binding.carrier === 'string' && binding.carrier !== '' ? binding.carrier : null;
+  }
+  // 口径必须与 `rk-effect apply` 打印的 `RK_EFFECT_APPLY_CARRIER` 一致（否则"可核对"就是假的）：
+  // 优先用**违规样本目录**（那条判据实际开火的对象），没有才退回规格文件。
+  const sample = binding.redSample !== null && typeof binding.redSample === 'object' ? binding.redSample.source : null;
+  if (typeof sample === 'string' && sample !== '') return `checker:${sample}`;
+  const spec = typeof binding.spec === 'string' && binding.spec !== ''
+    ? binding.spec
+    : (typeof binding.checkerRef === 'string' && binding.checkerRef !== '' ? binding.checkerRef : null);
+  return `checker:${spec ?? '(unknown)'}`;
+}
+
 /** 样本目录内容指纹（确定性的：相对路径排序 + 逐文件 sha256；跳过 `.git`） */
 export function treeHash(dir) {
   const root = resolve(dir);

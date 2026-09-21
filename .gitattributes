@@ -16,3 +16,8 @@ test/fixtures/**  -text
 # 现场（2026-09-21）：autocrlf=true 的机器上 checkout 会把它们转成 CRLF ⇒ ①与 hooks.json 的 sha256 清单不符
 # （verify 判 HOOK_MODIFIED）②POSIX 上 `#!/bin/sh\r` 直接坏掉 ⇒ 闸门变哑。显式钉 LF，别再靠机器配置。
 .githooks/*  text eol=lf
+
+# 红态/两态**样本树**一律按二进制对待：不让 git 做任何行尾转换（字节即判据）。
+# 为什么必须显式钉：`test-fixtures/red/.githooks/pre-commit` 是**故意写 CRLF** 的违规样本，
+# 而 `test-fixtures/red/test/**` 是**故意违规**的用例样本 —— 一转换，样本就不再是"那个违规现场"。
+test-fixtures/**  -text

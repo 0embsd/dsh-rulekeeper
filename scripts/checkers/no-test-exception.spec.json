@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "rule": "CAT-TECH",
+  "checkerRef": "@self/scripts/checkers/no-test-exception.mjs",
+  "command": [
+    "node",
+    "scripts/checkers/no-test-exception.mjs"
+  ],
+  "expectRed": {
+    "exitCode": 1
+  },
+  "expectGreen": {
+    "exitCode": 0
+  },
+  "redSample": {
+    "kind": "tree",
+    "source": "test-fixtures/red",
+    "note": "被检对象=当前项目根；红态样本由检查器每次现造（见脚本头部注释）"
+  },
+  "greenSample": {
+    "kind": "tree",
+    "source": "."
+  },
+  "checkerVersion": "no-test-exception@1",
+  "timeoutMs": 20000,
+  "notes": "deny 列表不得为测试方便开例外：src/** 的豁免表里不得出现 test/ 路径。红态样本每次现造。"
+}

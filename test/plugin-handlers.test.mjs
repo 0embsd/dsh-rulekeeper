@@ -16,9 +16,15 @@ import { join } from 'node:path';
 import { defaultHandlers } from '../src/handlers.mjs';
 import { sha256OfFile } from '../src/gate.mjs';
 import { PLUGIN_EVENTS, PLUGIN_TOOLS, toolDefinition } from '../src/plugin.mjs';
-import { cleanupAll, tempDir } from './helpers/sandbox.mjs';
+import { cleanupAll, isolateProcessUserLanding, tempDir } from './helpers/sandbox.mjs';
 
 test.after(cleanupAll);
+
+// 进程级落点隔离（教训 L001 的机制面）：本文件里有一处用例会临时改 `DSH_HOME`（boot 自检要模拟
+// 宿主目录），它自己的 `try/finally` 只保证**正常路径**复原 —— 一旦中间抛错，落在 env 上的就是那个
+// 临时目录之后的东西。把整棵用例进程的 `DSH_HOME` 先钉在一次性临时目录上，这一处改成"在一个已经
+// 隔离的进程里再临时改一次"，漏了也不会碰到真实落点。检查器：`scripts/checkers/test-isolation.mjs`。
+isolateProcessUserLanding('plugin-handlers-home');
 
 /** 造"项目 + 落点"（受保护路径可配） */
 function fixture(label, { protectedPaths = ['AGENTS.md'], mode = 'observe' } = {}) {

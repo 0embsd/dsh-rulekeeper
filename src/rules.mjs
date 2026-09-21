@@ -94,6 +94,7 @@ export function validateRules(obj) {
 export const BINDING_FIELDS = Object.freeze([
   'kind', 'rule', 'carrier', 'falsePositive', 'gate', 'patterns', 'proposal', 'activatedAt', 'notes',
   'command', 'expectRed', 'expectGreen', 'redSample', 'greenSample', 'sampleHash', 'checkerVersion', 'timeoutMs',
+  'spec', 'checkerRef',
 ]);
 
 /**
@@ -130,7 +131,7 @@ export function validateBindingEntry(entry, allowedKinds = ['file_untracked_chan
       problems.push('生效绑定的 patterns 必须是非空字符串数组（本次生效新增的保护面模式）');
     }
   }
-  for (const optional of ['falsePositive', 'gate', 'proposal', 'activatedAt', 'notes']) {
+  for (const optional of ['falsePositive', 'gate', 'proposal', 'activatedAt', 'notes', 'spec', 'checkerRef']) {
     if (Object.hasOwn(entry, optional) && entry[optional] !== null && typeof entry[optional] !== 'string') {
       problems.push(`生效绑定的 ${optional} 必须是字符串或 null`);
     }
