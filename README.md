@@ -166,6 +166,29 @@ rk-mutate --landing <落点> --id <条目id> ... --apply    # 真写：备份 + 
   **身份字段 `id`/`ts`/`rule` 禁改**（改了就不是"同一条教训"）。证据只增不改（`--set 证据加=…`）。
 - **幂等**：同一 id 已有未被取代的归档行 ⇒ 不重复追加。
 - 诚实边界：`--by` 是**声明**不是签名（与 `--by human` 同族）。
+> 新增的**可选契约位**（`repoKind` / `guardRef` / `activation` / `rk-mutate` 的归档行语义）见
+> [`CONTRACT-EXTENSIONS.md`](./CONTRACT-EXTENSIONS.md)。注意 `SCHEMA.md` 是 `src/schema.mjs` 的
+> **生成结果**，手改会被 `SCHEMA_DOC_DRIFT` 判红。
+### 审批三态：拒绝 / 协议对不上 / 通道不可用（2026-09-21）
+
+`rulekeeper_apply` 是**唯一**会去问真人的地方（经宿主 `ctx.userQuestions.ask()` 问活着的根 agent，
+子代理会被宿主判 `DELEGATED_CALLER`）。它的失败回答必须分成三态，因为处置完全不同：
+
+| 态 | decision | 含义 | 该怎么办 |
+|---|---|---|---|
+| 拒绝 | `rejected` | 人明确选了"拒绝" | 要改主意才能继续 |
+| 协议对不上 | `unresolved` | 应答形状不合法 / 没有本题的答案项（宿主版本或协议漂移） | 查协议，别当成人没答 |
+| **通道不可用** | `approval-unavailable`（`EFFECT_APPROVAL_UNAVAILABLE`） | 问到了问句，但拿不到"批准/拒绝"的选项（**本会话的交互式审批被禁用**） | 换会话，或走 CLI 等价通路 |
+
+三态**一律 fail-closed：一个字都不写**。不可用态会额外打印可执行的等价命令：
+
+```bash
+rk-effect apply --landing <落点> --proposal <id> --by human --apply
+```
+
+> **自曝（规则 43 同族，不得虚标）**：`--by human` 只是**声明**、不是签名；审批问答同样**没有签名**。
+> 上述三态改造只解决"**分不清哪种失败**"这个诊断问题，**不改变**隔离强度——真正的隔离仍在 git 层
+> （pre-commit 真阻断 / 分支保护 + required checks）与会话/权限边界。
 **机制面必填（四选一，2026-09-21）**：`record --mechanism` 只接受 `text`（承认仅文本，会被
 `RK_EFFECT_TEXT_ONLY` **计数**）/ `mechanized`（有机械判据 ⇒ `checks` 里必须真有绑定）/ `guard`
 （有插件拦截 ⇒ `gates` 里必须真有绑定）/ `question`（靠人工问句）。其余取值一律**用法错误** ——

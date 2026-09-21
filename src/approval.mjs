@@ -31,6 +31,26 @@ export const APPROVAL_DECISIONS = Object.freeze(['approve', 'reject', 'unknown']
 /** 凭证来源标记：只有本值算"锚定"（其余一律按"声明"处理，并且如实标注） */
 export const ANCHOR_SOURCE = 'user-questions';
 
+/**
+ * **审批通道不可用**的判定（2026-09-21，交接 A1）。
+ *
+ * 现场问题：审批提示被禁用的会话里，`rulekeeper_apply` 每次都回"应答无法判定为批准" ——
+ * 那句话让人**分不清**"我拒绝了""我没看到问题""这条路根本不通"。三者对处置完全不同：
+ *   · rejected   ⇒ 人要改主意才能继续；
+ *   · unknown    ⇒ 应答形状对不上（可能是宿主版本/协议漂移）；
+ *   · 不可用     ⇒ 这条路在当前会话**走不通**，要么换会话、要么走 CLI 的等价命令。
+ * 形状上，后者 = 拿不到**本问题**的应答项，或应答项里一个选项都没选中（空应答）。
+ */
+export function answererUnavailable(parsed) {
+  if (parsed === null || typeof parsed !== 'object') return true;
+  if (parsed.decision !== 'unknown') return false;
+  const selected = Array.isArray(parsed.selected) ? parsed.selected : [];
+  if (selected.length > 0) return false;                          // 选了别的 → 真的是"未批准"
+  const reason = String(parsed.reason ?? '');
+  if (reason.includes('形状不合法') || reason.includes('没有 questionId')) return false;  // 协议问题，不是"人没答"
+  return true;                                                     // 空应答 / 没有本题的答案
+}
+
 /** 造一条审批问句（交给 `ctx.userQuestions.ask()`） */
 export function buildApprovalQuestion({ rule, proposalId, summary, landing } = {}) {
   const id = `rk-apply-${String(proposalId ?? 'unknown')}`;

@@ -20,7 +20,7 @@ import { resolve } from 'node:path';
 
 import { reconWrite } from './gate.mjs';
 import { applyActivation, effectPlan } from './effect.mjs';
-import { buildApprovalQuestion, makeAnchoredApproval, parseApprovalAnswer } from './approval.mjs';
+import { answererUnavailable, buildApprovalQuestion, makeAnchoredApproval, parseApprovalAnswer } from './approval.mjs';
 import { record as ledgerRecord } from './ledger.mjs';
 import { isSafeId } from './proposal.mjs';
 import { readOptionalService } from './landing.mjs';
@@ -251,6 +251,20 @@ export function makeAnchoredApplyHandler({ ctx, cwd = process.cwd(), now = () =>
     }
     const parsed = parseApprovalAnswer(answer, question.id);
     if (parsed.decision !== 'approve') {
+      // **三态分开**（A1）：拒绝 / 协议对不上 / **这条路根本不通**。第三态最容易与第二态混淆，
+      // 而它的处置完全不同（换会话或走 CLI 等价命令），故给独立 decision + 独立错误码 + 可执行提示。
+      const unavailable = answererUnavailable(parsed);
+      if (unavailable) {
+        return {
+          ok: false,
+          decision: 'approval-unavailable',
+          code: 'EFFECT_APPROVAL_UNAVAILABLE',
+          reason: '**审批通道不可用**（问到了一条问句、但拿不到"批准/拒绝"的应答：本会话的交互式审批可能被禁用）'
+            + ' ⇒ 未做任何写入（fail-closed）。这不是"你拒绝了"，也不是"协议对不上"。'
+            + ` 等价通路：rk-effect apply --landing <落点> --proposal ${proposalId} --by human --apply（同一条唯一写通路：备份 → 回读校验 → 原子替换 → 失败回滚）`,
+          proposalId,
+        };
+      }
       return {
         ok: false,
         decision: parsed.decision === 'reject' ? 'rejected' : 'unresolved',
