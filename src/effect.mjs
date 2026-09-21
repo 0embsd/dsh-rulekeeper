@@ -45,6 +45,7 @@ import { CHECK_KINDS } from './checks.mjs';
 import { CLOSE_KNOWN_GATES, effectiveProtection, readGateLedger, reconWrite } from './gate.mjs';
 import { injectPlan } from './inject.mjs';
 import { STATUS_EVENT_CATEGORY, record as ledgerRecord, readLedger, supersededIds } from './ledger.mjs';
+import { MUTATE_MECHANISM } from './ledger-mutate.mjs';
 import { acquireLock, releaseLock } from './lock.mjs';
 import { offGuard } from './mode.mjs';
 import { toPosix } from './platform/paths.mjs';
@@ -415,6 +416,9 @@ export function ledgerGroups(landingDir) {
     // **状态事件行**同理：它是"这条历史行被取代了"的**迁移记录**，不是一条新教训
     // （否则一条 `STATUS_SUPERSEDE` 事件就会让那个 rule 重新出现在体检里、并报 TEXT_ONLY）。
     if (row.category === STATUS_EVENT_CATEGORY) continue;
+    // **归档行**（`rk mutate` 写的改写行）也不是"又踩了一次"：它改的是**同一条**教训的内容
+    // （旧行已被同批写下的状态事件取代）⇒ 计入复发会把"改个错别字"变成"复发一次"。
+    if (row.mechanism === MUTATE_MECHANISM) continue;
     const rule = canonicalRule(row.rule);
     const g = groups.get(rule) ?? { rule, count: 0, withActivation: 0, firstSeen: null, lastSeen: null, variants: new Set() };
     g.count += 1;

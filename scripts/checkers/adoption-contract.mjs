@@ -81,6 +81,8 @@ function inspectTree(treeRoot, rel) {
 
   const rulesRel = RULES.find((p) => existsSync(join(treeRoot, p)));
   const boundRules = new Map();
+  /** 本落点**真实存在**的拦截面：git 钩子名与 rules.json 的 gates 名（`guardRef` 的存在性判据） */
+  const realGuards = new Set();
   if (rulesRel !== undefined) {
     try {
       const parsed = JSON.parse(readFileSync(join(treeRoot, rulesRel), 'utf8'));
@@ -94,9 +96,22 @@ function inspectTree(treeRoot, rel) {
         const cur = boundRules.get(String(g?.rule ?? '')) ?? { checks: 0, gates: 0 };
         cur.gates += 1;
         boundRules.set(String(g?.rule ?? ''), cur);
+        if (g !== null && typeof g === 'object' && typeof g.gate === 'string' && g.gate !== '') realGuards.add(`gate:${g.gate}`);
       }
     } catch {
       // 绑定面不可读 ⇒ 下面一律按"没有绑定"判（fail-closed），不静默放过
+    }
+  }
+  // 已安装的 git 钩子（`hooks.json` 清单）；读不到 ⇒ 不把 `hook:*` 当存在（fail-closed）
+  const hooksRel = ['hooks.json', '.dsh-ai/rulekeeper/hooks.json'].find((p) => existsSync(join(treeRoot, p)));
+  if (hooksRel !== undefined) {
+    try {
+      const parsed = JSON.parse(readFileSync(join(treeRoot, hooksRel), 'utf8'));
+      for (const h of Array.isArray(parsed?.hooks) ? parsed.hooks : []) {
+        if (h !== null && typeof h === 'object' && typeof h.name === 'string' && h.name !== '') realGuards.add(`hook:${h.name}`);
+      }
+    } catch {
+      // 同上：读不到就不认
     }
   }
 
@@ -109,6 +124,8 @@ function inspectTree(treeRoot, rel) {
     // ⇒ 拿"教训须登记机制面"去判事件行属**对象错位**（同族：ledger-live-verdict 判"事件行的绝对
     // 路径不判红"）。绑定事实由 rules.json 承载，`rk-effect plan` 已单独判。
     if (row?.category === '生效登记' || row?.category === '生效退役') continue;
+    // **状态事件行与归档行**也不参与：它们是"改写/取代"的记录，不是新登记（`rk mutate` 写的）。
+    if (row?.category === '状态事件' || String(row?.mechanism ?? '') === 'mutate') continue;
     const m = typeof row?.mechanism === 'string' ? row.mechanism.trim() : '';
     // A. 机制面必填且四选一
     if (!MECHANISM_FACES.includes(m)) {
@@ -121,11 +138,16 @@ function inspectTree(treeRoot, rel) {
     if (m === 'mechanized' && bound.checks === 0) {
       hits.push(`${id}(${rule}): mechanism=mechanized 但 rules.json 的 checks 里没有这条绑定 ⇒ 空转的机制面声明`);
     }
-    if (m === 'guard' && bound.gates === 0) {
-      hits.push(`${id}(${rule}): mechanism=guard 但 rules.json 的 gates 里没有这条绑定 ⇒ 空转的机制面声明`);
+    // `guard` 档的判据是**点名 + 存在**（2026-09-21，交接第 2 步）：拦截面不只有 rules.json 的 gates，
+    // git 钩子同样是拦截面（预提交公开面门禁就是钩子）。故：缺 guardRef ⇒ 红（自称）；guardRef 指向的
+    // 拦截现在不在 ⇒ 红（空转/被卸载）。
+    if (m === 'guard') {
+      const ref = typeof row?.guardRef === 'string' ? row.guardRef.trim() : '';
+      if (ref === '') hits.push(`${id}(${rule}): mechanism=guard 但缺 guardRef（"我靠拦截面"没说靠哪个 ⇒ 自称）`);
+      else if (!realGuards.has(ref)) hits.push(`${id}(${rule}): guardRef=${ref} 在当前落点核不到（已装钩子/gates：${[...realGuards].join(' ') || '（无）'}）⇒ 空转的拦截面声明`);
     }
   }
-  return { hits, textOnly, rows, rulesRel };
+  return { hits, textOnly, rows, rulesRel, realGuards: [...realGuards] };
 }
 
 // ── 1) 被检对象：真实账本 ──────────────────────────────────────────────────────

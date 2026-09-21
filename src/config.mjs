@@ -14,6 +14,8 @@ import { dshHome, resolveProjectLanding, resolveUserLanding } from './platform/p
 export const SCHEMA_VERSION = 1;
 export const MODES = Object.freeze(['observe', 'armed', 'off']);
 export const CONFIG_FILE = 'config.json';
+/** 仓库性质（**公开面黑名单分档**的依据，2026-09-21）：见 src/repo-patterns.mjs 的分档口径 */
+export const REPO_KINDS = Object.freeze(['public', 'private']);
 
 // dshHome 的**单点定义**已挪到 platform/paths.mjs（LF-130 平台层：home 四级兜底）；
 // 这里 re-export 以保持既有调用方（selfcheck / 测试）不变——避免同一逻辑两处实现。
@@ -47,6 +49,13 @@ export function validateConfig(obj) {
   // 锚定式人签字（2026-09-19，契约扩展位）：落点级开关。true ⇒ 没有"问过真人"的凭证一律不许写 rules.json。
   if (Object.hasOwn(obj, 'requireAnchoredApproval') && typeof obj.requireAnchoredApproval !== 'boolean') {
     out.push(`requireAnchoredApproval 必须是布尔（实际 ${JSON.stringify(obj.requireAnchoredApproval)}）`);
+  }
+  // 仓库性质（2026-09-21，契约扩展位）：决定公开面黑名单跑哪一档。
+  //   public  → 完整表（含"本仓自己的名字"）
+  //   private → 只跑基础设施/凭据类
+  // **缺省不算错**（由 src/repo-patterns.mjs 自动探测：远端已知公开托管商 ⇒ public，否则 private）。
+  if (Object.hasOwn(obj, 'repoKind') && !REPO_KINDS.includes(obj.repoKind)) {
+    out.push(`repoKind 必须是 ${REPO_KINDS.join('|')} 之一（实际 ${JSON.stringify(obj.repoKind)}）`);
   }
   return out;
 }

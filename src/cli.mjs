@@ -40,7 +40,9 @@ import { carrierOfBinding } from './checker.mjs';
 import { adoptionReport, writeDrafts } from './adopt.mjs';
 import { importLedger } from './importer.mjs';
 import { landingFingerprint, migrateLanding, planMigration } from './migrate.mjs';
-import { MECHANISM_FACE_DEFAULT, MECHANISM_FACES, query as queryLedger, readLedger, record, summary as ledgerSummary } from './ledger.mjs';
+import { MECHANISM_FACE_DEFAULT, MECHANISM_FACES, makeId, query as queryLedger, readLedger, record, summary as ledgerSummary } from './ledger.mjs';
+import { appendRowsVerified, installedHooks, registeredGates, verifyGuardRef } from './authier.mjs';
+import { parseSets, planMutation } from './ledger-mutate.mjs';
 import { listLogFiles, readEntries, rotateIfNeeded, totalBytes } from './log.mjs';
 import { RC, checkRcTable, renderRcTable } from './rc.mjs';
 import { checkSchema, renderSchemaMarkdown } from './schema.mjs';
@@ -206,7 +208,7 @@ export const USAGE_RULEKEEPER = `dsh-rulekeeper 0.1.0
   dsh-rulekeeper --help
 退出码: 0 成功 / 2 用法错误 / 1 运行失败 / 5 该能力尚未实现（见 src/rc.mjs 契约表）`;
 
-export const SUBCOMMANDS = Object.freeze(['init', 'check', 'snap', 'record', 'rules', 'evolve', 'report', 'gate', 'redact', 'migrate', 'effect']);
+export const SUBCOMMANDS = Object.freeze(['init', 'check', 'snap', 'record', 'mutate', 'rules', 'evolve', 'report', 'gate', 'redact', 'migrate', 'effect']);
 
 export const USAGE_SELFCHECK = `用法: rk-selfcheck --root <dsh-rulekeeper 包根> [--project <项目根>] [--json]
 退出码: 0 通过 / 1 有违规 / 2 用法错误`;
@@ -1319,7 +1321,16 @@ export const SUB_USAGE = Object.freeze({
     + '说明: LF-300 pre-image 快照 = 备份 + **回读校验** + snapshots/index.jsonl 登记（等价于 `rk-snap take`）；\n'
     + '      回滚用 `rk-snap restore --path <路径>`，对账用 `rk-snap recon`。\n'
     + '退出码: 0 成功 / 1 失败（含回读不一致）/ 2 用法错误',
-  record: '用法: dsh-rulekeeper record --landing <落点> --rule <r> --problem <p> --root-cause <r> --solution <s> [--category <c>] [--mechanism <m>] [--evidence <a,b>] [--now <ISO>]\n退出码: 0 成功 / 1 写入失败 / 2 用法错误',
+  record: '用法: dsh-rulekeeper record --landing <落点> --rule <r> --problem <p> --root-cause <r> --solution <s> [--category <c>] [--mechanism <m>] [--guard-ref <hook:x|gate:y>] [--evidence <a,b>] [--now <ISO>]\n退出码: 0 成功 / 1 写入失败 / 2 用法错误',
+  mutate: '用法: dsh-rulekeeper mutate --landing <落点> --id <条目id> --set <字段>=<值> [--set 证据加=<文本>]... --by <谁> --reason <为什么> [--apply] [--now <ISO>] [--json]\n'
+    + '说明: **改一条已有教训**的唯一通路（不必再手工编辑 ledger.jsonl）。默认 dry-run；--apply 才落盘。\n'
+    + '      不改历史行：追加一条**归档行**（mechanism=mutate，evidence 首项 MUTATES <id>）+ 一条**状态事件行**（STATUS_SUPERSEDE <id>），\n'
+    + '      由读侧 supersededIds() fold ⇒ 效果上"这条教训变了"，物理上历史逐字节不变。\n'
+    + '      可改字段：problem / root_cause / solution / mechanism / guard_ref / category（身份字段 id/ts/rule 禁改）；\n'
+    + '      可重复 --set 证据加=... 往证据里加一项（不改写已有证据）。\n'
+    + '      落盘路径：备份（回读 sha256）→ 写临时件 → 回读校验（行数 + 旧行确实被取代）→ 原子替换 → 失败逐字节回滚。\n'
+    + '      诚实边界：--by 是**声明**不是签名（与 --by human 同族）。\n'
+    + '退出码: 0 成功（或 dry-run 通过）/ 1 判定不合格（目标不存在/无可改内容/回滚）/ 2 用法错误',
   rules: USAGE_RULES,
   redact: USAGE_REDACT,
   evolve: '用法: dsh-rulekeeper evolve --landing <落点> [--quality <file.json>] [--source auto|human] [--escalate-gate] [--rule <纪律>] [--dry-run] [--now <ISO>] [--json]\n'
@@ -2300,6 +2311,7 @@ export function runRulekeeperSub(command, argv, io = defaultIo(), env = process.
   switch (command) {
     case 'check': return runCliCheck(argv, io, env);
     case 'record': return runCliRecord(argv, io, env);
+    case 'mutate': return runCliMutate(argv, io, env);
     case 'rules': return runRules(argv, io, env);
     case 'report': return runCliReport(argv, io, env);
     case 'snap': return runSnap(['take', ...argv], io, env);
@@ -2832,7 +2844,7 @@ function runCliEffect(argv, io, env) {
 function runCliRecord(argv, io, env) {
   const parsed = parseSub('record', argv, {
     '--landing': 'string', '--rule': 'string', '--category': 'string', '--problem': 'string',
-    '--root-cause': 'string', '--solution': 'string', '--mechanism': 'string', '--evidence': 'string', '--now': 'string',
+    '--root-cause': 'string', '--solution': 'string', '--mechanism': 'string', '--guard-ref': 'string', '--evidence': 'string', '--now': 'string',
     '--on-near-dup': 'string', '--near-dup-threshold': 'string',
   }, io);
   if (parsed.error !== null) return parsed.error;
@@ -2876,12 +2888,34 @@ function runCliRecord(argv, io, env) {
   // 体检面没有任何东西能据此判定 ⇒ 免责成本太低 = 等于没登记。四选一：
   //   text        承认仅文本（会被计入 `RK_EFFECT_TEXT_ONLY`，可见、不静默）
   //   mechanized  有机械判据（adopt 会要求 rules.json 里真有这条绑定）
-  //   guard       有插件拦截（同上，要求 gates 里有绑定）
+  //   guard       **拦截面**：git 钩子或 rules.json 的 gates 条目（必须用 --guard-ref 点名靠哪个，
+  //               且那个拦截必须真的在 —— 见 src/authier.mjs 的 verifyGuardRef）
   //   question    靠人工问句（收尾/CR 清单里的固定问句）
   const mechanism = flags.mechanism === undefined ? MECHANISM_FACE_DEFAULT : String(flags.mechanism).trim();
   if (!MECHANISM_FACES.includes(mechanism)) {
     io.err(`dsh-rulekeeper record: --mechanism 只能是四选一 ${MECHANISM_FACES.join('|')}（实得 ${JSON.stringify(flags.mechanism)}）\n`
-      + '  说明: text=承认仅文本(会被计数) / mechanized=有机械判据 / guard=有插件拦截 / question=靠人工问句\n');
+      + '  说明: text=承认仅文本(会被计数) / mechanized=有机械判据 / guard=有拦截面(钩子或门禁) / question=靠人工问句\n');
+    return RC.USAGE;
+  }
+  // ── `guard` 档必须点名**靠哪个拦截**，且那个拦截必须真的在（2026-09-21，交接第 2 步）──────
+  // 只写 `mechanism=guard` 等于"我靠拦截面"——没说靠哪个 ⇒ 又成了自称（规则 43 同族）。
+  // 形状 `hook:<名>` / `gate:<名>`；存在性由本模块核（钩子在 hooks.json 清单里 / 门禁在 rules.json 里）。
+  let guardRef = null;
+  if (mechanism === 'guard') {
+    if (flags['guard-ref'] === undefined || String(flags['guard-ref']).trim() === '') {
+      io.err('dsh-rulekeeper record: mechanism=guard 时必须给 --guard-ref <hook:名|gate:名>（否则"我靠拦截面"是自称，不可核）\n'
+        + `  本落点已装钩子: ${installedHooks(target.landing).names.join('/') || '（无）'}\n`
+        + `  已登记门禁: ${registeredGates(target.landing).names.join('/') || '（无）'}\n`);
+      return RC.USAGE;
+    }
+    const verdict = verifyGuardRef(target.landing, String(flags['guard-ref']).trim());
+    if (verdict.ok !== true) {
+      io.err(`dsh-rulekeeper record: --guard-ref 核不过（${verdict.code}）: ${verdict.reason}\n`);
+      return RC.USAGE;
+    }
+    guardRef = verdict.ref;
+  } else if (flags['guard-ref'] !== undefined) {
+    io.err(`dsh-rulekeeper record: --guard-ref 只在 --mechanism guard 时有意义（当前 ${mechanism}）\n`);
     return RC.USAGE;
   }
   // ── 入库门：这条新问题与账本里已有的某条**过于相似**吗？（与已有行比，不含自己）──────
@@ -2914,6 +2948,7 @@ function runCliRecord(argv, io, env) {
     root_cause: flags['root-cause'],
     solution: flags.solution,
     mechanism,
+    ...(guardRef === null ? {} : { guardRef }),
     evidence,
   }, { landingDir: target.landing, now });
   if (!result.ok) {
@@ -2922,13 +2957,115 @@ function runCliRecord(argv, io, env) {
   }
   io.out(line(`RK_RECORD_ID=${result.entry.id}`));
   io.out(line(`RK_RECORD_RULE=${result.entry.rule}`));
+  io.out(line(`RK_RECORD_MECHANISM=${result.entry.mechanism}${result.entry.guardRef === undefined ? '' : ` guardRef=${result.entry.guardRef}`}`));
   io.out(line(`RK_RECORD_BYTES=${result.bytes}`));
   io.out(resultLine('RECORD', true));
   return RC.OK;
 }
 
-function runCliReport(argv, io, env) {
-  const parsed = parseSub('report', argv, { '--landing': 'string', '--project': 'string', '--now': 'string', '--json': 'boolean' }, io);
+/**
+ * `mutate` —— **改一条已有教训**的唯一通路（2026-09-21，交接第 3 步）。
+ *
+ * 为什么必须有：账本 append-only，"这条机械面登记错了 / 证据写错了"此前只能**手工编辑
+ * ledger.jsonl** —— 没有备份、没有回读校验、没有审计。本命令把那条路封掉：
+ *   默认 dry-run → `--apply` 才落盘 → 备份（回读 sha256）→ 写临时件 → 回读校验（行数 + 旧行确实
+ *   被取代 + 新行 id 在）→ 原子替换 → 失败逐字节回滚。
+ *
+ * 历史行**逐字节不变**：追加"归档行 + 状态事件行"，由 `supersededIds()` fold。
+ * 诚实边界：`--by` 是**声明**不是签名（与 `--by human` 同族）。
+ */
+function runCliMutate(argv, io, env) {
+  const parsed = parseSub('mutate', argv, {
+    '--landing': 'string', '--id': 'string', '--set': 'string[]', '--by': 'string', '--reason': 'string',
+    '--apply': 'boolean', '--now': 'string', '--json': 'boolean',
+  }, io);
+  if (parsed.error !== null) return parsed.error;
+  const flags = parsed.flags;
+  const target = resolveLanding('mutate', flags, io);
+  if (target.error !== null) return target.error;
+  let now;
+  try {
+    now = resolveNow({ argv, env }).date;
+  } catch (err) {
+    if (err instanceof UsageError) {
+      io.err(`dsh-rulekeeper mutate: ${err.message}\n`);
+      return RC.USAGE;
+    }
+    throw err;
+  }
+  const missing = ['id', 'by', 'reason', 'set'].filter((k) => flags[k] === undefined);
+  if (missing.length > 0) {
+    io.err(`dsh-rulekeeper mutate: 缺少必填参数 ${missing.map((k) => `--${k}`).join(' ')}\n${SUB_USAGE.mutate}\n`);
+    return RC.USAGE;
+  }
+  const parsedSets = parseSets(Array.isArray(flags.set) ? flags.set : [flags.set]);
+  if (parsedSets.ok !== true) {
+    for (const p of parsedSets.problems) io.err(`dsh-rulekeeper mutate: ${p}\n`);
+    return RC.USAGE;
+  }
+  const rows = readLedger(target.landing).values;
+  const planned = planMutation(rows, {
+    targetId: String(flags.id),
+    sets: parsedSets.sets,
+    addEvidence: parsedSets.addEvidence,
+    by: String(flags.by),
+    reason: String(flags.reason),
+    now,
+    newId: makeId(now),
+  });
+  if (planned.ok !== true) {
+    for (const p of planned.problems ?? ['未知问题']) io.err(`dsh-rulekeeper mutate: ${p}\n`);
+    io.out(resultLine('MUTATE', false));
+    return RC.FAIL;
+  }
+  io.out(line(`RK_MUTATE_LANDING=${toPosix(target.landing)}`));
+  io.out(line(`RK_MUTATE_TARGET=${String(flags.id)} RULE=${planned.oldRow.rule} DRYRUN=${flags.apply === true ? 0 : 1}`));
+  if (planned.already === true) {
+    io.out(line('RK_MUTATE_ALREADY=1'));
+    io.out(line('RK_MUTATE_NOTE=该 id 已有一条未被取代的归档行 ⇒ 不重复追加（幂等）'));
+    if (flags.json === true) io.out(jsonStable({ targetId: String(flags.id), already: true }));
+    io.out(resultLine('MUTATE', true));
+    return RC.OK;
+  }
+  io.out(line(`RK_MUTATE_CHANGED=${planned.changed.join(',')}`));
+  io.out(line(`RK_MUTATE_NEW_ID=${planned.newRow.id}`));
+  for (const [key, value] of Object.entries(parsedSets.sets)) {
+    const before = escapeControl(String(planned.oldRow[key] ?? ''));
+    io.out(line(`RK_MUTATE_FIELD ${key}: ${before.slice(0, 80)} -> ${escapeControl(String(value)).slice(0, 80)}`));
+  }
+  for (const e of parsedSets.addEvidence) io.out(line(`RK_MUTATE_EVIDENCE_ADD ${escapeControl(e).slice(0, 120)}`));
+
+  if (flags.apply !== true) {
+    io.out(line('RK_MUTATE_APPLIED=0'));
+    io.out(line('（dry-run：加 --apply 才落盘；落盘 = 备份 + 回读校验 + 原子替换 + 失败逐字节回滚）'));
+    if (flags.json === true) io.out(jsonStable({ newRow: planned.newRow, statusRow: planned.statusRow, changed: planned.changed }));
+    io.out(resultLine('MUTATE', true));
+    return RC.OK;
+  }
+
+  const written = appendRowsVerified({
+    landingDir: target.landing,
+    rows: [planned.newRow, planned.statusRow],
+    expectSuperseded: [String(flags.id)],
+    now,
+  });
+  io.out(line(`RK_MUTATE_BACKUP=${written.backup ?? '(none)'}`));
+  io.out(line(`RK_MUTATE_SHA_BEFORE=${written.beforeSha ?? '(none)'} AFTER=${written.afterSha ?? '(none)'}`));
+  if (written.rolledBack === true) io.out(line('RK_MUTATE_ROLLED_BACK=1'));
+  if (written.ok !== true) {
+    io.err(`dsh-rulekeeper mutate: ${written.code}: ${written.reason}\n`);
+    io.out(resultLine('MUTATE', false));
+    return RC.FAIL;
+  }
+  io.out(line(`RK_MUTATE_LINES=${written.lines}`));
+  io.out(line('RK_MUTATE_APPLIED=1'));
+  io.out(line('RK_MUTATE_NOTE=新行是**归档行**；历史行逐字节不变（读侧 supersededIds() fold）'));
+  if (flags.json === true) io.out(jsonStable({ applied: true, backup: written.backup, lines: written.lines, newRow: planned.newRow }));
+  io.out(resultLine('MUTATE', true));
+  return RC.OK;
+}
+
+function runCliReport(argv, io, env) {  const parsed = parseSub('report', argv, { '--landing': 'string', '--project': 'string', '--now': 'string', '--json': 'boolean' }, io);
   if (parsed.error !== null) return parsed.error;
   const target = resolveLanding('report', parsed.flags, io);
   if (target.error !== null) return target.error;

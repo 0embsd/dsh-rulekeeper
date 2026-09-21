@@ -30,7 +30,8 @@ import { validateUncheckableDeclaration } from './uncheckable.mjs';
 import { redactValue } from './redact.mjs';
 import { offGuard } from './mode.mjs';
 import { pathKey, resolveProjectLanding, toPosix } from './platform/paths.mjs';
-import { findPublicFaceLeaks, scanPublicFacePaths } from './selfcheck.mjs';
+import { PUBLIC_FACE_FORBIDDEN, findPublicFaceLeaks, scanPublicFacePaths } from './selfcheck.mjs';
+import { resolveRepoPatterns } from './repo-patterns.mjs';
 
 /** 工具自产物/非项目目录：任何判据都不得把它们当"项目文件"（㉚） */
 export const SELF_ARTIFACT_DIRS = Object.freeze(['.git', 'node_modules', '.dsh-ai']);
@@ -355,10 +356,17 @@ export function precommitGate(opts = {}) {
   //   而那要等到"有人跑自检"。这里在**提交那一刻**对暂存文件跑同一份模式表 ⇒ 当场被拒。
   // 为什么看工作区而不是 `git show :<path>`：S8 管的是"这段文字会不会进公开仓"，暂存区与
   //   工作区在本仓的实际流程里一致（且 `stagedBlobSha` 已单独负责内容指纹对账）。
-  for (const leak of scanPublicFacePaths(repoRoot, staged.paths)) {
+  // **按仓库性质分档**（2026-09-21）：公开仓跑完整表；私有仓只跑基础设施/凭据类（"本仓自己的名字"
+  //   在私有仓里没有泄漏语义）。档位由落点 config 的 `repoKind` 声明，未声明则按远端探测，兜底 private。
+  //   注：档位只作**返回字段**上报（`leakMode`），**不进 findings** —— findings 一旦非空 `ok` 就为 false，
+  //   把"档位是 private"当发现会让私有仓的每次提交都判红（那就成了自己拦自己）。
+  // 注意用 `runGitRaw`（(repoRoot, argv) -> {status, stdout}），不是 `runGit`（不同的调用形态）；
+  // `detectRepoKind` 只读 `git config --get remote.origin.url`，两者都兼容。
+  const repoPatterns = resolveRepoPatterns({ root: repoRoot, landingDir: landing, runGitRaw });
+  for (const leak of scanPublicFacePaths(repoRoot, staged.paths, { forbidden: repoPatterns.forbidden })) {
     findings.push({
       code: 'GATE_PRECOMMIT_INTERNAL_LEAK',
-      message: `暂存文件出现${leak.why}「${leak.match}」: ${leak.rel}（公开仓不得暴露内部标识/本地路径/基础设施信息；改掉措辞再提交）`,
+      message: `暂存文件出现${leak.why}「${leak.match}」: ${leak.rel}（${repoPatterns.kind === 'public' ? '公开仓不得暴露内部标识/本地路径/基础设施信息' : '私有仓不得暴露基础设施信息/凭据'}；改掉措辞再提交）`,
       path: leak.rel,
     });
   }
@@ -451,6 +459,7 @@ export function precommitGate(opts = {}) {
     source: protection.source,
     patterns: protection.patterns.length,
     mode: protection.mode,
+    leakMode: { kind: repoPatterns.kind, source: repoPatterns.source, patterns: repoPatterns.forbidden.length },
     staged: staged.paths.map((p) => toPosix(p)),
     protectedStaged,
     violations,
@@ -504,6 +513,8 @@ export function commitPaths(repoRoot, sha, runGitRaw = defaultRunGitRaw) {
  */
 export function commitMessageGate(opts = {}) {
   const runGit = opts.runGit ?? defaultRunGit;
+  // 档位解析（公开仓完整表 / 私有仓只跑基础设施类）：区间模式与单文件模式共用
+  const leakPatterns = resolveLeakPatterns(opts);
   // ── 区间模式（pre-push）：把区间里**每个提交**的正文都扫一遍 ─────────────────────
   if (typeof opts.range === 'string' && opts.range.trim() !== '') {
     const range = opts.range.trim();
@@ -525,7 +536,7 @@ export function commitMessageGate(opts = {}) {
       const body = sep < 0 ? chunk : chunk.slice(sep + 1);
       const stripped = stripMessageForScan(body);
       scannedLines += stripped.length;
-      const leaks = findPublicFaceLeaks('COMMIT_EDITMSG', stripped.join('\n')).map((leak) => ({
+      const leaks = findPublicFaceLeaks('COMMIT_EDITMSG', stripped.join('\n'), leakPatterns.forbidden).map((leak) => ({
         code: 'GATE_COMMITMSG_INTERNAL_LEAK',
         message: `提交 ${sha.slice(0, 8)} 的正文出现${leak.why}「${leak.match}」（公开仓的正文同样算公开面；**推送前**改掉：amend 或 rebase 改消息）`,
         commit: sha.slice(0, 8),
@@ -555,9 +566,9 @@ export function commitMessageGate(opts = {}) {
     };
   }
   const lines = stripMessageForScan(raw);
-  const findings = findPublicFaceLeaks('COMMIT_EDITMSG', lines.join('\n')).map((leak) => ({
+  const findings = findPublicFaceLeaks('COMMIT_EDITMSG', lines.join('\n'), leakPatterns.forbidden).map((leak) => ({
     code: 'GATE_COMMITMSG_INTERNAL_LEAK',
-    message: `提交正文出现${leak.why}「${leak.match}」（公开仓的正文同样算公开面；改掉措辞再提交）`,
+    message: `提交正文出现${leak.why}「${leak.match}」（${leakPatterns.kind === 'public' ? '公开仓的正文同样算公开面' : '私有仓的正文同样不得出现基础设施信息/凭据'}；改掉措辞再提交）`,
     match: leak.match,
   }));
   return { ok: findings.length === 0, mode: 'file', files: [messageFile], scannedLines: lines.length, commits: [], findings };
@@ -576,13 +587,30 @@ function stripMessageForScan(raw) {
 }
 
 /**
+ * 公开面黑名单的**分档解析**（2026-09-21，交接第 1 步）：三类门（提交正文 / 引用名 / 暂存文件）
+ * 都要回答同一个问题"这个仓该跑哪一档"，故口径只写一份。
+ *
+ * 三种用法：
+ *   · `{ forbidden }`（调用方自己解析过）⇒ 直接用；
+ *   · `{ landingDir }`（钩子/CLI 手上有落点）⇒ 读 config 的 `repoKind`，未声明则按远端探测；
+ *   · 都没有 ⇒ **公开仓完整表**（保守默认：不确定就更严，宁可多扫一类）。
+ */
+function resolveLeakPatterns(opts = {}) {
+  if (Array.isArray(opts.forbidden)) return { kind: opts.repoKind ?? 'public', source: 'explicit', forbidden: opts.forbidden };
+  if (typeof opts.landingDir === 'string' && opts.landingDir !== '') {
+    return resolveRepoPatterns({ root: opts.repoRoot, landingDir: opts.landingDir, runGitRaw: opts.runGitRaw });
+  }
+  return { kind: 'public', source: 'default', forbidden: PUBLIC_FACE_FORBIDDEN };
+}
+
+/**
  * **引用名（分支 / tag）的公开面门禁**（2026-09-21，形状同一个洞的第三块）。
  *
  * 为什么必须有：公开面 = **一切随推送离开本机的内容**。除文件与提交正文外，**引用名**同样会公开
  * （`refs/heads/<名字>` 会出现在 GitHub 的分支列表里，且常被写进 release/PR）。本地能管的就这一块：
  * `pre-push` 的 stdin 里本来就带着 `<localRef> <localSha> <remoteRef> <remoteSha>`，顺手扫即可。
  * 边界（如实）：PR 描述、issue 正文、CI 日志属**远端 API 面**，本机钩子天生看不见。
- * @param {{text?: string, refs?: string[]}} opts
+ * @param {{text?: string, refs?: string[], forbidden?: Array, landingDir?: string, repoRoot?: string}} opts
  * @returns {{ok: boolean, refs: string[], findings: object[]}}
  */
 export function refsGate(opts = {}) {
@@ -600,8 +628,10 @@ export function refsGate(opts = {}) {
     }
   }
   const findings = [];
+  // 档位解析（公开仓完整表 / 私有仓只跑基础设施类）：见 resolveLeakPatterns 的注释
+  const leakPatterns = resolveLeakPatterns(opts);
   for (const name of names) {
-    for (const leak of findPublicFaceLeaks('REFS', name)) {
+    for (const leak of findPublicFaceLeaks('REFS', name, leakPatterns.forbidden)) {
       findings.push({
         code: 'GATE_REF_INTERNAL_LEAK',
         message: `推送的引用名出现${leak.why}「${leak.match}」（引用名同样是公开面：会出现在远端分支/tag 列表里）`,

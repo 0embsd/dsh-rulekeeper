@@ -19,7 +19,7 @@ import { FIXTURES_DIR, cleanupAll, freshProject, tempDir } from './helpers/sandb
 test.after(cleanupAll);
 
 const RULES_OK = join(FIXTURES_DIR, 'rules-ok.json');
-const SUBCOMMAND_LIST = ['init', 'check', 'snap', 'record', 'rules', 'evolve', 'report', 'gate', 'redact', 'migrate', 'effect'];
+const SUBCOMMAND_LIST = ['init', 'check', 'snap', 'record', 'mutate', 'rules', 'evolve', 'report', 'gate', 'redact', 'migrate', 'effect'];
 
 function capture(fn) {
   let out = '';

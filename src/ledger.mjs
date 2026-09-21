@@ -36,12 +36,35 @@ export const REQUIRED_STRING_FIELDS = Object.freeze([
  *
  *   text        承认仅文本、不拦（必须被**计数**暴露，不得静默）
  *   mechanized  有机械判据 ⇒ `rules.json` 的 `checks` 里必须有这条绑定
- *   guard       有插件拦截 ⇒ `rules.json` 的 `gates` 里必须有这条绑定
+ *   guard       **拦截面**：git 钩子（pre-commit / commit-msg / pre-push / post-commit）或
+ *               `rules.json` 的 `gates` 条目 —— 两者都是"真的把动作挡下来"的位置（见 GUARD_REF_KINDS）
  *   question    靠人工问句（收尾/CR 清单里的固定问句）
  */
 export const MECHANISM_FACES = Object.freeze(['text', 'mechanized', 'guard', 'question']);
 /** 未显式给机制面时的默认档（**仍会被计数**，不是"免检"） */
 export const MECHANISM_FACE_DEFAULT = 'text';
+
+/**
+ * `guard` 档的**声明形态**：`<种类>:<引用>`（2026-09-21，交接第 2 步）。
+ *
+ * 为什么需要它：`mechanism: 'guard'` 只说"我靠拦截面"，**没说靠哪个拦截** —— 那又变成自称
+ * （规则 43 同族）。形状：
+ *   · `hook:<钩子名>` —— git 钩子（pre-commit / commit-msg / pre-push / post-commit）
+ *   · `gate:<门禁名>` —— `rules.json` 的 `gates` 条目
+ * 落盘前必须**真的存在**（钩子在 `hooks.json` 清单里 / 门禁在 `rules.json` 里）⇒ 由写通路核。
+ */
+export const GUARD_REF_KINDS = Object.freeze(['hook', 'gate']);
+
+/** 解析 guardRef 的**形状**；返回问题列表（空 = 合法）。"引用是否真的存在"要读落点，属写通路的职责。 */
+export function validateGuardRef(ref) {
+  if (typeof ref !== 'string' || ref.trim() === '') return ['guardRef 必须是非空字符串'];
+  const m = /^([a-z]+):(.+)$/.exec(ref.trim());
+  if (m === null) return [`guardRef 形态必须是 <种类>:<引用>（可选 ${GUARD_REF_KINDS.join('|')}），实得 ${JSON.stringify(ref)}`];
+  const problems = [];
+  if (!GUARD_REF_KINDS.includes(m[1])) problems.push(`guardRef 的种类必须是 ${GUARD_REF_KINDS.join('|')} 之一（实得 ${m[1]}）`);
+  if (m[2].trim() === '' || /\s/.test(m[2])) problems.push(`guardRef 的引用不得为空或含空白（实得 ${JSON.stringify(m[2])}）`);
+  return problems;
+}
 
 export function ledgerPath(landingDir) {
   return join(landingDir, LEDGER_FILE);
@@ -83,6 +106,11 @@ export function normalizeEntry(input, opts = {}) {
       solution: input.solution,
       evidence: Array.isArray(input.evidence) ? input.evidence : [],
       mechanism: input.mechanism,
+      // P2-2（2026-09-21）：`guard` 档必须点名**靠哪个拦截**（`hook:<名>` / `gate:<名>`）。
+      // 空值不入库（保持既有行形状不变，append-only 兼容）——与本函数对 `activation` 的处理同法。
+      ...(typeof input.guardRef === 'string' && input.guardRef.trim() !== ''
+        ? { guardRef: input.guardRef.trim() }
+        : {}),
       // ↓ 以下四个是**派生字段**：行内只记录"写入时的事实"，聚合读数一律用 derive* 重算
       recurrence: 1,
       first_seen: ts,

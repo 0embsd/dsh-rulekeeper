@@ -19,9 +19,11 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 
-import { MECHANISM_FACES } from './ledger.mjs';
+import { MECHANISM_FACES, STATUS_EVENT_CATEGORY } from './ledger.mjs';
 import { readLedger } from './ledger.mjs';
 import { EFFECT_EVENT_CATEGORY, EFFECT_RETIRE_CATEGORY, ruleBindings } from './effect.mjs';
+import { MUTATE_MECHANISM } from './ledger-mutate.mjs';
+import { verifyGuardRef } from './authier.mjs';
 import { loadLandingRules } from './rules.mjs';
 import { buildProposal, writeProposal, listProposals } from './proposal.mjs';
 import { canonicalRule } from './ruleid.mjs';
@@ -113,8 +115,29 @@ export function adoptionReport(opts = {}) {
   // "事件行的绝对路径不判红"同族）。绑定事实本身由 `rules.json` 承载，`rk-effect plan` 已单独判。
   const rows = readLedger(landingDir).values.filter((r) => r !== null && typeof r === 'object');
   const eventRows = rows.filter((r) => r.category === EFFECT_EVENT_CATEGORY || r.category === EFFECT_RETIRE_CATEGORY);
-  const lessonRows = rows.filter((r) => r.category !== EFFECT_EVENT_CATEGORY && r.category !== EFFECT_RETIRE_CATEGORY);
+  // **归档行**（`rk mutate` 写的改写行）与状态事件行一样不进机制面统计：它是同一条教训的**改写**，
+  // 不是新登记（否则每次改一条就把那个 rule 的机制面重新判一遍）。
+  const lessonRows = rows.filter((r) => r.category !== EFFECT_EVENT_CATEGORY && r.category !== EFFECT_RETIRE_CATEGORY
+    && r.category !== STATUS_EVENT_CATEGORY && r.mechanism !== MUTATE_MECHANISM);
   const byRule = mechanismStats(lessonRows);
+  // ── 段②b：`guard` 档必须点名靠哪个拦截，且那个拦截必须真的在（2026-09-21，交接第 2 步）──
+  // 只写 `mechanism=guard` 是自称（规则 43 同族）；`guardRef` 的**存在性**在这里核（写入时已核过一次，
+  // 但拦截可能被卸载 ⇒ 落点侧也要有"现在还成立吗"的读者面）。
+  const guardRows = lessonRows.filter((r) => String(r.mechanism ?? '').trim() === 'guard');
+  const guardIssues = [];
+  for (const row of guardRows) {
+    const id = String(row.id ?? '?');
+    const ref = typeof row.guardRef === 'string' ? row.guardRef.trim() : '';
+    if (ref === '') {
+      guardIssues.push({ id, rule: String(row.rule ?? ''), code: 'ADOPT_GUARD_REF_MISSING', message: `${id}: mechanism=guard 但缺 guardRef（"我靠拦截面"没说靠哪个 ⇒ 自称）` });
+      continue;
+    }
+    const verdict = verifyGuardRef(landingDir, ref);
+    if (verdict.ok !== true) {
+      guardIssues.push({ id, rule: String(row.rule ?? ''), code: 'ADOPT_GUARD_REF_STALE', message: `${id}: guardRef=${ref} 现在核不过（${verdict.code}）: ${verdict.reason}` });
+    }
+  }
+  for (const g of guardIssues) findings.push(g);
   for (const [rule, info] of [...byRule.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
     for (const [face, n] of info.faces) {
       if (!MECHANISM_FACES.includes(face)) {

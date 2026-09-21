@@ -118,6 +118,54 @@ rk-effect inject --landing <落点>                       # 把"只写下来了"
 > **临时工作目录夹具**（`{workdir}/proj/.dsh-ai/rulekeeper/rules.json`），不碰任何真实落点。
 
 
+### 公开面黑名单**按仓库性质分档**（2026-09-21）
+
+同一份表同时装着两类模式，混在一起就会自己拦自己：
+
+| 类 | 例子 | 公开仓 | 私有仓 |
+|---|---|---|---|
+| **identity**（本仓自己的名字） | 内部项目名 / 内部工具名 / 内部结果行前缀 / 内部容器仓名 / 内部主机编号 | 拦 | **不拦** |
+| **infrastructure**（真敏感） | 本机盘卷路径 / 真实 IPv4 / 私钥头与文件名 / 云凭据真值 | 拦 | **拦** |
+
+档位解析顺序（`src/repo-patterns.mjs`）：① 落点 `config.json` 的 `"repoKind": "public" | "private"`
+（显式声明，唯一权威）→ ② 自动探测远端（GitHub/GitLab 等已知公开托管商 ⇒ public）→ ③ 兜底 **private**
+（扫多了会拦住内部仓的正常提交，而内部仓本来就不承诺"不出现自己的名字"）。
+
+三道门（`pre-commit` 暂存文件 / `commit-msg`+`pre-push` 提交正文 / `pre-push` 引用名）**读同一档位**。
+实测（`test/repo-kind.test.mjs`）：同一段含内部项目名的文本，public 档三道门全红、private 档全绿；
+而本机绝对路径 / 真实 IPv4 在**两档都红**。
+
+**诚实边界**：`repoKind` 是**声明**，不是签名 —— 私有仓标成 public 只会更严（自伤不伤人），
+反过来公开仓标成 private 才能少扫一类 ⇒ **公开仓仍需分支保护**（本模块管不了托管商侧）。
+
+### `guard` 档必须点名拦截面（2026-09-21）
+
+`mechanism: guard` 只说"我靠拦截面"，**没说靠哪个** —— 那又是自称（规则 43 同族）。故：
+
+- 写这条教训时必须给 `--guard-ref <hook:名|gate:名>`，**且那个拦截必须真的在**：
+  `hook:pre-commit` 要在 `hooks.json` 清单里，`gate:close` 要在 `rules.json` 的 `gates` 里 ⇒ 否则**拒收**。
+- `guardRef` 只对 `guard` 档有意义，其它档带它 = 用法错误。
+- 落点侧也有读者面：`rk-effect adopt` 会复核每条 `guard` 行的 `guardRef` 现在**还成不成立**
+  （钩子卸载/门禁摘掉 ⇒ `ADOPT_GUARD_REF_STALE`）；`scripts/checkers/adoption-contract.mjs` 同口径。
+
+### 改一条已有教训：`rk mutate`（2026-09-21）
+
+账本是 append-only，"这条机械面登记错了 / 证据写错了"此前只能**手工编辑 `ledger.jsonl`** ——
+没有备份、没有回读、没有审计。现在走唯一通路：
+
+```bash
+rk-mutate --landing <落点> --id <条目id> --set problem="新表述" --set 证据加="补一条" \
+          --by <谁> --reason <为什么>            # 默认 dry-run：只算要追加哪两行
+rk-mutate --landing <落点> --id <条目id> ... --apply    # 真写：备份 + 回读校验 + 原子替换 + 失败逐字节回滚
+```
+
+- **不改历史行**：追加一条**归档行**（`mechanism=mutate`，`evidence[0]` = `MUTATES <id>`）+ 一条
+  **状态事件行**（`STATUS_SUPERSEDE <id>`）；读侧 `supersededIds()` fold ⇒ 效果上"这条教训变了"，
+  物理上历史逐字节不变（有用例钉住：写后文件必须以原内容为前缀）。
+- 可改字段：`problem` / `root_cause` / `solution` / `mechanism` / `guard_ref` / `category`；
+  **身份字段 `id`/`ts`/`rule` 禁改**（改了就不是"同一条教训"）。证据只增不改（`--set 证据加=…`）。
+- **幂等**：同一 id 已有未被取代的归档行 ⇒ 不重复追加。
+- 诚实边界：`--by` 是**声明**不是签名（与 `--by human` 同族）。
 **机制面必填（四选一，2026-09-21）**：`record --mechanism` 只接受 `text`（承认仅文本，会被
 `RK_EFFECT_TEXT_ONLY` **计数**）/ `mechanized`（有机械判据 ⇒ `checks` 里必须真有绑定）/ `guard`
 （有插件拦截 ⇒ `gates` 里必须真有绑定）/ `question`（靠人工问句）。其余取值一律**用法错误** ——
