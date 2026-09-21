@@ -27,6 +27,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
 
+import { supersededIds } from '../../src/ledger.mjs';
+
 // 被检对象：由绑定层传入（RULEKEEPER_SAMPLE_DIR）；直接手工跑时 = 当前目录。cwd 恒为项目根。
 const root = process.env.RULEKEEPER_SAMPLE_DIR ?? process.cwd();
 // 两态样本（旧口径红 / 新口径绿）只在**显式声明了 fixture 根**时检查：`test-fixtures/red` 这种
@@ -108,7 +110,9 @@ function evidenceTokens(text) {
   const reFile = /[A-Za-z0-9_@.\-]+(?:\/[A-Za-z0-9_@.\-*]+)*\.[A-Za-z]{1,8}\b/g;
   let m;
   while ((m = reFile.exec(text)) !== null) {
-    const t = m[0].replace(/^[.\-/]+/, '').replace(/[.\-/]+$/, '');
+    // **不要去掉前导点**：`/^[.\-/]+/` 会把 `.dsh-ai/rulekeeper/rules.json` 变成
+    // `dsh-ai/rulekeeper/rules.json` ⇒ 一个**存在的**对象被误判成"不存在"（写检查器时实测踩过）。
+    const t = m[0].replace(/[.\-/]+$/, '');
     if (t === '' || isAbsolute(t) || /^[A-Za-z]:/.test(t) || t.includes('\\')) continue;
     if (!/\.[A-Za-z]{1,8}$/.test(t)) continue;
     if (/^v?\d+(\.\d+)*$/i.test(t)) continue;           // 纯版本号
@@ -170,10 +174,14 @@ function inspectLedger(treeRoot, rel) {
     }
   }
   const repairs = collectRepairs(rows);
+  // **被状态事件取代的行不判**（与 src/effect.mjs 的派生段同口径）：账本 append-only，"这条记错了/
+  // 被后一条取代了"只能靠状态事件行表达；读侧不 fold 的话，历史行的错会**永远**在每次体检里重复喊。
+  const superseded = supersededIds(rows);
   let acknowledged = 0;
   let outOfScope = 0;
   for (const row of rows) {
     const id = String(row?.id ?? '?');
+    if (superseded.has(id)) continue;
     const rule = String(row?.rule ?? '');
     const ev = Array.isArray(row?.evidence) ? row.evidence : [];
     // 登记行本身不是"被检凭据"（它的职责就是登记缺口），跳过——否则执法者把自己也抓了
