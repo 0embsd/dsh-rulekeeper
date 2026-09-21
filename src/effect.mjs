@@ -53,6 +53,7 @@ import { requireAnchoredApprovalOf } from './config.mjs';
 import { isSafeId, listProposals, proposalPath, validateProposalQuality } from './proposal.mjs';
 import { redactValue } from './redact.mjs';
 import { canonicalRule } from './ruleid.mjs';
+import { DEFAULT_NEAR_DUP_THRESHOLD, similarityText } from './similarity.mjs';
 import { isProtected, loadLandingRules, loadRules } from './rules.mjs';
 import { SCHEMA_VERSION } from './schema.mjs';
 
@@ -71,6 +72,21 @@ export const EFFECT_RETIRE_CATEGORY = '生效退役';
 export const REGISTERED_GAP_CATEGORY = '登记缺口';
 /** 退役提案的机器标记（写在 `redCriteria` 前缀）：`planActivation` 据此走"摘绑定"而不是"加绑定" */
 export const RETIRE_MARK = 'EFFECT_RETIRE_CANDIDATE';
+/**
+ * **复发判定的相似度阈值**（2026-09-21，交接 B1）—— **按实测标定，不复用入库门的 0.6**。
+ *
+ * 为什么不能用 0.6：入库门问的是"这两条是不是**同一条**记录"（近重复），而复发问的是"这两条是不是
+ * **同一个坑**"。同一个坑的两次踩往往**换了一句话**，实测（字符 2/3-gram 的 Jaccard，见
+ * `similarityText`）：
+ *   · 同一坑换措辞：**0.35 ~ 0.47**
+ *   · 完全不同的两件事：**0.21 ~ 0.32**（本仓真账本上 CAT-PROC 生效后新入账 = 0.206 / CAT-TECH = 0.321）
+ * ⇒ 0.6 会**把真复发放过**（判据失效），0.25 又太贴误报上沿。
+ *
+ * 取 **0.30**：两个实测新内容（0.206 / 0.321）在前者之下、后者贴着；如实登记这个边界——
+ * 0.321 那条只差 0.02 就会被判成复发。**这正是"阈值越界"该被看见的地方**：体检里每次都打印最高相似度
+ * （`EFFECT_NEW_ENTRY_AFTER_ACTIVATION` 的 info 里带数字），人一眼能看出是不是贴着线。
+ */
+export const RECURRENCE_SIMILARITY_THRESHOLD = 0.3;
 /** 验证记录的机器标记（写在 findings.jsonl 的 evidence 里） */
 export const EFFECT_VERIFIED_MARK = 'EFFECT_VERIFIED';
 export const EFFECT_FAILED_MARK = 'EFFECT_VERIFY_FAILED';
@@ -435,6 +451,60 @@ export function ledgerGroups(landingDir) {
 }
 
 /**
+ * **陷阱同一性**（2026-09-21，交接 B1）：生效之后新入账的条目里，有哪些**真的像"同一个坑又踩了"**。
+ *
+ * 为什么必须按它而不是"同 rule 多了一条"：类目只是分组标签，不承担"同一个坑"的语义。旧口径
+ * `g.lastSeen > lastActivation` 在真账本上实测是**误报**——CAT-PROC/CAT-TECH 生效后入账的新条目
+ * 与生效前历史的最高相似度**连 0.3 都不到**（探测脚本 `.dsh-ai/tmp/probe-recurrence-identity.mjs`）。
+ *
+ * 口径：
+ *   · 参照面 = **生效之前**该 rule 的教训行（事件/状态/归档行都不算：它们是机制产物，不是教训）；
+ *   · 判据 = 新条目与参照面最高相似度 ≥ 阈值（**与入库近似重复门同一份实现与阈值**，避免两处漂移）；
+ *   · 总是**如实回报最高相似度**（`max`）⇒ 体检里能看到"差多少才算复发"，不是黑箱。
+ *
+ * 复杂度护栏：`maxCandidates` 限制参照面（取最近 N 条）；超出时回报 `truncated`，不假装全比过。
+ */
+export function recurrenceIdentity(rows = [], rule, activationTs, {
+  threshold = RECURRENCE_SIMILARITY_THRESHOLD,
+  maxCandidates = 500,
+} = {}) {
+  const isLesson = (r) => r !== null && typeof r === 'object'
+    && String(r.rule ?? '') === rule
+    && r.category !== EFFECT_EVENT_CATEGORY && r.category !== EFFECT_RETIRE_CATEGORY
+    && r.category !== STATUS_EVENT_CATEGORY && r.mechanism !== MUTATE_MECHANISM
+    && typeof r.problem === 'string' && r.problem.trim() !== '';
+  const fresh = rows.filter((r) => isLesson(r) && (r.ts ?? '') > activationTs);
+  const prior = rows.filter((r) => isLesson(r) && (r.ts ?? '') <= activationTs);
+  const candidates = prior.slice(-maxCandidates);
+  const out = {
+    rule,
+    threshold,
+    fresh: fresh.length,
+    prior: prior.length,
+    truncated: prior.length > candidates.length,
+    max: 0,
+    best: null,
+    pairs: [],
+    newIds: fresh.map((r) => String(r.id ?? '')),
+  };
+  if (fresh.length === 0 || candidates.length === 0) return out;
+  let max = 0;
+  let best = null;
+  for (const neu of fresh) {
+    for (const old of candidates) {
+      const score = similarityText(String(neu.problem), String(old.problem));
+      if (score > max) { max = score; best = { newId: String(neu.id ?? ''), priorId: String(old.id ?? ''), score: Number(score.toFixed(4)) }; }
+      if (score >= threshold) {
+        out.pairs.push({ newId: String(neu.id ?? ''), priorId: String(old.id ?? ''), score: Number(score.toFixed(4)) });
+      }
+    }
+  }
+  out.max = Number(max.toFixed(4));
+  out.best = best;
+  return out;
+}
+
+/**
  * **只读**生效体检（LF-A20/A30）。
  * @param {{landingDir: string, now?: Date, staleDays?: number, rules?: object|null}} opts
  */
@@ -455,6 +525,12 @@ export function effectPlan(opts = {}) {
   const verifications = verificationsFromLanding(landingDir);
   const groups = ledgerGroups(landingDir);
   const proposals = listProposals(landingDir).items;
+  // 复发判定要按"**陷阱同一性**"而不是"同 rule 又来一条"（2026-09-21，交接 B1）：
+  //   旧口径 = `g.lastSeen > lastActivation` ⇒ 一条纪律每多记一条**新**教训就永久报一次
+  //   "判据没拦住"。实测：CAT-PROC/CAT-TECH 生效后入账的新条目与生效前历史的最高相似度 **连 0.3 都不到**
+  //   （探测脚本 `.dsh-ai/tmp/probe-recurrence-identity.mjs`）⇒ 那是误报，不是信号。
+  //   新口径 = 新条目必须与生效前的同类目条目**真的像同一个坑**（复用入库门的 0.6 阈值，同一份分词口径）。
+  const ledgerRows = readLedger(landingDir).values;
 
   const findings = [];
   const items = [];
@@ -471,8 +547,11 @@ export function effectPlan(opts = {}) {
     // 现在要求 `target` 恰是某条绑定的载体（载体口径见 src/checker.mjs 的 carrierOfBinding），
     // 且**必须晚于最后一次生效登记**：否则"先跑验证、后改绑定"也能冒充已核实（同 `recurred` 的自净口径）。
     const carriers = new Set(b.checks.map((c) => carrierOfBinding(c)).filter((c) => typeof c === 'string' && c !== ''));
-    // **复发**：只在"生效之后"入账的同 rule 条目才算（生效前踩的坑是提案的来历，不算判据失效）
-    const recurred = lastActivation === null ? 0 : (g.lastSeen !== null && g.lastSeen > lastActivation ? 1 : 0);
+    // **复发**（B1 修正）：只在"生效之后"入账、**且真的像同一个坑**的条目才算复发。
+    // 旧口径（`g.lastSeen > lastActivation`）把"新入账"当成"又踩了" ⇒ 实测误报。
+    // 这里同时把"生效后新入账但不像同一个坑"如实报成 info（**不静默**：新内容该被看见，只是不该冒充复发）。
+    const rec = lastActivation === null ? null : recurrenceIdentity(ledgerRows, rule, lastActivation);
+    const recurred = rec !== null && rec.max >= RECURRENCE_SIMILARITY_THRESHOLD ? 1 : 0;
     const verified = vers.some((v) => v.passed === true && v.target !== null && carriers.has(v.target)
       && (lastActivation === null || (v.ts ?? '') > lastActivation));
     // 同族的"口径不一致"告警也要**只看本次生效之后的记录**：历史行（旧口径写的 target，如
@@ -557,7 +636,23 @@ export function effectPlan(opts = {}) {
       }
     }
     if (state === 'recurred') {
-      findings.push({ code: 'EFFECT_RECURRED_AFTER_ACTIVATION', severity: 'error', rule, message: `${rule}: 生效后（${lastActivation}）又踩了（${g.lastSeen}）——判据没拦住，须升级` });
+      // 报**具体是哪两条像**（对象级：规则 41）——旧口径只报"lastSeen 又动了"，人无从判断是不是同一个坑
+      const top = (rec?.pairs ?? []).slice().sort((a, b) => b.score - a.score)[0] ?? rec?.best;
+      findings.push({
+        code: 'EFFECT_RECURRED_AFTER_ACTIVATION',
+        severity: 'error',
+        rule,
+        message: `${rule}: 生效后（${lastActivation}）又踩了同一个坑：${top === undefined || top === null ? '（无明细）' : `${top.newId} 与 ${top.priorId} 相似度 ${top.score} ≥ 阈值 ${RECURRENCE_SIMILARITY_THRESHOLD}`}——判据没拦住，须升级`,
+      });
+    } else if (lastActivation !== null && rec !== null && rec.fresh > 0) {
+      // **生效后入账了新教训、但不像同一个坑** ⇒ info（不静默，也不冒充复发）。
+      // 这一档以前被算成 error（B1 的误报根因）；现在如实区分，并给出最高相似度供人核对。
+      findings.push({
+        code: 'EFFECT_NEW_ENTRY_AFTER_ACTIVATION',
+        severity: 'info',
+        rule,
+        message: `${rule}: 生效后新入账 ${rec.fresh} 条，但与生效前历史的最高相似度只有 ${rec.max}（< 复发阈值 ${RECURRENCE_SIMILARITY_THRESHOLD}）⇒ 判为**新内容**而非复发：${rec.newIds.slice(0, 3).join(', ')}${rec.newIds.length > 3 ? ' …' : ''}`,
+      });
     }
     if (state !== 'recurred' && state !== 'retired' && lastActivation !== null) {
       const ageDays = (now.getTime() - Date.parse(lastActivation)) / 86400000;

@@ -47,7 +47,7 @@ import { listLogFiles, readEntries, rotateIfNeeded, totalBytes } from './log.mjs
 import { RC, checkRcTable, renderRcTable } from './rc.mjs';
 import { checkSchema, renderSchemaMarkdown } from './schema.mjs';
 import { DEFAULT_NEAR_DUP_THRESHOLD, findNearDuplicates } from './similarity.mjs';
-import { activationsById, appendAnnotation } from './annotations.mjs';
+import { activationsById, appendAnnotation, validateActivation } from './annotations.mjs';
 import { draftActivations } from './draft.mjs';
 import { USAGE_FILE, usageSummary } from './usage.mjs';
 import { canonicalRule, dedupe, detectRuleDivergence, ruleFragmentation } from './ruleid.mjs';
@@ -2845,6 +2845,7 @@ function runCliRecord(argv, io, env) {
   const parsed = parseSub('record', argv, {
     '--landing': 'string', '--rule': 'string', '--category': 'string', '--problem': 'string',
     '--root-cause': 'string', '--solution': 'string', '--mechanism': 'string', '--guard-ref': 'string', '--evidence': 'string', '--now': 'string',
+    '--activation': 'string', '--no-activation': 'string',
     '--on-near-dup': 'string', '--near-dup-threshold': 'string',
   }, io);
   if (parsed.error !== null) return parsed.error;
@@ -2882,6 +2883,24 @@ function runCliRecord(argv, io, env) {
     throw err;
   }
   const evidence = flags.evidence === undefined ? [] : flags.evidence.split(',').map((s) => s.trim()).filter((s) => s !== '');
+  // ── 可判激活条件（A4，2026-09-21）：**可见化，不硬拦** ────────────────────────────
+  // 现状：`plan` 报 `EFFECT_ENTRY_NO_ACTIVATION`（本仓 27/27），根因是"条件本该挂在条目层、
+  // 历史上没人写"。硬拦会逼出灌水条件（把覆盖率刷上去、质量是零 —— E1 实测机器起草齐备率 0/10），
+  // **放宽判据更不行**。故选中间档：给 `--activation`（写进行内，走 annotations 的同一套校验）；
+  // 不给则打一行**可见警告**（带当前缺口计数），让人当场知道"这条又进了无条件的池子"。
+  let activationText = null;
+  if (flags.activation !== undefined) {
+    const verdict = validateActivation(String(flags.activation));
+    if (verdict.ok !== true) {
+      io.err(`dsh-rulekeeper record: --activation 不合格（${verdict.reasons.join('；')}）\n`
+        + '  要求：8~300 字符，且含至少一个**可观测锚点**（文件路径/扩展名/通配符/命令名/错误串或退出码）\n');
+      return RC.USAGE;
+    }
+    activationText = String(flags.activation).trim();
+  } else if (flags['no-activation'] === undefined) {
+    io.err('⚠ dsh-rulekeeper record: 这条没给可判激活条件（--activation "当…时"）⇒ 会进"无条件的池子"，\n'
+      + '   体检里的 EFFECT_ENTRY_NO_ACTIVATION 计数会 +1。确有理由不给就显式写 --no-activation "<为什么>"。\n');
+  }
   // ── 机制面必填（四选一）────────────────────────────────────────────────────────
   // 为什么在这里拦：`mechanism` 决定这条纪律**有没有机械面**（见规则 46）。此前它可以是任意自由文本
   // （空 → 默认 `text`，拼错 → 原样入库），于是"我写了机械判据"这类**自称**也能进账本，
@@ -2949,6 +2968,7 @@ function runCliRecord(argv, io, env) {
     solution: flags.solution,
     mechanism,
     ...(guardRef === null ? {} : { guardRef }),
+    ...(activationText === null ? {} : { activation: activationText }),
     evidence,
   }, { landingDir: target.landing, now });
   if (!result.ok) {

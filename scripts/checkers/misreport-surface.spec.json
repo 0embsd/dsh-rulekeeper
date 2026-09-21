@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "rule": "CAT-VERIFY",
+  "checkerRef": "@self/scripts/checkers/misreport-surface.mjs",
+  "command": [
+    "node",
+    "scripts/checkers/misreport-surface.mjs"
+  ],
+  "expectRed": {
+    "exitCode": 1
+  },
+  "expectGreen": {
+    "exitCode": 0
+  },
+  "redSample": {
+    "kind": "tree",
+    "source": "test-fixtures/misreport-red",
+    "note": "被检对象=该目录（内含 .dsh-ai/rulekeeper/rules.json 与 fake.spec.json）；假检查器恒定非 0 ⇒ A 判据必红"
+  },
+  "greenSample": {
+    "kind": "tree",
+    "source": "."
+  },
+  "checkerVersion": "misreport-surface@1",
+  "timeoutMs": 30000,
+  "notes": "误报面：对 rules.json 里每条 checker 绑定核「绿样本上必须 exit=0 / 红样本上必须非 0 / 必须写明绿样本」。规则 53 的机械面。递归护栏：命令里含本检查器的绑定跳过并计数（不判自己）。"
+}

@@ -34,7 +34,7 @@
       "notes": "收尾门禁四件齐备且真能跑：.gitattributes 显式钉 eol=lf / 四件齐备且子命令传对 / 索引 mode 100755 / 行尾纯 LF。红态样本每次现造。",
       "proposal": "P-20260921-catproc-gate",
       "activatedAt": "2026-09-21T11:16:00.851Z",
-      "spec": "scripts/checkers/gate-finality.mjs"
+      "spec": "scripts/checkers/gate-finality.spec.json"
     },
     {
       "kind": "checker",
@@ -63,7 +63,7 @@
       "notes": "用例不得写真实落点：判据钉在\"真实落点来源 + 写动作\"同处，且整套用例必须有进程级隔离机制面（isolateProcessUserLanding）。红态样本每次现造。",
       "proposal": "P-20260921-concurrency-io-isolation",
       "activatedAt": "2026-09-21T11:16:01.209Z",
-      "spec": "scripts/checkers/test-isolation.mjs"
+      "spec": "scripts/checkers/test-isolation.spec.json"
     },
     {
       "kind": "checker",
@@ -92,7 +92,7 @@
       "notes": "deny 列表不得为测试方便开例外：src/** 的豁免表里不得出现 test/ 路径。红态样本每次现造。",
       "proposal": "P-20260921-cat-tech-no-test-exception",
       "activatedAt": "2026-09-21T11:16:01.540Z",
-      "spec": "scripts/checkers/no-test-exception.mjs"
+      "spec": "scripts/checkers/no-test-exception.spec.json"
     },
     {
       "kind": "checker",
@@ -121,7 +121,7 @@
       "notes": "判据必须落在被测对象自身：凭据引用即须存在（仓库外历史凭据须登记缺口）；落点级故障与对象级判据分开报。红态样本每次现造。",
       "proposal": "P-20260921-cred-freshness-evidence",
       "activatedAt": "2026-09-21T11:16:02.037Z",
-      "spec": "scripts/checkers/ledger-live-verdict.mjs"
+      "spec": "scripts/checkers/ledger-live-verdict.spec.json"
     },
     {
       "kind": "checker",
@@ -149,7 +149,37 @@
       "notes": "hook 完整性：行尾必须纯 LF / .gitattributes 必须显式钉 .githooks/* eol=lf / 真 git 仓时索引 mode 必须 100755（非 git 样本如实跳过）",
       "proposal": "P-20260921-gate-discipline-hooks",
       "activatedAt": "2026-09-21T11:16:02.346Z",
-      "spec": "scripts/checkers/hooks-integrity.mjs"
+      "spec": "scripts/checkers/hooks-integrity.spec.json"
+    },
+    {
+      "kind": "checker",
+      "rule": "CAT-VERIFY",
+      "spec": "scripts/checkers/misreport-surface.spec.json",
+      "checkerRef": "@self/scripts/checkers/misreport-surface.mjs",
+      "command": [
+        "node",
+        "D:\\opt\\dsh-rulekeeper\\scripts\\checkers\\misreport-surface.mjs"
+      ],
+      "expectRed": {
+        "exitCode": 1
+      },
+      "expectGreen": {
+        "exitCode": 0
+      },
+      "redSample": {
+        "kind": "tree",
+        "source": "test-fixtures/misreport-red",
+        "note": "被检对象=该目录（内含 .dsh-ai/rulekeeper/rules.json 与 fake.spec.json）；假检查器恒定非 0 ⇒ A 判据必红"
+      },
+      "greenSample": {
+        "kind": "tree",
+        "source": "."
+      },
+      "checkerVersion": "misreport-surface@1",
+      "timeoutMs": 30000,
+      "notes": "误报面：对 rules.json 里每条 checker 绑定核「绿样本上必须 exit=0 / 红样本上必须非 0 / 必须写明绿样本」。规则 53 的机械面。递归护栏：命令里含本检查器的绑定跳过并计数（不判自己）。",
+      "proposal": "P-20260921-cat-verify-misreport",
+      "activatedAt": "2026-09-21T16:06:45.180Z"
     }
   ],
   "inject": []

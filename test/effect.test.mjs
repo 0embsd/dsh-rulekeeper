@@ -401,22 +401,56 @@ test('LF-A60 生效后复发 => evolve 必须产**升级提案**（不得被幂�
   seedProposal(landing, 'FACT-WRITING');
   const applied = applyActivation({ landingDir: landing, proposalId: 'P-20260919-000000-aaaaaa', by: 'human', apply: true, now });
   assert.equal(applied.ok, true, applied.message ?? '');
-  // 生效之后又踩了两次（同 rule）——**追加**到账本（不得覆盖生效登记事件行）
+  // 生效之后又踩了两次（同 rule，**且确实是同一个坑**）——**追加**到账本（不得覆盖生效登记事件行）
+  //
+  // 2026-09-21（交接 B1）：复发判据从"同 rule 多了一条"改成"**陷阱同一性**"（相似度 ≥ 0.6，与入库门同源）。
+  // 故本用例必须把 problem 写成**同一个坑的不同表述**——原来那版用 `ledgerEntry` 的默认 problem='p'，
+  // 改动前"算复发"只是因为**同 rule**；改动后它正确地变成"不像同一个坑"（见下一条用例）。
+  const TRAP = '改了 docs/x.md 却没留证，门禁判红（gate write 报 UNRECORDED）';
   const rows = [
-    ledgerEntry({ id: 'LF-2', ts: '2026-09-20T00:00:00.000Z', rule: 'FACT-WRITING' }),
-    ledgerEntry({ id: 'LF-3', ts: '2026-09-21T00:00:00.000Z', rule: 'fact_writing' }), // 同族不同写法
+    // 生效**之前**入账的那个原坑（复发的参照面）
+    ledgerEntry({ id: 'LF-0', ts: '2026-09-18T00:00:00.000Z', rule: 'FACT-WRITING', problem: '改了 docs/x.md 却没留证，被 gate write 判红（UNRECORDED）' }),
+    // 生效之后又踩两次：**换了一句话**的同一个坑（实测相似度 ≈0.47 ≥ 0.30）
+    ledgerEntry({ id: 'LF-2', ts: '2026-09-20T00:00:00.000Z', rule: 'FACT-WRITING', problem: TRAP }),
+    ledgerEntry({ id: 'LF-3', ts: '2026-09-21T00:00:00.000Z', rule: 'fact_writing', problem: '又踩一次：docs/x.md 改过没留证就被 gate write 判红（UNRECORDED）' }),
   ];
   writeFileSync(join(landing, 'ledger.jsonl'), `${readFileSync(join(landing, 'ledger.jsonl'), 'utf8').trimEnd()}\n${rows.map((r) => JSON.stringify(r)).join('\n')}\n`, 'utf8');
   const plan = effectPlan({ landingDir: landing, now: new Date('2026-09-22T00:00:00.000Z') });
   assert.equal(plan.items[0].state, 'recurred');
   assert.equal(plan.items[0].recurredAfterActivation, true);
-  assert.ok(plan.findings.some((f) => f.code === 'EFFECT_RECURRED_AFTER_ACTIVATION' && f.severity === 'error'));
+  const hit = plan.findings.find((f) => f.code === 'EFFECT_RECURRED_AFTER_ACTIVATION');
+  assert.ok(hit !== undefined && hit.severity === 'error', JSON.stringify(plan.findings));
+  // 报错必须落到**对象级事实**上（规则 41）：指出是哪两条像、相似度多少
+  assert.match(hit.message, /相似度 \d*\.?\d+ ≥ 阈值 0\.3/);
 
   const { rc, out } = rk(['evolve', '--landing', landing, '--now', '2026-09-22T00:00:00.000Z',
     '--rule', 'FACT-WRITING', '--quality', qualityFileFor(landing)]);
   assert.equal(rc, RC.OK, out);
   const proposals = listProposals(landing).items;
   assert.equal(proposals.length, 2, `生效后复发必须再产一条升级提案（实得 ${proposals.length}）: ${out}`);
+});
+
+test('LF-A60（B1 修正）: 生效后入账**不像同一个坑** ⇒ 新内容 info，不是复发 error', () => {
+  const { landing } = scene('a60-newentry', { patterns: ['docs/x.md'] });
+  const now = new Date('2026-09-19T12:00:00.000Z');
+  seedProposal(landing, 'FACT-WRITING');
+  assert.equal(applyActivation({ landingDir: landing, proposalId: 'P-20260919-000000-aaaaaa', by: 'human', apply: true, now }).ok, true);
+  // 生效后入账的是**另一件事**（账号口令轮换，跟 docs/x.md 那个坑无关；实测相似度 ≈0.2 < 0.30）
+  const rows = [
+    ledgerEntry({ id: 'LF-0', ts: '2026-09-18T00:00:00.000Z', rule: 'FACT-WRITING', problem: '改了 docs/x.md 却没留证，被 gate write 判红（UNRECORDED）' }),
+    ledgerEntry({
+      id: 'LF-2', ts: '2026-09-20T00:00:00.000Z', rule: 'FACT-WRITING',
+      problem: '另一件事：账号口令写在 config 里没有轮换，审计时无法证明时效性',
+    }),
+  ];
+  writeFileSync(join(landing, 'ledger.jsonl'), `${readFileSync(join(landing, 'ledger.jsonl'), 'utf8').trimEnd()}\n${rows.map((r) => JSON.stringify(r)).join('\n')}\n`, 'utf8');
+  const plan = effectPlan({ landingDir: landing, now: new Date('2026-09-22T00:00:00.000Z') });
+  assert.notEqual(plan.items[0].state, 'recurred', '不像同一个坑就不该判复发');
+  assert.ok(!plan.findings.some((f) => f.code === 'EFFECT_RECURRED_AFTER_ACTIVATION'), JSON.stringify(plan.findings));
+  const info = plan.findings.find((f) => f.code === 'EFFECT_NEW_ENTRY_AFTER_ACTIVATION');
+  assert.ok(info !== undefined, `应当报"新内容" info（不静默）: ${JSON.stringify(plan.findings)}`);
+  assert.equal(info.severity, 'info');
+  assert.match(info.message, /最高相似度只有 0\.\d+/);
 });
 
 test('LF-A60 生效后零信号且超期 => effectPlan 报 EFFECT_STALE_NO_SIGNAL（建议退役）', () => {

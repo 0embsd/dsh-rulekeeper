@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "rule": "FAKE-RULE",
+  "command": [
+    "node",
+    "test-fixtures/misreport-red/fake-checker.mjs"
+  ],
+  "expectRed": {
+    "exitCode": 1
+  },
+  "expectGreen": {
+    "exitCode": 0
+  },
+  "redSample": {
+    "kind": "tree",
+    "source": "test-fixtures/misreport-red/test-fixtures/fake"
+  },
+  "greenSample": {
+    "kind": "tree",
+    "source": "test-fixtures/misreport-red/test-fixtures/fake"
+  },
+  "checkerVersion": "fake@1"
+}
