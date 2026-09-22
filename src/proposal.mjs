@@ -70,6 +70,8 @@ export function validateProposalValues(proposal) {
   for (const def of proposalFieldDefs()) {
     const value = proposal[def.name];
     if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
+      // 可选字段缺省 = 合法缺省（不是"字段为空"）。写在冻结表里 != 每份提案都必须写。
+      if (def.required !== true) continue;
       problems.push(`字段为空: ${def.name}`);
       continue;
     }
@@ -85,12 +87,24 @@ export function validateProposalValues(proposal) {
   return { ok: problems.length === 0, problems };
 }
 
-/** 形状守卫：键集合必须与冻结表逐一相同（多一个少一个都算漂移） */
+/**
+ * 形状守卫：**必填键全在 + 没有表外的键**。
+ *
+ * ⚠ 口径修正（2026-09-22，加 `supersedes` 时当场被 36 条用例抓到）：此前要求"键集合与冻结表
+ * **逐一相同**"，于是**任何可选字段**（`supersedes`）一登记进冻结表，所有没写该字段的历史提案
+ * 和正常提案就全被判成"漂移"。可选字段的意义就是"可以没有"——所以判据必须按 `required` 区分，
+ * 而不是拿长度比对。
+ */
 export function assertProposalShape(proposal) {
-  const want = proposalFieldNames().slice().sort();
-  const got = Object.keys(proposal).slice().sort();
-  if (want.length !== got.length || want.some((k, i) => k !== got[i])) {
-    return { ok: false, reason: `字段集合与冻结表不一致：期望 [${want.join(',')}]，实得 [${got.join(',')}]` };
+  const defs = proposalFieldDefs();
+  const known = new Set(defs.map((d) => d.name));
+  const unknown = Object.keys(proposal).filter((k) => !known.has(k)).sort();
+  if (unknown.length > 0) {
+    return { ok: false, reason: `提案出现冻结表以外的键（漂移）：[${unknown.join(',')}]；已知键 [${[...known].sort().join(',')}]` };
+  }
+  const missing = defs.filter((d) => d.required === true && !Object.hasOwn(proposal, d.name)).map((d) => d.name).sort();
+  if (missing.length > 0) {
+    return { ok: false, reason: `提案缺必填键：[${missing.join(',')}]` };
   }
   return { ok: true, reason: null };
 }

@@ -17,7 +17,7 @@ import { runRulekeeper } from '../src/cli.mjs';
 import { RC } from '../src/rc.mjs';
 import {
   PROPOSAL_QUALITY_FIELDS, RECURRENCE_THRESHOLD,
-  buildProposal, listProposals, proposalFieldNames, validateProposalValues, writeProposal,
+  buildProposal, listProposals, proposalFieldDefs, proposalFieldNames, validateProposalValues, writeProposal,
 } from '../src/proposal.mjs';
 import { cleanupAll, freshLanding, ledgerEntry } from './helpers/sandbox.mjs';
 
@@ -85,7 +85,12 @@ test('判据 LF-290：同一条纪律复发 2 次 -> 必产 proposals/<id>.json�
   const files = readdirSync(join(landing, 'proposals'));
   assert.equal(files.length, 1);
   const proposal = JSON.parse(readFileSync(join(landing, 'proposals', files[0]), 'utf8'));
-  assert.deepEqual(Object.keys(proposal).sort(), proposalFieldNames().slice().sort());
+  // 契约（2026-09-22 修正）：**必填字段逐一相同 + 不得出现表外的键**。
+  // 旧写法是 `deepEqual(keys, proposalFieldNames())` —— 冻结表里一加**可选**字段（`supersedes`），
+  // 这条断言就把所有正常提案判红。可选字段的意义就是"可以没有"。
+  const optional = proposalFieldDefs().filter((f) => f.required !== true).map((f) => f.name);
+  assert.deepEqual(Object.keys(proposal).sort(), proposalFieldNames().filter((n) => !optional.includes(n)).sort());
+  assert.deepEqual(optional.filter((name) => Object.hasOwn(proposal, name)), [], `自动提案不写可选字段：${optional.join('/')}`);
   for (const field of PROPOSAL_QUALITY_FIELDS) assert.equal(proposal[field], QUALITY[field]);
   assert.equal(proposal.rule, 'FACT-WRITING');
   assert.equal(proposal.source, 'auto');

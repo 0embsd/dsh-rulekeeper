@@ -27,6 +27,7 @@ import {
   supersedeDeclarationOf,
 } from '../src/effect.mjs';
 import { cleanupAll, tempDir } from './helpers/sandbox.mjs';
+import { assertProposalShape, validateProposalValues } from '../src/proposal.mjs';
 
 test.after(cleanupAll);
 
@@ -195,4 +196,22 @@ test('判据⑦: 声明解析器本身——非对象 / 缺 sup 键 / 空理由�
   assert.equal(ok.declared, true);
   assert.equal(ok.spec, OLD_SPEC);
   assert.deepEqual(ok.problems, []);
+});
+
+// ── 判据⑧：可选字段一旦登记进冻结表，形状守卫**不许**把"没写它"判成漂移 ──────────────
+// 现场：给 schema 加 `supersedes`（required:false）之后，**36 条用例当场变红** ——
+// `assertProposalShape` 当时比的是"键集合逐一相同"，于是所有正常提案都成了"漂移"。
+// 这条用例把新口径钉住：必填键全在 + 没有表外的键 = 合法；其余照旧 fail-closed。
+test('判据⑧: 提案形状守卫按 required 区分（可选字段可以不写；未知键仍拒）', () => {
+  const base = {
+    schema: 1, id: 'P-1', rule: 'CAT-CODE', source: 'human', createdAt: '2026-01-01T00:00:00.000Z',
+    redCriteria: '红', counterExample: 'checker:x.spec.json', falsePositiveSurface: 'tree:.',
+    activationCheck: 'rk-effect verify', status: 'proposed',
+  };
+  assert.equal(assertProposalShape(base).ok, true, '不写可选字段的提案必须合法');
+  assert.equal(assertProposalShape({ ...base, supersedes: DECL }).ok, true, '写了可选字段也合法');
+  assert.equal(assertProposalShape({ ...base, bogus: 1 }).ok, false, '表外的键必须拒（防手写字段漂移）');
+  const { activationCheck, ...missing } = base;
+  assert.equal(assertProposalShape(missing).ok, false, '缺必填键必须拒');
+  assert.equal(validateProposalValues({ ...base, supersedes: undefined }).ok, true, '可选字段为空 = 合法缺省，不是"字段为空"');
 });
