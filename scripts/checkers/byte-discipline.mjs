@@ -30,6 +30,7 @@
 //   命中 ⇒ exit 1；干净 ⇒ exit 0；**没有 .gitattributes 且没有 .githooks ⇒ exit 2**（没有被测对象）。
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 const root = process.env.RULEKEEPER_SAMPLE_DIR ?? process.cwd();
 // `test-fixtures/` 是**夹具面**：那里放的是"故意违规的样本"（红态证据），不是被检对象。
@@ -66,9 +67,26 @@ const pins = lines.filter((l) => {
 });
 
 // ── A/D/E. 遍历文本文件（混行尾全扫；BOM/结尾换行只在手写面上判）─────────────────
+// **P10 修正（2026-09-22，被治理项目侧实测）**：原实现把每类违规 `slice(0, 5/8)` 打印，且清单顺序
+// 来自遍历顺序 ⇒ ①"看到的 ≠ 全部"不可见（他们据此写迭代收敛循环，四轮改了 57 个文件才发现）；
+// ②同输入不同顺序（他们实测四轮的文件集合几乎不重叠）。现在：**全量收集 → 按 (rel, code) 确定化排序
+// → 全量打印**，并显式给 `PRINTED` / `TOTAL`；扫描根与"是否含未跟踪文件"也打在首行。
 const mixed = [];
 const boms = [];
 const noEol = [];
+let scanned = 0;
+let skippedBinary = 0;
+let skippedByGitignore = 0;
+/** 被 `.gitignore` 忽略的相对路径（含未跟踪）：用 git 判定，失败则空集（如实降级，不假装知道） */
+const ignoredSet = (() => {
+  const set = new Set();
+  if (!existsSync(join(root, '.git'))) return set;
+  const r = spawnSync('git', ['-C', root, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z'], { encoding: 'buffer' });
+  if (r.status !== 0 || r.stdout === null) return set;
+  for (const p of String(r.stdout).split('\0')) if (p.trim() !== '') set.add(p.split('\\').join('/'));
+  return set;
+})();
+
 const walk = (dir) => {
   let names;
   try {
@@ -90,8 +108,15 @@ const walk = (dir) => {
       continue;
     }
     if (!TEXT_EXT.test(name)) continue;
-    const buf = readFileSync(full);
     const rel = full.slice(root.length).replace(/^[\\/]/, '').split('\\').join('/');
+    // 二进制判定（P10 实测的真实风险：`git ls-files` 没跟踪的 `.7z` 备份被当"文本"数行尾，
+    // 若按文本"归一"会**损坏压缩包**）。判定 = NUL 字节或 UTF-8 解码出现替换字符。
+    // 口径说明：**被 git 判定为忽略的文件单独计数**（它们仍会被扫——工作区事实；但"看到的 ≠ 全部"
+    // 这件事不再隐形，且修正文案会点名正确解法）。
+    if (ignoredSet.has(rel)) skippedByGitignore += 1;
+    const buf = readFileSync(full);
+    if (buf.includes(0) || buf.toString('utf8').includes('\uFFFD')) { skippedBinary += 1; continue; }
+    scanned += 1;
     // 判"混行尾"必须**按字节**：数出 `\r\n` 的个数与 `\n` 的总数，不等就是混
     //（写第一版时用"把 \r\n 换成 \n 再看还有没有 \n" ⇒ 恒真、连纯 CRLF 都误报，用例当场抓到）。
     // ⚠ **不要在这里提前 `continue`**：加过一版 `if (!crlf) continue;`（想省两次计数），
@@ -110,13 +135,22 @@ const walk = (dir) => {
   }
 };
 if (existsSync(root)) walk(root);
-for (const rel of mixed.slice(0, 8)) {
-  hits.push(`BYTE_EOL_INCONSISTENT: ${rel} 同一文件里既有 CRLF 又有裸 LF（混行尾：肉眼看不见，逐字比对会假红）`);
+
+// **确定化排序**（P10）：同一仓库连跑两次，打印的文件集合与顺序必须逐字相同。
+const byPathThenCode = (code) => (a, b) => (a < b ? -1 : a > b ? 1 : 0) || (code < code ? -1 : 1);
+mixed.sort(byPathThenCode('BYTE_EOL_INCONSISTENT'));
+boms.sort(byPathThenCode('BYTE_BOM_PRESENT'));
+noEol.sort(byPathThenCode('BYTE_NO_TRAILING_NEWLINE'));
+// **全量收集**（不再 slice）：逐条推入 hits；截断交给末行的 PRINTED/TOTAL 显式交代。
+for (const rel of mixed) {
+  hits.push(`BYTE_EOL_INCONSISTENT: ${rel} 同一文件里既有 CRLF 又有裸 LF（混行尾：肉眼看不见，逐字比对会假红）。`
+    + '修法优先 `git restore -- <路径>`（从 blob 刷新工作区：blob 本就是 LF，混行尾只是**工作区**现象 ⇒ 零内容改动、无需提交）；'
+    + '确实要改内容时才动字节，**别对二进制做行尾手术**。');
 }
-for (const rel of boms.slice(0, 5)) {
+for (const rel of boms) {
   hits.push(`BYTE_BOM_PRESENT: ${rel} 以 UTF-8 BOM 开头（肉眼看不见；会让逐字比对与严格解析出问题）`);
 }
-for (const rel of noEol.slice(0, 5)) {
+for (const rel of noEol) {
   hits.push(`BYTE_NO_TRAILING_NEWLINE: ${rel} 结尾没有换行（POSIX 文本文件约定；也是 diff 噪音来源）`);
 }
 
@@ -137,12 +171,19 @@ if (existsSync(hooksDir)) {
   }
 }
 
+// 首行把**扫描根 / 是否含未跟踪文件 / 跳过面**全部交代清楚（P10：他们的迭代失控有一半来自
+// "不知道这一份清单覆盖到哪"）：扫的是**文件系统**，因此包含被 `.gitignore` 忽略的本地文件；
+// 二进制按 NUL/替换字符跳过并计数（不让行尾手术伤到压缩包）。
 console.log(`BYTE_DISCIPLINE_ROOT=${root.split('\\').join('/')} GITATTRIBUTES=${existsSync(gaPath) ? 'present' : 'absent'} PINS=${pins.length} HOOKS=${existsSync(hooksDir) ? 'present' : 'absent'} STRICT_DIRS=${strictDirs.join(',') || '(all)'}`);
-console.log(`BYTE_DISCIPLINE_READING STRICT_SCOPE_FILES=${mixed.length + boms.length + noEol.length === 0 ? 'n/a' : `${boms.length}bom/${noEol.length}noeol`}`);
+console.log(`BYTE_DISCIPLINE_SCOPE MODE=filesystem INCLUDES_UNTRACKED=yes INCLUDES_GITIGNORED=yes GITIGNORED_FILES=${skippedByGitignore} SKIPPED_BINARY=${skippedBinary} SCANNED=${scanned}`);
+console.log(`BYTE_DISCIPLINE_COUNTS mixed=${mixed.length} bom=${boms.length} noeol=${noEol.length}`);
 if (hits.length > 0) {
   console.log(`BYTE_DISCIPLINE_VIOLATIONS=${hits.length}`);
-  for (const h of hits.slice(0, 12)) console.log(`  ${h}`);
+  // **全量打印**（P10：原先 slice 截断且顺序不稳 ⇒ "看到的 ≠ 全部"不可见，他们据此迭代改错 57 个文件）
+  for (const h of hits) console.log(`  ${h}`);
+  console.log(`BYTE_DISCIPLINE_PRINTED=${hits.length} TOTAL=${hits.length} TRUNCATED=no`);
   process.exit(1);
 }
 console.log('BYTE_DISCIPLINE_VIOLATIONS=0');
+console.log('BYTE_DISCIPLINE_PRINTED=0 TOTAL=0 TRUNCATED=no');
 process.exit(0);

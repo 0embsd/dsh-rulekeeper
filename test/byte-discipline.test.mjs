@@ -125,3 +125,43 @@ test('判据⑥: D/E 只扫"手写面"（生成态目录不参与，可用环境
   assert.equal(res2.status, 1, `显式声明扫描面后应报；out=${res2.stdout}`);
   assert.match(res2.stdout ?? '', /BYTE_NO_TRAILING_NEWLINE/);
 });
+
+// ── P10（被治理项目侧实测：截断 + 顺序不稳 + 范围不明 ⇒ 诱发误操作）──────────────
+// 现场：恒有 13 条违规但每次只打印约 12 条、且**每次文件集合几乎不重叠** ⇒ 他们按"修到收敛"
+// 写了循环，四轮改了 **57 个文件**（还顺带改了内容），最后全部回滚。
+// 三条判据：①全量打印并给 PRINTED/TOTAL；②同输入两次输出**逐字相同**；③范围（含未跟踪/忽略）明示。
+
+test('判据⑦（P10）: 违规**全量打印**，PRINTED == TOTAL，且不得静默截断', () => {
+  const dir = tempDir('byte-print');
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, '.gitattributes'), '*.txt text eol=lf\n', 'utf8');
+  // 造 20 个混行尾文件（远超原先的 slice(0,8) 上限）
+  for (let i = 0; i < 20; i += 1) writeFileSync(join(dir, 'src', `m${String(i).padStart(2, '0')}.txt`), 'a\r\nb\n', 'utf8');
+  const res = run(dir);
+  assert.equal(res.rc, 1);
+  const m = /BYTE_DISCIPLINE_PRINTED=(\d+) TOTAL=(\d+) TRUNCATED=(\w+)/.exec(res.out);
+  assert.ok(m !== null, `必须给出 PRINTED/TOTAL 读数；out=${res.out}`);
+  assert.equal(m[1], m[2], 'PRINTED 必须等于 TOTAL（要么全打印，要么显式交代差额）');
+  assert.equal(m[3], 'no');
+  const printed = res.out.split('\n').filter((l) => l.includes('BYTE_EOL_INCONSISTENT')).length;
+  assert.equal(printed, 20, `20 条违规必须全部打印（实得 ${printed}）`);
+});
+
+test('判据⑧（P10）: 同输入两次运行，输出**逐字相同**（顺序确定化）', () => {
+  const dir = tempDir('byte-stable');
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, '.gitattributes'), '*.txt text eol=lf\n', 'utf8');
+  for (const n of ['z.txt', 'a.txt', 'm.txt', 'b.txt']) writeFileSync(join(dir, 'src', n), 'x\r\ny\n', 'utf8');
+  const first = run(dir).out;
+  const second = run(dir).out;
+  assert.equal(second, first, '同一仓库两次运行必须逐字相同（否则任何"迭代收敛"自动化都会失控）');
+});
+
+test('判据⑨（P10）: 范围必须明示（扫的是文件系统 ⇒ 含未跟踪/被忽略的文件）', () => {
+  const dir = tempDir('byte-scope-readout');
+  writeFileSync(join(dir, '.gitattributes'), '*.txt text eol=lf\n', 'utf8');
+  writeFileSync(join(dir, 'x.txt'), 'a\n', 'utf8');
+  const res = run(dir);
+  assert.match(res.out, /BYTE_DISCIPLINE_SCOPE MODE=filesystem INCLUDES_UNTRACKED=yes INCLUDES_GITIGNORED=yes/);
+  assert.match(res.out, /GITIGNORED_FILES=\d+ SKIPPED_BINARY=\d+ SCANNED=\d+/);
+});

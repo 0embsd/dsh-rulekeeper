@@ -13,7 +13,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { ledgerGroups, recurrenceIdentity } from '../src/effect.mjs';
-import { MUTATE_CATEGORY, MUTATE_MECHANISM, foldMutates } from '../src/ledger-mutate.mjs';
+import { MUTATE_CATEGORY, MUTATE_FOLD_FIELDS, MUTATE_MECHANISM, foldMutates, parseSets, planMutation } from '../src/ledger-mutate.mjs';
 import { supersededIds } from '../src/ledger.mjs';
 import { adoptionReport } from '../src/adopt.mjs';
 import { cleanupAll, tempDir } from './helpers/sandbox.mjs';
@@ -121,4 +121,50 @@ test('判据⑦（P2 边界）: 没有 mutate 的账本原样返回（fold 不�
     { id: 'Y', rule: 'R', category: '技术', problem: 'q', mechanism: 'text' },
   ];
   assert.deepEqual(foldMutates(rows), rows);
+});
+
+// ── P9（被治理项目侧实测的**高危静默失效**）──────────────────────────────────────
+// 现场：白名单只收蛇形 `guard_ref`，而账本行与所有读侧用**驼峰 `guardRef`** ⇒
+// `mutate --set guard_ref=hook:pre-push` 落成**另一个键**（两字段并存、谁也不覆盖谁）
+// ⇒ 检查器读 `row.guardRef` 仍是旧值：**看起来成功、实际不生效**。他们因此中止了该改动。
+// （附带信号：dry-run 打印旧值为空 —— 它读的也是蛇形键。）
+
+test('判据⑧（P9）: `--set guard_ref=` 必须**归一成驼峰**并真正生效', () => {
+  const parsed = parseSets(['guard_ref=hook:pre-push']);
+  assert.equal(parsed.ok, true, JSON.stringify(parsed.problems));
+  assert.deepEqual(Object.keys(parsed.sets), ['guardRef'], '必须归一成账本里真用的键（不能并存 snake/camel）');
+
+  const old = {
+    schema: 1, id: 'L-G', ts: '2026-01-01T00:00:00.000Z', rule: 'GATE-DISCIPLINE', category: '流程',
+    problem: 'p', mechanism: 'guard', guardRef: 'hook:pre-commit', evidence: [],
+    status: 'active',
+  };
+  const plan = planMutation([old], {
+    targetId: 'L-G', sets: parsed.sets, by: 'human', reason: '改指真实拦截面',
+    newId: 'L-G2', now: new Date('2026-02-01T00:00:00.000Z'),
+  });
+  assert.equal(plan.ok, true, JSON.stringify(plan.problems));
+  assert.equal(plan.newRow.guardRef, 'hook:pre-push', '归档行承载新值（驼峰）');
+  assert.equal(plan.newRow.guard_ref, undefined, '不得另起一个蛇形键');
+
+  const folded = foldMutates([old, plan.newRow, plan.statusRow]);
+  const live = folded.find((r) => r.id === 'L-G');
+  assert.equal(live.guardRef, 'hook:pre-push', '**验收判据**：消费方读 row.guardRef 必须拿到新值');
+  assert.equal(live.guard_ref, undefined, '不残留第二个键');
+});
+
+test('判据⑨（P9 附带）: 同一字段**不得两种拼法并存**（账本里 `root_cause` 本身就是合法的蛇形键）', () => {
+  // 真形态：`guardRef` 与 `guard_ref` 指同一个字段 ⇒ 并存就是 P9 的静默失效。
+  // 注意别写成"不许有下划线"——`root_cause` 是账本自己的键名，那样会误伤。
+  const camelOf = (f) => f.replace(/_([a-z])/g, (_m, c) => c.toUpperCase());
+  const groups = new Map();
+  for (const f of MUTATE_FOLD_FIELDS) {
+    const g = camelOf(f);
+    groups.set(g, [...(groups.get(g) ?? []), f]);
+  }
+  for (const [g, list] of groups) {
+    assert.equal(list.length, 1, `同一字段两种拼法并存：${list.join(' / ')}（归一成 ${g}）——这正是 P9 的静默失效形态`);
+  }
+  assert.ok(MUTATE_FOLD_FIELDS.includes('guardRef'), '字段表必须用账本真用的驼峰 guardRef');
+  assert.ok(!MUTATE_FOLD_FIELDS.includes('guard_ref'), '不得同时列蛇形 guard_ref');
 });

@@ -35,7 +35,7 @@ export const MUTATE_MARK = 'MUTATES';
  * 与 `MUTABLE_FIELDS` 不同：不含 `evidence`（证据是**追加**语义，不是覆盖），也不含身份字段（本来禁改）。
  * 读侧把这些字段从归档行搬到目标 id 上 —— 这样"改了 mechanism 但检查器读旧值"的**静默降级**才不存在。
  */
-export const MUTATE_FOLD_FIELDS = Object.freeze(['problem', 'root_cause', 'solution', 'mechanism', 'guardRef', 'guard_ref']);
+export const MUTATE_FOLD_FIELDS = Object.freeze(['problem', 'root_cause', 'solution', 'mechanism', 'guardRef']);
 /**
  * 归档行**不会**搬给目标 id 的字段（读侧 fold 的排除表）。
  *
@@ -122,8 +122,21 @@ export function foldMutates(rows = []) {
   return out;
 }
 
-/** 允许改的字段（**白名单**：id/ts/rule 身份字段不许改 —— 改了就不是"同一条教训"了） */
-export const MUTABLE_FIELDS = Object.freeze(['problem', 'root_cause', 'solution', 'mechanism', 'guard_ref', 'category', 'evidence']);
+/**
+ * 允许改的字段（**白名单**：id/ts/rule 身份字段不许改 —— 改了就不是"同一条教训"了）
+ *
+ * ⚠ **字段名必须与"账本行里真正用的键"一致**（2026-09-22 被治理项目侧 P9 实测抓到的静默失效）：
+ * 白名单原先只写蛇形 `guard_ref`，而账本行与所有读侧用的是**驼峰 `guardRef`**（见 `src/ledger.mjs`
+ * 的 `normalizeEntry` 与 `adoption-contract` 的 `row.guardRef`）。于是 `mutate --set guard_ref=…`
+ * 会落成**另一个键**（两字段并存，谁也不覆盖谁）⇒ **看起来成功、实际不生效**。
+ * 现在两种写法都收，但**统一归一成驼峰**（`FIELD_ALIASES`），落盘只有一种形状。
+ */
+export const MUTABLE_FIELDS = Object.freeze(['problem', 'root_cause', 'solution', 'mechanism', 'guardRef', 'category', 'evidence']);
+/** 字段别名 → **账本行里真正用的键**（写侧归一，避免"同名不同键"的静默失效） */
+export const FIELD_ALIASES = Object.freeze({ guard_ref: 'guardRef' });
+/** `--set` 支持的字段名（含别名；错误提示用） */
+export const SETTABLE_FIELDS = Object.freeze([...new Set([...MUTABLE_FIELDS, ...Object.keys(FIELD_ALIASES)])]);
+
 /** 记账字段（归档行里保留：谁改的、为什么改） */
 export const MUTATE_META_FIELDS = Object.freeze(['by', 'reason']);
 
@@ -142,18 +155,19 @@ export function parseSets(list = []) {
       problems.push(`--set 必须是 <字段>=<值>（实得 ${JSON.stringify(s)}）`);
       continue;
     }
-    const key = s.slice(0, i).trim();
+    const key0 = s.slice(0, i).trim();
+    const key = FIELD_ALIASES[key0] ?? key0;                      // 归一成账本里真用的键
     const value = s.slice(i + 1);
-    if (key === '证据加') {
+    if (key0 === '证据加') {
       if (value.trim() === '') problems.push('证据加= 的值不得为空');
       else addEvidence.push(value.trim());
       continue;
     }
-    if (!MUTABLE_FIELDS.includes(key)) {
-      problems.push(`字段 ${JSON.stringify(key)} 不可改（可改：${MUTABLE_FIELDS.join('/')}；身份字段 id/ts/rule 一律禁改）`);
+    if (!SETTABLE_FIELDS.includes(key0)) {
+      problems.push(`字段 ${JSON.stringify(key0)} 不可改（可改：${SETTABLE_FIELDS.join('/')}；身份字段 id/ts/rule 一律禁改）`);
       continue;
     }
-    if (value.trim() === '' && key !== 'evidence') problems.push(`字段 ${key} 不得改成空值`);
+    if (value.trim() === '' && key !== 'evidence') problems.push(`字段 ${key0} 不得改成空值`);
     else sets[key] = value;
   }
   return { ok: problems.length === 0, sets, addEvidence, problems };
