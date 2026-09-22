@@ -52,6 +52,33 @@
 - 事件行（`生效登记`/`生效退役`）里的**绝对路径**单独一档：它们是事件事实、不是教训凭据，
   故只计数（`OUT_OF_SCOPE_ABS=n`）**不判红**（对象错位，规则 41 的同族）。
 
+## 判据要改一版怎么办？换绑（`EFFECT_SUPERSEDE`）
+
+`rules.json` 的 `checks` 是并集，同一条纪律可以有多条绑定；而**判据本身会演进**（例：把
+`byte-discipline` 的扫描面从"文件系统"收敛成 `git ls-files`，`checkerVersion` 从 @1 到 @2）。
+此前只有两条路，都不对：
+
+| 路 | 问题 |
+|---|---|
+| 再 apply 一条同 rule 的绑定 | 被 `EFFECT_CHECKER_ALREADY_BOUND` 拒（防重复挂同一判据） |
+| 走 `EFFECT_RETIRE_CANDIDATE` 整条退役，再重挂 | 退役分支把该 rule 的 checks **全摘** ⇒ 中间有一段"这条纪律没人守"的空窗 |
+| 手改 `rules.json` | 绕过唯一写通路 ⇒ "闸门不可被 AI 直接改"当场作废 |
+
+**换绑**是第三条路（同一次 `rk-effect apply` 内完成，停写窗口只有原子替换那一瞬）：
+
+1. 提案 `redCriteria` 里带 `EFFECT_SUPERSEDE` 标记；
+2. 提案顶层写 `supersedes: { spec | carrier, reason }` —— **必须点名换掉哪一个**（同 rule 可能有多条
+   绑定，不点名就会静默换错对象），`reason` ≥8 字；
+3. 效果：旧条目从 `checks` **摘除**、新条目加入，同一纪律的其余绑定（别的 kind / 别的载体）**不动**；
+4. 留证：账本写**两行** —— `生效登记`（新绑定，`solution` 里带 `superseded=<旧身份>`）+
+   `生效退役`（旧绑定退场）。两行都属事件类目，不进复发计数。
+
+fail-closed 清单（任一不满足 ⇒ **不落盘**，`rules.json` 逐字节不变）：标记在但缺 `supersedes`、
+既没给 `spec` 也没给 `carrier`、`reason` 太短、点名的目标与现有绑定对不上。
+
+**体检语义**：换绑之后该纪律**不得**被读成 `retired`（旧绑定退场 ≠ 整条纪律退场）——`plan` 判退役
+时同时要求"现在没有活着的绑定"。
+
 ## 检查器能不能搬去别的项目？看 spec 的 `applicability`
 
 8 份 spec 都有 `applicability: { scope, requires, note }`。要点：

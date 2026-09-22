@@ -62,6 +62,19 @@ export const REGISTERED_GAP_CATEGORY = '登记缺口';
 /** 退役提案的机器标记（写在 `redCriteria` 前缀）：`planActivation` 据此走"摘绑定"而不是"加绑定" */
 export const RETIRE_MARK = 'EFFECT_RETIRE_CANDIDATE';
 /**
+ * **换绑**（supersede）提案的机器标记：`redCriteria` 里出现它 ⇒ 允许**同一条纪律**重新落一条绑定，
+ * 同时把被替换的旧绑定**逐条留证**（`superseded` 字段 + `生效退役` 账本行）。
+ *
+ * 为什么非有不可（2026-09-22 实测，被治理项目当场撞到）：`EFFECT_CHECKER_ALREADY_BOUND` 只写了
+ * "要先退役再改"，而**退役通路只支持"整条纪律摘空"**（`RETIRE_MARK` 分支把该 rule 的 checks 全摘）。
+ * 于是"判据要在**不中断保护**的前提下改一处/换一版"这件事，在这套工具里**根本没有合法路径**：
+ * 唯一出路是手改 `rules.json` —— 正是"闸门不可被 AI 直接改"这条声明存在的理由。
+ * 判据本身会演进（本次就是：`byte-discipline@1 → @2`），一条判据一辈子只能绑一次 = 谎。
+ */
+export const SUPERSEDE_MARK = 'EFFECT_SUPERSEDE';
+/** 老形态/新形态都认的字段名（`counterExample` 是字符串，装不下结构，故放顶层键） */
+export const SUPERSEDE_KEYS = Object.freeze(['supersedes', 'supersede']);
+/**
  * **复发判定的相似度阈值**（2026-09-21，交接 B1）—— **按实测标定，不复用入库门的 0.6**。
  *
  * 为什么不能用 0.6：入库门问的是"这两条是不是**同一条**记录"（近重复），而复发问的是"这两条是不是
@@ -567,11 +580,14 @@ export function effectPlan(opts = {}) {
     else state = 'mechanized';
     // **退役**（LF-A55）：有人签字退役过、且晚于最后一次生效登记 ⇒ 这一条是"主动不再拦"，
     // 不是"坏了"。故它既不算没绑定（ACTIVATED_UNBOUND），也不算"只写下来了"（TEXT_ONLY）。
+    // ⚠ **换绑也算一次"生效退役"事件**（旧绑定被摘掉），故必须同时要求"现在没有活着的绑定" ——
+    // 否则换个版本就把整条纪律判成 retired（判据明明还在守），且 `state` 赋值在后面会覆盖 verified。
     const retireTs = (() => {
       const list = retirements.get(rule) ?? [];
       return list.length === 0 ? null : list.map((x) => x.ts ?? '').sort().pop();
     })();
-    const retired = retireTs !== null && (lastActivation === null || retireTs > lastActivation);
+    const retired = retireTs !== null && (lastActivation === null || retireTs > lastActivation)
+      && b.checks.length === 0;
     if (retired) state = 'retired';
     const hitInfo = hitsOfRule({ rule, bindings: b, hits });
 
@@ -895,6 +911,53 @@ function patternHits(pattern, pathKeyValue, projectRoot) {
 }
 
 /**
+ * 解析提案里的**换绑声明**（`SUPERSEDE_MARK` + `supersedes:{spec|carrier, reason}`）。
+ *
+ * 为什么声明要显式到"换掉哪一个"：`rules.json` 的 checks 是**并集**，允许同一 rule 多条绑定；
+ * 只说"我要重绑"会让实现只能"见一条就换一条"，换错对象是静默的。故要求点名
+ * `spec`（checker 绑定）或 `carrier`（文件载体绑定），并对不上就**拒绝落盘**。
+ *
+ * @returns {{declared: boolean, spec: string|null, carrier: string|null, reason: string|null, problems: string[]}}
+ */
+export function supersedeDeclarationOf(proposal) {
+  const out = { declared: false, spec: null, carrier: null, reason: null, problems: [] };
+  if (proposal === null || typeof proposal !== 'object') return out;
+  const rc = typeof proposal.redCriteria === 'string' ? proposal.redCriteria : '';
+  out.declared = rc.includes(SUPERSEDE_MARK);
+  let decl = null;
+  for (const key of SUPERSEDE_KEYS) {
+    const v = proposal[key];
+    if (v !== undefined && v !== null) { decl = v; break; }
+  }
+  if (decl === null) {
+    if (out.declared) out.problems.push(`${SUPERSEDE_MARK}: 提案缺 \`supersedes\` 声明（换绑必须点名换掉哪一个绑定与理由）`);
+    return out;
+  }
+  if (typeof decl !== 'object' || Array.isArray(decl)) {
+    out.problems.push('`supersedes` 必须是对象：`{ spec?: "<规格文件>", carrier?: "<载体>", reason: "<为什么换>" }`');
+    return out;
+  }
+  const str = (v) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null);
+  out.spec = str(decl.spec);
+  out.carrier = str(decl.carrier);
+  out.reason = str(decl.reason);
+  if (out.spec === null && out.carrier === null) out.problems.push('`supersedes` 必须至少给 `spec` 或 `carrier` 之一（否则无法证明换的是哪一个绑定）');
+  if (out.reason === null || out.reason.length < 8) out.problems.push('`supersedes.reason` 必须是 ≥8 字的**可读理由**（"为什么换"，不是"换了"）');
+  return out;
+}
+
+/** 一条绑定条目的**身份**（换绑匹配用）：checker 用 spec，其余用 carrier（与 `carrierOfBinding` 同源） */
+function bindingIdentityOf(entry) {
+  const b = normalizeBinding(entry);
+  if (b === null) return null;
+  if (b.kind === 'checker') {
+    const spec = b.spec ?? (typeof b.checkerRef === 'string' ? b.checkerRef : null);
+    return spec === null ? null : toPosix(spec.replace(/^\.\//, ''));
+  }
+  return b.carrier === null ? null : toPosix(b.carrier);
+}
+
+/**
  * 由**已批准**的提案生成 `rules.json` 变更草案（**不写盘**）。LF-A30/A40 共用。
  * @param {{landingDir: string, proposal: object, patterns?: string[], gate?: string, now?: Date}} opts
  */
@@ -1047,12 +1110,58 @@ export function planActivation(opts = {}) {
     const already = (Array.isArray(before.checks) ? before.checks : [])
       .map((e) => normalizeBinding(e))
       .some((b) => b !== null && b.rule === rule && b.kind === 'checker');
+    // ── 换绑（`EFFECT_SUPERSEDE`）：同一条纪律在**不中断保护**的前提下换一版判据 ──────────────
+    // 老行为 = 一律拒（`EFFECT_CHECKER_ALREADY_BOUND`），而"整条退役"又会留出保护空窗期
+    // ⇒ 判据根本改不了（见 `SUPERSEDE_MARK` 的来历）。现在：声明齐备且**点名换掉哪一个** ⇒
+    // 摘旧、加新、并在 `rules.json` 里给旧绑定盖 `superseded` 戳（逐条留证，而不是静默消失）。
+    let supersededEntry = null;
+    let keptChecks = Array.isArray(before.checks) ? before.checks : [];
     if (already) {
-      return { ok: false, findings: [{ code: 'EFFECT_CHECKER_ALREADY_BOUND', message: `${rule}: 已有 checker 绑定（避免重复挂同一判据；要先退役再改）` }], candidate: null, additions: null };
+      const decl = supersedeDeclarationOf(proposal);
+      // 没声明 或 声明本身就不合格 ⇒ 一律拒（**护栏不许因为"实现了换绑"而被拆掉**）。
+      // 这个 `if` 的形态是实打实踩出来的：最初写成 `problems.length > 0` 才拒，于是"标记与 supersedes
+      // 都没写"的提案**直接漏过护栏**、照样并集落第二条绑定（用例②当场抓到）。
+      if (!decl.declared || decl.problems.length > 0) {
+        return {
+          ok: false,
+          findings: [
+            { code: 'EFFECT_CHECKER_ALREADY_BOUND', message: `${rule}: 已有 checker 绑定；要改判据必须走换绑（redCriteria 含 ${SUPERSEDE_MARK} + 顶层 supersedes）或整条退役（${RETIRE_MARK}）` },
+            ...decl.problems.map((p) => ({ code: 'EFFECT_SUPERSEDE_DECLARATION_INVALID', message: `${rule}: ${p}` })),
+          ],
+          candidate: null,
+          additions: null,
+        };
+      }
+      const wantSpec = toPosix((decl.spec ?? ce.value).replace(/^\.\//, ''));
+      const idx = keptChecks.findIndex((e) => {
+        const b = normalizeBinding(e);
+        return b !== null && b.rule === rule && b.kind === 'checker' && bindingIdentityOf(e) === wantSpec;
+      });
+      if (idx < 0) {
+        const have = keptChecks
+          .filter((e) => { const b = normalizeBinding(e); return b !== null && b.rule === rule && b.kind === 'checker'; })
+          .map((e) => bindingIdentityOf(e) ?? '(无 spec)');
+        return { ok: false, findings: [{ code: 'EFFECT_SUPERSEDE_TARGET_MISSING', message: `${rule}: 换绑声明的目标 ${wantSpec} 与现有 checker 绑定对不上（现有：${have.join(', ') || '无'}）⇒ 拒绝落盘（换错对象是静默的）` }], candidate: null, additions: null };
+      }
+      // 先落"旧绑定的最后状态"（供审计与后续体检用），再从 checks 里摘掉它
+      supersededEntry = { identity: wantSpec, proposal: keptChecks[idx].proposal ?? null, activatedAt: keptChecks[idx].activatedAt ?? null };
+      keptChecks = keptChecks.filter((_, i) => i !== idx);
     }
+    const supersededStamp = supersededEntry === null
+      ? null
+      : {
+        identity: supersededEntry.identity,
+        proposal: supersededEntry.proposal,
+        activatedAt: supersededEntry.activatedAt,
+        supersededBy: proposal.id ?? null,
+        supersededAt: now.toISOString(),
+        supersededReason: supersedeDeclarationOf(proposal).reason,
+      };
+    // `checks` 语义单一：**只装活绑定**（被换掉的那条从这里摘除；留证 = `supersededStamp` → 账本
+    // `生效登记` 行的 `superseded=` 段 + `生效退役` 行）。塞回"幽灵条目"会让读侧把它当活绑定。
     const candidate = {
       ...before,
-      checks: [...(Array.isArray(before.checks) ? before.checks : []), binding],
+      checks: [...keptChecks, binding],
     };
     return {
       ok: true,
@@ -1063,7 +1172,7 @@ export function planActivation(opts = {}) {
       carriers: [],
       falsePositive: null,
       patterns: [],
-      additions: { patterns: [], binding },
+      additions: { patterns: [], binding, ...(supersededStamp === null ? {} : { superseded: supersededStamp }) },
       candidate,
       spec: ce.value,
     };
@@ -1271,7 +1380,12 @@ export function applyActivation(opts = {}) {
     steps.push(`proposal ${opts.proposalId} -> approved`);
 
     // ⑥ 生效登记 / **生效退役**（账本事件行；`record` 自带脱敏 + off 档零副作用）
+    // **换绑也要留一条退役行**（2026-09-22）：旧绑定从 `checks` 里摘掉这件事必须可审计 ——
+    // 只写"新绑定已生效"会让"旧判据什么时候不再拦"永远查不到（append-only 台账正是为此存在）。
+    // 故换绑写**两行**：一行 `生效登记`（新绑定生效，带 `superseded=` 指认被换掉的旧绑定）、
+    // 一行 `生效退役`（旧绑定退场）。两行都属事件类目 ⇒ 不进复发计数。
     const isRetire = planned.kind === 'retire';
+    const supersede = planned.additions?.superseded ?? null;
     const logged = ledgerRecord({
       rule: planned.rule,
       category: isRetire ? EFFECT_RETIRE_CATEGORY : EFFECT_EVENT_CATEGORY,
@@ -1282,11 +1396,13 @@ export function applyActivation(opts = {}) {
           : `EFFECT_ACTIVATE rule=${planned.rule} proposal=${opts.proposalId} patterns=${planned.additions.patterns.length} gate=${planned.gate}`),
       root_cause: isRetire
         ? '零信号窗口内主动不再拦（退役）：判据成本高于收益，或场景已消失'
-        : '入账未生效：生效面此前没有绑定（rules.json 的 checks 无消费者）',
+        : (supersede === null
+          ? '入账未生效：生效面此前没有绑定（rules.json 的 checks 无消费者）'
+          : `判据本身演进：旧绑定（${supersede.identity}）被同一条纪律的新版本替换 —— 换绑不是"退役后重挂"，保护面无空窗`),
       solution: isRetire
         ? `checks 摘掉 ${planned.additions.retirement.removedBindings} 条绑定；protected_paths -= [${planned.additions.retirement.removedPatterns.join(', ')}]`
         : (planned.kind === 'activate-checker'
-          ? `checks += [kind=checker spec=${planned.spec ?? '-'} command=${(planned.additions.binding.command ?? []).join(' ')} sample=${planned.additions.binding.redSample?.source ?? '-'}]`
+          ? `checks += [kind=checker spec=${planned.spec ?? '-'} command=${(planned.additions.binding.command ?? []).join(' ')} sample=${planned.additions.binding.redSample?.source ?? '-'}]${supersede === null ? '' : `；同时摘掉 superseded=${supersede.identity}（原 proposal=${supersede.proposal ?? '-'} activatedAt=${supersede.activatedAt ?? '-'}）`}`
           : `protected_paths += [${planned.additions.patterns.join(', ')}]；checks += [carrier=${planned.additions.binding.carrier}]`),
       mechanism: 'rules.json',
       evidence: [
@@ -1296,6 +1412,23 @@ export function applyActivation(opts = {}) {
       ],
     }, { landingDir, now });
     steps.push(`ledger ${logged.ok === true ? (logged.entry?.id ?? 'ok') : `FAILED(${logged.reason})`}`);
+    // 换绑的第二行：旧绑定的退场（缺席时"旧判据还在不在拦"就查不到了）
+    if (supersede !== null) {
+      const loggedRetire = ledgerRecord({
+        rule: planned.rule,
+        category: EFFECT_RETIRE_CATEGORY,
+        problem: `EFFECT_RETIRE rule=${planned.rule} proposal=${opts.proposalId} supersededBy=${opts.proposalId} identity=${supersede.identity}`,
+        root_cause: '判据演进（换绑）：旧版本被同一条纪律的新版本替换，旧绑定自本次起不再生效',
+        solution: `checks -= [spec=${supersede.identity}]；新绑定见同一次 apply 的生效登记行`,
+        mechanism: 'rules.json',
+        evidence: [
+          toPosix(rulesFile),
+          ...(backupPath === null ? [] : [toPosix(backupPath)]),
+          describeApproval(approval),
+        ],
+      }, { landingDir, now });
+      steps.push(`ledger(retire) ${loggedRetire.ok === true ? (loggedRetire.entry?.id ?? 'ok') : `FAILED(${loggedRetire.reason})`}`);
+    }
     // ⑦ 回读复核（锁内最后一件事）：候选的 mode 必须与落点真实 mode 一致
     //    （`record` 在 mode=off 时会**零副作用**跳过 —— 那不是失败，但必须如实告知）
     return {

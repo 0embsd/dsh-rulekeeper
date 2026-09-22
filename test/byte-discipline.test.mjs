@@ -19,11 +19,19 @@ test.after(cleanupAll);
 
 const CHECKER = join(PKG_ROOT, 'scripts', 'checkers', 'byte-discipline.mjs');
 
-function run(sampleDir) {
+function run(sampleDir, extraEnv = {}) {
   const res = spawnSync(process.execPath, [CHECKER], {
-    cwd: PKG_ROOT, encoding: 'utf8', env: { ...process.env, RULEKEEPER_SAMPLE_DIR: sampleDir },
+    cwd: PKG_ROOT, encoding: 'utf8', env: { ...process.env, RULEKEEPER_SAMPLE_DIR: sampleDir, ...extraEnv },
   });
   return { rc: res.status, out: res.stdout ?? '', err: res.stderr ?? '' };
+}
+
+/** 把临时目录变成**真 git 仓**（默认扫描面靠 `git ls-files` 判定，夹具必须真） */
+function gitInit(dir) {
+  for (const args of [['init', '-q'], ['add', '-A']]) {
+    const r = spawnSync('git', ['-c', 'core.quotePath=false', '-C', dir, ...args], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `夹具 git ${args.join(' ')} 失败：${r.stderr}`);
+  }
 }
 
 test('判据②: 真仓零违规（夹具面必须豁免，否则永远红）', () => {
@@ -157,11 +165,40 @@ test('判据⑧（P10）: 同输入两次运行，输出**逐字相同**（顺�
   assert.equal(second, first, '同一仓库两次运行必须逐字相同（否则任何"迭代收敛"自动化都会失控）');
 });
 
-test('判据⑨（P10）: 范围必须明示（扫的是文件系统 ⇒ 含未跟踪/被忽略的文件）', () => {
+test('判据⑨（P10）: 范围必须明示（非 git 仓 ⇒ 如实降级为文件系统扫，并打标）', () => {
   const dir = tempDir('byte-scope-readout');
   writeFileSync(join(dir, '.gitattributes'), '*.txt text eol=lf\n', 'utf8');
   writeFileSync(join(dir, 'x.txt'), 'a\n', 'utf8');
   const res = run(dir);
+  // 临时目录不是 git 仓 ⇒ 拿不到跟踪清单 ⇒ **不得假装**是 tracked 模式
   assert.match(res.out, /BYTE_DISCIPLINE_SCOPE MODE=filesystem INCLUDES_UNTRACKED=yes INCLUDES_GITIGNORED=yes/);
-  assert.match(res.out, /GITIGNORED_FILES=\d+ SKIPPED_BINARY=\d+ SCANNED=\d+/);
+  assert.match(res.out, /UNTRACKED_FILES=\d+ SKIPPED_BINARY=\d+ SCANNED=\d+/);
+});
+
+// ── 判据⑩（P10 第二段：扫描面必须等于"仓库承诺面"）─────────────────────────────
+// 现场：检查器的违规清单会被下游当成"要修的全集"，而它当时连**被 `.gitignore` 忽略/未跟踪**的
+// 本地文件一起报（某仓 `docs/archive/**` 的里程碑草稿）⇒ "按清单迭代到收敛"永远收敛不到零
+// （改了也不进库，下一轮照报）。所以默认面 = `git ls-files`，两种模式都要把面**打在首行**。
+test('判据⑩: 默认只扫已跟踪文件；未跟踪/被忽略的违规文件不计入，但被计数（filesystem 模式才报）', () => {
+  const dir = tempDir('byte-tracked-only');
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, '.gitattributes'), '*.txt text eol=lf\n', 'utf8');
+  writeFileSync(join(dir, 'src', 'tracked.txt'), 'a\nb\n', 'utf8');
+  gitInit(dir);
+  // 入库之后才出现的本地草稿：被 `.gitignore` 吃掉 ⇒ **不在承诺面内**（模拟真实仓的 `docs/archive/**`）
+  writeFileSync(join(dir, '.gitignore'), 'local-draft.txt\n', 'utf8');
+  writeFileSync(join(dir, 'src', 'local-draft.txt'), 'a\r\nb\n', 'utf8');
+  // 前置事实：它确实**没**被跟踪（否则这条用例测的是别的东西）
+  assert.equal(spawnSync('git', ['-C', dir, 'ls-files', '--error-unmatch', 'src/local-draft.txt'], { encoding: 'utf8' }).status !== 0, true);
+
+  const tracked = run(dir);
+  assert.equal(tracked.rc, 0, `未跟踪文件的违规不该计入；out=${tracked.out}`);
+  assert.match(tracked.out, /BYTE_DISCIPLINE_SCOPE MODE=tracked INCLUDES_UNTRACKED=no INCLUDES_GITIGNORED=no/);
+  // 2 = `.gitignore`（入库前刚写）+ `src/local-draft.txt`：读数口径是"文件系统里有、跟踪清单里没有的**所有**文件"
+  assert.match(tracked.out, /UNTRACKED_FILES=2 /, '被排除的文件数必须显式打出（"看到的 ≠ 全部"不能隐形）');
+  assert.doesNotMatch(tracked.out, /local-draft\.txt/);
+
+  const all = run(dir, { RULEKEEPER_BYTE_SCAN: 'filesystem' });
+  assert.equal(all.rc, 1, `显式要求全盘扫时应报；out=${all.out}`);
+  assert.match(all.out, /BYTE_EOL_INCONSISTENT.*local-draft\.txt/);
 });

@@ -23,6 +23,12 @@
 //   假阳 ≥30% 即止损），D/E 默认**只扫"仓库自己手写的面"**：`src/` `scripts/` `bin/` `test/` `docs/`；
 //   要全量扫（或换成别的面），设这个环境变量。
 //
+// **扫描面**（`RULEKEEPER_BYTE_SCAN`，`tracked`（默认）/ `filesystem`）：
+//   默认**只扫 git 已跟踪的文件**。理由（P10 第二段实测）：被判据报出来的清单会被当成"要修的全集"，
+//   而**未跟踪/被 `.gitignore` 忽略**的本地文件（某仓的 `docs/archive/**` 里程碑草稿）根本不在仓库承诺面内；
+//   把它们混进清单，会让"按清单迭代收敛"永远收敛不到零（改了也不进库，下轮照报）。
+//   `filesystem` 模式保留全盘扫（需要看本地私有文件的字节形态时用），两种模式都在首行打印 `MODE=` 与 `UNTRACKED_FILES=`。
+//
 // 通用性：不假定任何具体项目结构——"必须钉什么"由**仓库自己声明**（`.gitattributes`），
 //   而"有没有声明、混没混行尾、有没有 BOM/丢没丢结尾换行"都是可机械判定的。只读、零网络、零写入。
 //
@@ -76,16 +82,23 @@ const boms = [];
 const noEol = [];
 let scanned = 0;
 let skippedBinary = 0;
-let skippedByGitignore = 0;
-/** 被 `.gitignore` 忽略的相对路径（含未跟踪）：用 git 判定，失败则空集（如实降级，不假装知道） */
-const ignoredSet = (() => {
+let skippedUntracked = 0;
+// **扫描面**（2026-09-22，P10 第二段：他们实测检查器会扫到被 `.gitignore` 忽略的本地文件，
+// 于是"用它报的 list 当全集去迭代"一直在**比预期更大**的群体上打转）。
+// 默认 `tracked`（**只扫 git 跟踪的文件**）：字节纪律判的是"**入库内容**在各种检出上是否一致"，
+// 未跟踪/被忽略的文件属本地状态、天然不在承诺面内。要全盘扫（含未跟踪）设 `RULEKEEPER_BYTE_SCAN=filesystem`。
+const SCAN_MODE = process.env.RULEKEEPER_BYTE_SCAN === 'filesystem' ? 'filesystem' : 'tracked';
+const isGitRepo = existsSync(join(root, '.git'));
+/** 已跟踪文件的相对路径集合（posix）；非 git 仓或 git 失败 ⇒ `null`（如实降级为"文件系统扫"，并打标） */
+const trackedSet = (() => {
+  if (SCAN_MODE !== 'tracked' || !isGitRepo) return null;
+  const r = spawnSync('git', ['-c', 'core.quotePath=false', '-C', root, 'ls-files', '-z'], { encoding: 'buffer' });
+  if (r.status !== 0 || r.stdout === null) return null;
   const set = new Set();
-  if (!existsSync(join(root, '.git'))) return set;
-  const r = spawnSync('git', ['-C', root, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z'], { encoding: 'buffer' });
-  if (r.status !== 0 || r.stdout === null) return set;
   for (const p of String(r.stdout).split('\0')) if (p.trim() !== '') set.add(p.split('\\').join('/'));
   return set;
 })();
+const scanModeEffective = trackedSet === null ? 'filesystem' : 'tracked';
 
 const walk = (dir) => {
   let names;
@@ -97,6 +110,8 @@ const walk = (dir) => {
   for (const name of names) {
     if (SKIP_DIRS.has(name)) continue;
     const full = join(dir, name);
+    // 嵌套仓/子模块不是本仓内容（`git ls-files` 也不会列它）
+    if (existsSync(join(full, '.git'))) continue;
     let st;
     try {
       st = statSync(full);
@@ -107,13 +122,15 @@ const walk = (dir) => {
       walk(full);
       continue;
     }
-    if (!TEXT_EXT.test(name)) continue;
     const rel = full.slice(root.length).replace(/^[\\/]/, '').split('\\').join('/');
+    // **未跟踪面**（见上方 SCAN_MODE 说明）：`tracked` 模式下，`git ls-files` 里没有的文件
+    //（未跟踪、被 `.gitignore` 忽略、或已被删除但仍留在工作区）**不计入判据**，只计数。
+    // 这样"检查器报的清单"就等于"仓库承诺面"，不再包含本地私有文件。
+    // ⚠ 计数在**扩展名过滤之前**：`UNTRACKED_FILES` 才是"我到底少看了多少"的如实读数。
+    if (trackedSet !== null && !trackedSet.has(rel)) { skippedUntracked += 1; continue; }
+    if (!TEXT_EXT.test(name)) continue;
     // 二进制判定（P10 实测的真实风险：`git ls-files` 没跟踪的 `.7z` 备份被当"文本"数行尾，
     // 若按文本"归一"会**损坏压缩包**）。判定 = NUL 字节或 UTF-8 解码出现替换字符。
-    // 口径说明：**被 git 判定为忽略的文件单独计数**（它们仍会被扫——工作区事实；但"看到的 ≠ 全部"
-    // 这件事不再隐形，且修正文案会点名正确解法）。
-    if (ignoredSet.has(rel)) skippedByGitignore += 1;
     const buf = readFileSync(full);
     if (buf.includes(0) || buf.toString('utf8').includes('\uFFFD')) { skippedBinary += 1; continue; }
     scanned += 1;
@@ -175,7 +192,7 @@ if (existsSync(hooksDir)) {
 // "不知道这一份清单覆盖到哪"）：扫的是**文件系统**，因此包含被 `.gitignore` 忽略的本地文件；
 // 二进制按 NUL/替换字符跳过并计数（不让行尾手术伤到压缩包）。
 console.log(`BYTE_DISCIPLINE_ROOT=${root.split('\\').join('/')} GITATTRIBUTES=${existsSync(gaPath) ? 'present' : 'absent'} PINS=${pins.length} HOOKS=${existsSync(hooksDir) ? 'present' : 'absent'} STRICT_DIRS=${strictDirs.join(',') || '(all)'}`);
-console.log(`BYTE_DISCIPLINE_SCOPE MODE=filesystem INCLUDES_UNTRACKED=yes INCLUDES_GITIGNORED=yes GITIGNORED_FILES=${skippedByGitignore} SKIPPED_BINARY=${skippedBinary} SCANNED=${scanned}`);
+console.log(`BYTE_DISCIPLINE_SCOPE MODE=${scanModeEffective} INCLUDES_UNTRACKED=${scanModeEffective === 'tracked' ? 'no' : 'yes'} INCLUDES_GITIGNORED=${scanModeEffective === 'tracked' ? 'no' : 'yes'} UNTRACKED_FILES=${skippedUntracked} SKIPPED_BINARY=${skippedBinary} SCANNED=${scanned}`);
 console.log(`BYTE_DISCIPLINE_COUNTS mixed=${mixed.length} bom=${boms.length} noeol=${noEol.length}`);
 if (hits.length > 0) {
   console.log(`BYTE_DISCIPLINE_VIOLATIONS=${hits.length}`);

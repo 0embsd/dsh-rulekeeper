@@ -204,11 +204,11 @@
         "kind": "tree",
         "source": "."
       },
-      "checkerVersion": "byte-discipline@1",
+      "checkerVersion": "byte-discipline@2",
       "timeoutMs": 30000,
-      "notes": "行尾纪律必须显式钉住（L648/L653 的通用化）：①混行尾（同一文件既有 CRLF 又有裸 LF）②.gitattributes 有却零钉规则 ③.githooks 未被显式钉 eol=lf。夹具面 test-fixtures/** 豁免（那里放故意违规的样本）。",
-      "proposal": "P-20260921-cat-code-byte",
-      "activatedAt": "2026-09-22T00:12:05.385Z"
+      "notes": "字节纪律（L648/L653 的通用化，五项）：①混行尾（同一文件既有 CRLF 又有裸 LF，**按字节计数**判）②.gitattributes 有却零钉规则 ③.githooks 未被显式钉 eol=lf ④UTF-8 BOM ⑤结尾无换行。夹具面 test-fixtures/** 豁免（那里放故意违规的样本）。**扫描面** = `git ls-files`（只判已跟踪文件；未跟踪/被忽略的本地文件只计数，见 `UNTRACKED_FILES`）。",
+      "proposal": "P-20260922-cat-code-byte-scan-face",
+      "activatedAt": "2026-09-22T05:56:41.974Z"
     }
   ],
   "inject": []

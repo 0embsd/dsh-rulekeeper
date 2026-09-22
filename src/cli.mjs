@@ -2815,6 +2815,12 @@ function runCliEffect(argv, io, env) {
       io.out(line(`RK_EFFECT_APPLY_CHECKER_COMMAND=${(out.additions.binding.command ?? []).join(' ')}`));
       io.out(line(`RK_EFFECT_APPLY_CHECKER_EXPECT=red:${out.additions.binding.expectRed?.exitCode} green:${out.additions.binding.expectGreen?.exitCode}`));
     }
+    // 换绑（supersede）必须**打印出来**：dry-run 的 diff 若看不出"旧绑定被摘掉"，
+    // 操作者签的就是自己没看见的东西（这正是"dry-run 先行"存在的意义）。
+    if (out.additions?.superseded !== undefined && out.additions.superseded !== null) {
+      const s = out.additions.superseded;
+      io.out(line(`RK_EFFECT_APPLY_SUPERSEDE=${s.identity} FROM_PROPOSAL=${s.proposal ?? '(none)'} ACTIVATED_AT=${s.activatedAt ?? '(none)'} REASON=${s.supersededReason ?? '(none)'}`));
+    }
     io.out(line(`RK_EFFECT_APPLY_SHA_BEFORE=${out.beforeSha ?? '(new)'} AFTER=${out.afterSha}`));
     if (out.applied === true) {
       io.out(line(`RK_EFFECT_APPLY_BACKUP=${out.backup ?? '(none)'}`));

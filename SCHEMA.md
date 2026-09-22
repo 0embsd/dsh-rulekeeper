@@ -119,6 +119,7 @@
 | `falsePositiveSurface` | string | 是 |  |  | 误报面 |
 | `activationCheck` | string | 是 |  |  | 生效验证方式 |
 | `status` | enum (proposed\|approved\|rejected) | 是 |  |  |  |
+| `supersedes` | object | 否 |  |  | 换绑声明（与 redCriteria 里的 EFFECT_SUPERSEDE 标记配套）：`{ spec?, carrier?, reason }`。点名"要换掉哪一个已有绑定"以及理由 —— 同一纪律允许多条绑定，不点名就可能换错对象（且是静默的）。只有"该纪律已有一条同 kind 绑定、而判据本身演进"时才需要；缺失或点名对不上 ⇒ 拒绝落盘。 |
 
 ## 2. 可变字段的派生规则（**禁原地更新**）
 

@@ -20,14 +20,14 @@
     "kind": "tree",
     "source": "."
   },
-  "checkerVersion": "byte-discipline@1",
+  "checkerVersion": "byte-discipline@2",
   "timeoutMs": 30000,
-  "notes": "字节纪律（L648/L653 的通用化，五项）：①混行尾（同一文件既有 CRLF 又有裸 LF，**按字节计数**判）②.gitattributes 有却零钉规则 ③.githooks 未被显式钉 eol=lf ④UTF-8 BOM ⑤结尾无换行。夹具面 test-fixtures/** 豁免（那里放故意违规的样本）。",
+  "notes": "字节纪律（L648/L653 的通用化，五项）：①混行尾（同一文件既有 CRLF 又有裸 LF，**按字节计数**判）②.gitattributes 有却零钉规则 ③.githooks 未被显式钉 eol=lf ④UTF-8 BOM ⑤结尾无换行。夹具面 test-fixtures/** 豁免（那里放故意违规的样本）。**扫描面** = `git ls-files`（只判已跟踪文件；未跟踪/被忽略的本地文件只计数，见 `UNTRACKED_FILES`）。",
   "applicability": {
     "scope": "any",
     "requires": [
       ".gitattributes 或 .githooks/"
     ],
-    "note": "字节/行尾纪律，不假定语言与目录结构。①②③ **全仓扫**；④BOM 与⑤结尾换行默认**只扫手写面**（`src/scripts/bin/test/docs`，可用环境变量 `RULEKEEPER_BYTE_STRICT_DIRS` 改成别的面或全量）——实测某真实仓 6647 个文本文件里有 17 个 BOM + 460 个无结尾换行，绝大多数是**生成态**（`.eval/`、状态目录、机器写出的 JSON），全量扫会淹没真信号（规则 53：假阳 ≥30% 即止损）。`test-fixtures/**` 豁免。既无 .gitattributes 也无 .githooks ⇒ exit 2"
+    "note": "字节/行尾纪律，不假定语言与目录结构。**扫描面默认只含 git 已跟踪的文件**（`RULEKEEPER_BYTE_SCAN=tracked`，默认）：判据报出的清单会被下游当成\"要修的全集\"，而未被跟踪/被 `.gitignore` 忽略的本地文件不在仓库承诺面内（改了也不进库 ⇒ \"按清单迭代到收敛\"永远收敛不到零）；被排除的条数打在首行 `UNTRACKED_FILES=`。要连本地私有文件一起看时设 `RULEKEEPER_BYTE_SCAN=filesystem`。①②③ **全文本面**；④BOM 与⑤结尾换行默认**只扫手写面**（`src/scripts/bin/test/docs`，可用环境变量 `RULEKEEPER_BYTE_STRICT_DIRS` 改成别的面或全量）——实测某真实仓 6647 个文本文件里有 17 个 BOM + 460 个无结尾换行，绝大多数是**生成态**（`.eval/`、状态目录、机器写出的 JSON），全量扫会淹没真信号（规则 53：假阳 ≥30% 即止损）。`test-fixtures/**` 豁免。既无 .gitattributes 也无 .githooks ⇒ exit 2"
   }
 }
