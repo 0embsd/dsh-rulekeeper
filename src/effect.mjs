@@ -45,7 +45,7 @@ import { CHECK_KINDS } from './checks.mjs';
 import { CLOSE_KNOWN_GATES, effectiveProtection, readGateLedger, reconWrite } from './gate.mjs';
 import { injectPlan } from './inject.mjs';
 import { STATUS_EVENT_CATEGORY, record as ledgerRecord, readLedger, supersededIds } from './ledger.mjs';
-import { MUTATE_MECHANISM } from './ledger-mutate.mjs';
+import { MUTATE_CATEGORY } from './ledger-mutate.mjs';
 import { acquireLock, releaseLock } from './lock.mjs';
 import { offGuard } from './mode.mjs';
 import { toPosix } from './platform/paths.mjs';
@@ -475,7 +475,8 @@ export function recurrenceIdentity(rows = [], rule, activationTs, {
     && r.category !== STATUS_EVENT_CATEGORY
     // 归档行不进复发比较：它的内容是"同一条教训的改写"，把它算成"新条目"会让"改个错别字"变复发。
     // （注意：它在 `ledgerGroups` 里**是保留的** —— 那里要读改后的内容；两处口径不同是刻意的，见各自注释。）
-    && r.mechanism !== MUTATE_MECHANISM
+    // 归档行（`category: 教训改写`）不进复发比较：它承载同一条教训的改写
+    && r.category !== MUTATE_CATEGORY
     && typeof r.problem === 'string' && r.problem.trim() !== '';
   const fresh = rows.filter((r) => isLesson(r) && (r.ts ?? '') > activationTs);
   const prior = rows.filter((r) => isLesson(r) && (r.ts ?? '') <= activationTs);

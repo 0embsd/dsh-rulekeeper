@@ -184,7 +184,7 @@ function inspectLedger(treeRoot, rel) {
     if (superseded.has(id)) continue;
     // **归档行**（`rk mutate` 的改写行）与状态事件行不进凭据对象面：它们是"改写/取代"的记录，
     // 不是一条声称"某某事发生过"的教训（同族：事件行的绝对路径也不判红）。
-    if (row?.category === '状态事件' || String(row?.mechanism ?? '') === 'mutate') continue;
+    if (row?.category === '状态事件' || String(row?.category ?? '') === '教训改写') continue;
     const rule = String(row?.rule ?? '');
     const ev = Array.isArray(row?.evidence) ? row.evidence : [];
     // 登记行本身不是"被检凭据"（它的职责就是登记缺口），跳过——否则执法者把自己也抓了

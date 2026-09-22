@@ -22,7 +22,7 @@ import { join, relative, sep } from 'node:path';
 import { MECHANISM_FACES, STATUS_EVENT_CATEGORY } from './ledger.mjs';
 import { readLedger } from './ledger.mjs';
 import { EFFECT_EVENT_CATEGORY, EFFECT_RETIRE_CATEGORY, ruleBindings } from './effect.mjs';
-import { MUTATE_MECHANISM } from './ledger-mutate.mjs';
+import { MUTATE_CATEGORY, foldMutates } from './ledger-mutate.mjs';
 import { verifyGuardRef } from './authier.mjs';
 import { loadLandingRules } from './rules.mjs';
 import { buildProposal, writeProposal, listProposals } from './proposal.mjs';
@@ -115,10 +115,11 @@ export function adoptionReport(opts = {}) {
   // "事件行的绝对路径不判红"同族）。绑定事实本身由 `rules.json` 承载，`rk-effect plan` 已单独判。
   const rows = readLedger(landingDir).values.filter((r) => r !== null && typeof r === 'object');
   const eventRows = rows.filter((r) => r.category === EFFECT_EVENT_CATEGORY || r.category === EFFECT_RETIRE_CATEGORY);
-  // **归档行**（`rk mutate` 写的改写行）与状态事件行一样不进机制面统计：它是同一条教训的**改写**，
-  // 不是新登记（否则每次改一条就把那个 rule 的机制面重新判一遍）。
-  const lessonRows = rows.filter((r) => r.category !== EFFECT_EVENT_CATEGORY && r.category !== EFFECT_RETIRE_CATEGORY
-    && r.category !== STATUS_EVENT_CATEGORY && r.mechanism !== MUTATE_MECHANISM);
+  // **先做读侧 fold**（P2，2026-09-21）：把 `rk mutate` 归档行的字段值应用回目标 id
+  // ⇒ 消费方读到的是**改后**的值，不会出现"改了 mechanism、检查器还读旧值"的静默降级。
+  const folded = foldMutates(rows);
+  const lessonRows = folded.filter((r) => r.category !== EFFECT_EVENT_CATEGORY && r.category !== EFFECT_RETIRE_CATEGORY
+    && r.category !== STATUS_EVENT_CATEGORY && r.category !== MUTATE_CATEGORY);
   const byRule = mechanismStats(lessonRows);
   // ── 段②b：`guard` 档必须点名靠哪个拦截，且那个拦截必须真的在（2026-09-21，交接第 2 步）──
   // 只写 `mechanism=guard` 是自称（规则 43 同族）；`guardRef` 的**存在性**在这里核（写入时已核过一次，

@@ -18,7 +18,7 @@ import { join } from 'node:path';
 
 import { runRulekeeper } from '../src/cli.mjs';
 import { installedHooks, registeredGates, verifyGuardRef, appendRowsVerified } from '../src/authier.mjs';
-import { MUTATE_MARK, MUTATE_MECHANISM, parseSets, planMutation } from '../src/ledger-mutate.mjs';
+import { MUTATE_CATEGORY, MUTATE_MARK, MUTATE_MECHANISM, parseSets, planMutation } from '../src/ledger-mutate.mjs';
 import { supersededIds } from '../src/ledger.mjs';
 import { cleanupAll, tempDir } from './helpers/sandbox.mjs';
 
@@ -121,7 +121,8 @@ test('判据④: --apply 后历史行逐字节不变，归档行 + 状态事件�
   assert.ok(after.startsWith(before), '历史行必须逐字节不变（新行只追加在后面）');
   const rows = after.trim().split('\n').map((l) => JSON.parse(l));
   assert.equal(rows.length, 3, '原行 + 归档行 + 状态事件行');
-  const arch = rows.find((r) => r.mechanism === MUTATE_MECHANISM && r.category !== '状态事件');
+  // 身份看**类目**（`planMutation` 的产物：category=教训改写，mechanism 存**改后值**）
+  const arch = rows.find((r) => r.category === MUTATE_CATEGORY);
   const status = rows.find((r) => r.category === '状态事件');
   assert.ok(arch, '必须有归档行');
   assert.equal(arch.problem, '新问题表述', '归档行承载改后的内容');
@@ -130,7 +131,7 @@ test('判据④: --apply 后历史行逐字节不变，归档行 + 状态事件�
   assert.equal(status.problem, 'STATUS_SUPERSEDE L-A');
   // fold：旧行被取代
   assert.ok(supersededIds(rows).has('L-A'), '读侧必须能算出旧行被取代');
-  assert.equal(arch.mechanism, MUTATE_MECHANISM);
+  assert.notEqual(arch.mechanism, MUTATE_MECHANISM, '归档行的 mechanism 是**改后值**，不是身份标记');
 });
 
 test('判据⑤: 幂等 —— 同一 id 第二次 apply 不重复追加', () => {

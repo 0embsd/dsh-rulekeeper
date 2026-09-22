@@ -26,6 +26,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
+// 读侧 fold（P2）：把 `rk mutate` 归档行的字段值应用回目标 id。**唯一权威源**在插件包里，
+// 故这里 import（检查器随包走；被治理项目通过 checkerRef 引用同一份实现，不会各写一遍）。
+import { foldMutates } from '../../src/ledger-mutate.mjs';
+
 // 被检对象：由绑定层传入（RULEKEEPER_SAMPLE_DIR）；直接手工跑时 = 当前目录。cwd 恒为项目根。
 const root = process.env.RULEKEEPER_SAMPLE_DIR ?? process.cwd();
 // 两态样本（旧口径红 / 新口径绿）只在**显式声明了 fixture 根**时检查：`test-fixtures/red` 这种
@@ -116,7 +120,10 @@ function inspectTree(treeRoot, rel) {
   }
 
   let textOnly = 0;
-  for (const row of rows) {
+  // **读侧 fold**（P2，2026-09-21）：把 `rk mutate` 归档行的字段值应用回目标 id ⇒ 这里读到的是**改后**的
+  // mechanism，不会把 `mutate --set mechanism=question` 静默降级成旧值。
+  // （此前只"跳过归档行"、不"应用其值" —— 那正是被治理项目禁用该方法的原因。）
+  for (const row of foldMutates(rows)) {
     const id = String(row?.id ?? '?');
     const rule = String(row?.rule ?? '?');
     // **事件行不参与**（与 src/adopt.mjs 同口径）：`rk-effect apply` 写的 `生效登记`/`生效退役` 行是
@@ -124,8 +131,8 @@ function inspectTree(treeRoot, rel) {
     // ⇒ 拿"教训须登记机制面"去判事件行属**对象错位**（同族：ledger-live-verdict 判"事件行的绝对
     // 路径不判红"）。绑定事实由 rules.json 承载，`rk-effect plan` 已单独判。
     if (row?.category === '生效登记' || row?.category === '生效退役') continue;
-    // **状态事件行与归档行**也不参与：它们是"改写/取代"的记录，不是新登记（`rk mutate` 写的）。
-    if (row?.category === '状态事件' || String(row?.mechanism ?? '') === 'mutate') continue;
+    // **状态事件行**也不参与：它是"改写/取代"的迁移记录，不是新登记。
+    if (row?.category === '状态事件') continue;
     const m = typeof row?.mechanism === 'string' ? row.mechanism.trim() : '';
     // A. 机制面必填且四选一
     if (!MECHANISM_FACES.includes(m)) {
