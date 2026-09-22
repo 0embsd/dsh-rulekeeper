@@ -29,17 +29,6 @@ import { appendLine, readLines } from './append.mjs';
 import { activationsById, mergeActivation } from './annotations.mjs';
 import { describeApproval, validateAnchoredApproval } from './approval.mjs';
 import { carrierOfBinding, verifyChecker, validateCheckerBinding, treeHash } from './checker.mjs';
-import { fileURLToPath as fileUrlToPathOf } from 'node:url';
-
-/** 本模块所在**包根**（用于 `checkerRef` 的 `@self/…` 与"包内 node_modules"回退）
- *
- * 口径与 `test/helpers/sandbox.mjs` 的 `PKG_ROOT` 一致：本模块在 `<包根>/src/effect.mjs`，
- * 故包根 = 本文件目录再上一层（写这行时踩过一次：少升一层 ⇒ 解析成 `<包根>/src/scripts/...`，
- * 引用永远解析不到 —— 用例①当场把它抓出来了）。
- */
-function packageRootOfThisModule() {
-  return dirname(dirname(fileUrlToPathOf(import.meta.url)));
-}
 import { backupFile } from './backup.mjs';
 import { CHECK_KINDS } from './checks.mjs';
 import { CLOSE_KNOWN_GATES, effectiveProtection, readGateLedger, reconWrite } from './gate.mjs';
@@ -48,7 +37,7 @@ import { STATUS_EVENT_CATEGORY, record as ledgerRecord, readLedger, supersededId
 import { MUTATE_CATEGORY } from './ledger-mutate.mjs';
 import { acquireLock, releaseLock } from './lock.mjs';
 import { offGuard } from './mode.mjs';
-import { toPosix } from './platform/paths.mjs';
+import { packageRoot as packageRootOfThisModule, toPosix } from './platform/paths.mjs';
 import { requireAnchoredApprovalOf } from './config.mjs';
 import { isSafeId, listProposals, proposalPath, validateProposalQuality } from './proposal.mjs';
 import { redactValue } from './redact.mjs';
@@ -189,6 +178,11 @@ export function normalizeBinding(entry) {
     greenSample: entry.greenSample !== null && typeof entry.greenSample === 'object' ? entry.greenSample : null,
     sampleHash: str(entry.sampleHash),
     checkerVersion: str(entry.checkerVersion),
+    // `checkerRef` 必须在白名单里（2026-09-22 实测踩到）：漏了它 ⇒ 归一化时被**静默丢弃** ⇒
+    // 读侧 `resolveCheckerCommand` 拿不到引用 ⇒ 手写/跨项目的 checkerRef 绑定在 verify 时按项目根找脚本
+    // ⇒ `Cannot find module` ⇒ 退出码 1 被误判成"命中红"（"字段被白名单吃掉"这仓已记过多次的同族）。
+    checkerRef: str(entry.checkerRef),
+    spec: str(entry.spec),
     timeoutMs: Number.isInteger(entry.timeoutMs) ? entry.timeoutMs : null,
   };
 }

@@ -8,7 +8,22 @@
 
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/**
+ * **本模块所在包根**（`dsh-rulekeeper` 自己的安装位置）。
+ *
+ * 为什么放在平台层：`checkerRef`（规格引用插件包内的检查器）要在**两个**地方解析同一个位置——
+ * 写侧（`src/effect.mjs` 落盘时算绝对命令）与**读侧**（`src/checker.mjs` 验证时若命令指不到就重解析）。
+ * 两处各写一份必然漂移；平台层是两边都能 import 的中立位置（且 `path/url` 本属平台关注点）。
+ *
+ * 口径：本文件在 `<包根>/src/platform/paths.mjs` ⇒ 包根 = 本文件目录上两级。
+ * 写错过一次（少升一层 ⇒ 解析成 `<包根>/src/scripts/...`，引用永远解析不到，用例抓到）。
+ */
+export function packageRoot() {
+  return dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+}
 
 /** Windows 长路径前缀 `\\?\`（大小写无关的 `\\?\` 形式） */
 const LONG_PREFIX = /^\\\\\?\\/;

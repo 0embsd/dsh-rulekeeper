@@ -33,7 +33,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 
-import { toPosix } from './platform/paths.mjs';
+import { packageRoot, toPosix } from './platform/paths.mjs';
 
 export const CHECKER_SAMPLE_KINDS = Object.freeze(['tree']);
 export const DEFAULT_CHECKER_TIMEOUT_MS = 20000;
@@ -173,6 +173,36 @@ export function runChecker({ command, cwd, timeoutMs = DEFAULT_CHECKER_TIMEOUT_M
 }
 
 /**
+ * **消费 `checkerRef`**：绑定的 `command[1]` 若是"项目根相对路径"而那里**没有**这个文件，
+ * 但绑定声明了 `checkerRef`（`@self/<包内路径>` 或 `<包名>/<包内路径>`），就把它解析成**绝对路径**。
+ *
+ * 为什么必须有（2026-09-22 实测的真 bug）：`checkerRef` 原先**只在写侧**被解析成绝对命令，
+ * 判定规则却写在读侧 —— 于是任何**手写**的绑定（或写侧没解析的那些）在 verify 时按"项目根相对"
+ * 去找检查器 ⇒ `Cannot find module '<项目根>/scripts/checkers/x.mjs'` ⇒ 退出码 1
+ * ⇒ 误判成"命中红"（红样本"通过"是假的，因为脚本压根没跑起来）。
+ * 这是"判据错位"的同族（规则 41）：判据要落在**被测对象自己的事实**上，而不是路径恰好对得上。
+ *
+ * 边界（如实）：只在命令**指不到**时才重解析 ⇒ 显式给了绝对命令 / 项目内确有该脚本的绑定**不受影响**。
+ * @returns {{command: string[], resolvedVia: string|null}}
+ */
+export function resolveCheckerCommand(binding, projectRoot) {
+  const command = Array.isArray(binding?.command) ? [...binding.command] : [];
+  const ref = typeof binding?.checkerRef === 'string' && binding.checkerRef.trim() !== '' ? binding.checkerRef.trim() : null;
+  if (ref === null || command.length < 2) return { command, resolvedVia: null };
+  const asGiven = resolve(projectRoot, command[1]);
+  if (existsSync(asGiven)) return { command, resolvedVia: null };      // 指得到 ⇒ 不动
+  const m = /^(@self|[A-Za-z0-9@][A-Za-z0-9._@/-]*)\/(.+)$/.exec(ref);
+  if (m === null) return { command, resolvedVia: null };
+  const candidates = m[1] === '@self'
+    ? [join(packageRoot(), m[2])]
+    : [join(projectRoot, 'node_modules', m[1], m[2]), join(packageRoot(), 'node_modules', m[1], m[2])];
+  const hit = candidates.find((p) => existsSync(p));
+  if (hit === undefined) return { command, resolvedVia: null };
+  command[1] = hit;
+  return { command, resolvedVia: `checkerRef=${ref} -> ${hit.split(sep).join('/')}` };
+}
+
+/**
  * 四项验证 + 三态判决。
  * @param {{projectRoot: string, binding: object, allowExec?: boolean, timeoutMs?: number}} opts
  * @returns {{ok: boolean, state: 'green'|'red'|'inconclusive', cases: object[], findings: object[]}}
@@ -191,6 +221,13 @@ export function verifyChecker(opts = {}) {
   if (opts.allowExec !== true) {
     // **默认不执行**：如实报"未许可执行"，绝不因为"没跑"就判通过
     return fail('EFFECT_CHECKER_EXEC_NOT_ALLOWED', `${binding.rule}: checker 绑定需要显式 --allow-exec 才会执行本地命令（本次未执行 ⇒ 结论不可得）`);
+  }
+
+  // `checkerRef` 的**读侧消费**（见 resolveCheckerCommand 的注释：这是 2026-09-22 修的真 bug）
+  const resolved = resolveCheckerCommand(binding, projectRoot);
+  const command = resolved.command;
+  if (resolved.resolvedVia !== null) {
+    cases.push({ name: '载体解析', expect: 'checkerRef 指向真实文件', got: resolved.resolvedVia, ok: true });
   }
 
   const redDir = resolve(projectRoot, binding.redSample.source);
@@ -212,7 +249,7 @@ export function verifyChecker(opts = {}) {
   }
 
   // ① 命中红：违规样本上必须按声明的非 0 退出码开火
-  const red1 = runChecker({ command: binding.command, cwd: projectRoot, sampleDir: redDir, timeoutMs });
+  const red1 = runChecker({ command, cwd: projectRoot, sampleDir: redDir, timeoutMs });
   if (red1.timedOut || red1.exitCode === null) {
     cases.push({ name: '命中红', expect: `exit=${binding.expectRed.exitCode}`, got: red1.timedOut ? 'timeout' : 'spawn-error', ok: false });
     findings.push({ code: 'EFFECT_CHECKER_INCONCLUSIVE', message: `${binding.rule}: 违规样本上检查器没跑出结论（${red1.timedOut ? '超时' : red1.error}）⇒ inconclusive` });
@@ -228,7 +265,7 @@ export function verifyChecker(opts = {}) {
   }
 
   // ② 误报面绿：合规样本上必须不报
-  const green1 = runChecker({ command: binding.command, cwd: projectRoot, sampleDir: greenDir, timeoutMs });
+  const green1 = runChecker({ command, cwd: projectRoot, sampleDir: greenDir, timeoutMs });
   const greenOk = green1.exitCode === binding.expectGreen.exitCode;
   cases.push({ name: '误报面绿', expect: `exit=${binding.expectGreen.exitCode}`, got: green1.timedOut ? 'timeout' : `exit=${green1.exitCode}`, ok: greenOk });
   if (!greenOk) {
@@ -250,7 +287,7 @@ export function verifyChecker(opts = {}) {
   }
 
   // ④ 确定性：同一输入两次结论一致
-  const red2 = runChecker({ command: binding.command, cwd: projectRoot, sampleDir: redDir, timeoutMs });
+  const red2 = runChecker({ command, cwd: projectRoot, sampleDir: redDir, timeoutMs });
   const deterministic = red2.exitCode === red1.exitCode && red2.timedOut === false;
   cases.push({ name: '确定性', expect: `exit=${red1.exitCode}`, got: red2.timedOut ? 'timeout' : `exit=${red2.exitCode}`, ok: deterministic });
   if (!deterministic) {

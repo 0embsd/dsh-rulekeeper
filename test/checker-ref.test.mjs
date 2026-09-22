@@ -14,7 +14,8 @@ import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { planActivation } from '../src/effect.mjs';
+import { normalizeBinding, planActivation } from '../src/effect.mjs';
+import { resolveCheckerCommand } from '../src/checker.mjs';
 import { cleanupAll, PKG_ROOT, tempDir } from './helpers/sandbox.mjs';
 
 test.after(cleanupAll);
@@ -128,4 +129,41 @@ test('判据⑤（本仓自举）: 本仓 5 份规格都走 checkerRef，且命�
     assert.equal(spec.checkerRef, `@self/scripts/checkers/${name}.mjs`, `${name}.spec.json 必须用 checkerRef 引用包内检查器`);
     assert.deepEqual(spec.command, ['node', `scripts/checkers/${name}.mjs`], `${name}.spec.json 的 command 占位必须与 checkerRef 同源`);
   }
+});
+
+// ── 读侧消费 checkerRef（2026-09-22 实测的真 bug）────────────────────────────────
+// 现场：把 checkerRef 绑定装到一个**别的仓**（不是插件仓）时，verify 按"项目根相对"去找检查器
+// ⇒ `Cannot find module '<项目根>/scripts/checkers/x.mjs'` ⇒ 退出码 1 ⇒ 被误判成"命中红"
+// （红样本"通过"是假的：脚本压根没跑起来）。根因两条，都要有用例钉住：
+//   ① `normalizeBinding` 的字段白名单漏了 `checkerRef` ⇒ 归一化时**静默丢弃**；
+//   ② `verifyChecker` 从不消费 `checkerRef`（只有写侧解析过）。
+
+test('判据⑥: normalizeBinding 必须**保留** checkerRef（白名单漏字段 = 静默丢弃）', () => {
+  const b = normalizeBinding({ kind: 'checker', rule: 'X', command: ['node', 'scripts/checkers/x.mjs'], checkerRef: '@self/scripts/checkers/x.mjs' });
+  assert.equal(b.checkerRef, '@self/scripts/checkers/x.mjs', 'checkerRef 被白名单吃掉会静默降级成"按项目根找脚本"');
+});
+
+test('判据⑦: 命令在项目根指不到、但声明了 checkerRef ⇒ **必须**解析到插件包', () => {
+  const project = tempDir('ref-resolve');
+  const binding = {
+    kind: 'checker', rule: 'X',
+    command: ['node', 'scripts/checkers/byte-discipline.mjs'],
+    checkerRef: '@self/scripts/checkers/byte-discipline.mjs',
+    expectRed: { exitCode: 1 }, expectGreen: { exitCode: 0 },
+    redSample: { kind: 'tree', source: 'test-fixtures/byte-red' },
+    greenSample: { kind: 'tree', source: '.' },
+  };
+  const r = resolveCheckerCommand(binding, project);
+  assert.equal(r.resolvedVia !== null, true, '应当回退到 checkerRef 解析');
+  assert.equal(r.command[1], join(PKG_ROOT, 'scripts', 'checkers', 'byte-discipline.mjs'));
+});
+
+test('判据⑧（不误伤）: 项目内**确有**该脚本时按原样用，不改写 command', () => {
+  const project = tempDir('ref-local');
+  mkdirSync(join(project, 'scripts', 'checkers'), { recursive: true });
+  writeFileSync(join(project, 'scripts', 'checkers', 'x.mjs'), 'process.exit(0);\n', 'utf8');
+  const binding = { kind: 'checker', rule: 'X', command: ['node', 'scripts/checkers/x.mjs'], checkerRef: '@self/scripts/checkers/x.mjs' };
+  const r = resolveCheckerCommand(binding, project);
+  assert.equal(r.resolvedVia, null, '项目内指得到 ⇒ 不解析（显式命令优先，不许被悄悄换掉）');
+  assert.equal(r.command[1], 'scripts/checkers/x.mjs');
 });
