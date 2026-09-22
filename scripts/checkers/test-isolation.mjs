@@ -37,6 +37,45 @@ const fixtureRoot = process.env.RULEKEEPER_FIXTURE_DIR ?? join(root, 'test-fixtu
 const SKIP_DIRS = new Set(['test-fixtures', '.git', 'node_modules', '.dsh-ai', 'fixtures']);
 const MJS_RE = /\.mjs$/;
 
+// ── 适用面 + "没有被测对象 ⇒ exit 2"（2026-09-21，被治理项目侧 P6）─────────────────────────
+// 现场：在被治理项目（Go 工程，没有 JS 测试树）上跑本检查器 ⇒ 旧行为 `exit 0`，
+// 于是按"exit 0 就是绿"去绑会拿到**空转绿**（无对象可判），而项目侧明确反对"没检查＝绿"。
+// 口径统一：没有 `.mjs` 用例树可判 ⇒ exit 2（与 no-test-exception / misreport-surface 等一致）。
+const hasJsTestTree = (() => {
+  const stack = [join(root, 'test')];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let names;
+    try {
+      names = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (SKIP_DIRS.has(name)) continue;
+      const full = join(dir, name);
+      let st;
+      try {
+        st = statSync(full);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) stack.push(full);
+      else if (MJS_RE.test(name)) return true;
+    }
+  }
+  return false;
+})();
+if (!hasJsTestTree) {
+  console.log(`TEST_ISOLATION_SUBJECT=absent（${toPosixRel(root)} 下没有 .mjs 用例树 ⇒ 本条判据不适用，退出码 2 = 没有被测对象，**不是**通过）`);
+  process.exit(2);
+}
+
+/** 只用于打印可读相对路径 */
+function toPosixRel(p) {
+  return String(p).split('\\').join('/');
+}
+
 /** 现造一个违规样本树：用例直取真实用户级落点且有写动作、且全树无隔离入口。返回 null = 样本层不可用 */
 function buildRedSample() {
   let dir;

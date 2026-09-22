@@ -23,5 +23,12 @@
   },
   "checkerVersion": "no-test-exception@1",
   "timeoutMs": 20000,
-  "notes": "deny 列表不得为测试方便开例外：src/** 的豁免表里不得出现 test/ 路径。红态样本每次现造。"
+  "notes": "deny 列表不得为测试方便开例外：src/** 的豁免表里不得出现 test/ 路径。红态样本每次现造。",
+  "applicability": {
+    "scope": "js-project-with-src",
+    "requires": [
+      "src/"
+    ],
+    "note": "**仅适用于含 src/ 的 JS 工程**（它扫 src/** 的豁免表里有没有 test/ 路径）。无 src/ ⇒ exit 2（不适用，**不是**通过）"
+  }
 }

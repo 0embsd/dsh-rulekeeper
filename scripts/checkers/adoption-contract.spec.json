@@ -23,5 +23,12 @@
   },
   "checkerVersion": "adoption-contract@1",
   "timeoutMs": 20000,
-  "notes": "入账必须登记机制面（四选一）：text/mechanized/guard/question；声明 mechanized/guard 就必须真有绑定；text 计数可见。红态样本每次现造。"
+  "notes": "入账必须登记机制面（四选一）：text/mechanized/guard/question；声明 mechanized/guard 就必须真有绑定；text 计数可见。红态样本每次现造。",
+  "applicability": {
+    "scope": "any",
+    "requires": [
+      ".dsh-ai/rulekeeper/ledger.jsonl"
+    ],
+    "note": "入账纪律的机制面登记（四选一 + guard 点名 + 真值存在性）。与语言/工程类型无关，只要落点有账本即可；无账本 ⇒ exit 2"
+  }
 }

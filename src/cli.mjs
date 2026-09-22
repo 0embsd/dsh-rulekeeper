@@ -40,7 +40,7 @@ import { carrierOfBinding } from './checker.mjs';
 import { adoptionReport, writeDrafts } from './adopt.mjs';
 import { importLedger } from './importer.mjs';
 import { landingFingerprint, migrateLanding, planMigration } from './migrate.mjs';
-import { MECHANISM_FACE_DEFAULT, MECHANISM_FACES, makeId, query as queryLedger, readLedger, record, summary as ledgerSummary } from './ledger.mjs';
+import { MECHANISM_FACE_DEFAULT, MECHANISM_FACES, makeId, query as queryLedger, readLedger, record, supersededIds, summary as ledgerSummary } from './ledger.mjs';
 import { appendRowsVerified, installedHooks, registeredGates, verifyGuardRef } from './authier.mjs';
 import { parseSets, planMutation } from './ledger-mutate.mjs';
 import { listLogFiles, readEntries, rotateIfNeeded, totalBytes } from './log.mjs';
@@ -2845,7 +2845,7 @@ function runCliRecord(argv, io, env) {
   const parsed = parseSub('record', argv, {
     '--landing': 'string', '--rule': 'string', '--category': 'string', '--problem': 'string',
     '--root-cause': 'string', '--solution': 'string', '--mechanism': 'string', '--guard-ref': 'string', '--evidence': 'string', '--now': 'string',
-    '--activation': 'string', '--no-activation': 'string',
+    '--activation': 'string', '--no-activation': 'string', '--force': 'boolean',
     '--on-near-dup': 'string', '--near-dup-threshold': 'string',
   }, io);
   if (parsed.error !== null) return parsed.error;
@@ -2916,6 +2916,32 @@ function runCliRecord(argv, io, env) {
       + '  说明: text=承认仅文本(会被计数) / mechanized=有机械判据 / guard=有拦截面(钩子或门禁) / question=靠人工问句\n');
     return RC.USAGE;
   }
+  // ── **写前重读：全作用域前置断言**（2026-09-21，被治理项目侧 P1；真实事故换来）──────────
+  // 现场：同一教训已被**另一会话**合规登记（追加取代行），当事人不知情又登了一遍；根因是前置断言
+  // 只看了"这一行还能不能改"（**对象局部**），没看"这件事是否已被别处做过"（**全作用域**）。
+  // 故此处在写盘前重读落点，把"这条纪律的既有登记面"打印出来，并对"已有 guard 登记"加一道显式确认：
+  //   没给 `--force` 就**拒写**（避免两次"同一件事"叠着登记）；给了就是"我知道，仍要追加"。
+  // 与 `appendRowsVerified` 的并发检测**互补**：那条管"写入窗口内被改动"，这条管"开始写之前就该知道的事"。
+  {
+    const preRows = readLedger(target.landing).values;
+    const preSuperseded = supersededIds(preRows);
+    const sameRule = preRows.filter((r) => canonicalRule(String(r.rule ?? '')) === canonicalRule(String(flags.rule ?? '')));
+    const live = sameRule.filter((r) => !preSuperseded.has(String(r.id ?? '')));
+    const guardRows = sameRule.filter((r) => String(r.mechanism ?? '').trim() === 'guard');
+    const guardRefs = [...new Set(guardRows.map((r) => String(r.guardRef ?? '(未点名)')))] ;
+    io.out(line(`RK_RECORD_PRECHECK rule=${canonicalRule(String(flags.rule ?? ''))} entries=${sameRule.length} live=${live.length} guard_rows=${guardRows.length} superseded=${sameRule.length - live.length}`));
+    if (guardRows.length > 0) {
+      io.err(`⚠ dsh-rulekeeper record: 这条纪律**已有 ${guardRows.length} 条 guard 登记**（拦截面：${guardRefs.join(' / ')}）\n`
+        + '   除非这次是**另一件事**，否则重复登记会把正确教训挤出 top-1（E2）。确认要追加请加 --force。\n');
+      if (flags.force !== true) {
+        io.out(resultLine('RECORD', false));
+        return RC.FAIL;
+      }
+    } else if (live.length > 0) {
+      io.err(`ℹ dsh-rulekeeper record: 这条纪律已有 ${live.length} 条存活登记（未取代 ${sameRule.length} 条中）——若属同一次事故请改用 supersede/mutate 而不是再追加一行\n`);
+    }
+  }
+
   // ── `guard` 档必须点名**靠哪个拦截**，且那个拦截必须真的在（2026-09-21，交接第 2 步）──────
   // 只写 `mechanism=guard` 等于"我靠拦截面"——没说靠哪个 ⇒ 又成了自称（规则 43 同族）。
   // 形状 `hook:<名>` / `gate:<名>`；存在性由本模块核（钩子在 hooks.json 清单里 / 门禁在 rules.json 里）。

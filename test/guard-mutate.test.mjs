@@ -197,8 +197,7 @@ test('判据⑥b: 纯函数层（parseSets / planMutation / appendRowsVerified�
   assert.equal(res.code, 'NO_LEDGER');
 });
 
-test('判据⑦（写前重读）: 读出之后、替换之前有别的写者追加 ⇒ **放弃写入**，对方的行必须还在', () => {
-  const dir = fixture('mut-race', { rows: [row({})] });
+test('判据⑦（写前重读）: 读出之后、替换之前有别的写者追加 ⇒ **放弃写入**，对方的行必须还在', () => {  const dir = fixture('mut-race', { rows: [row({})] });
   const ledger = join(dir, 'ledger.jsonl');
   const foreign = JSON.stringify(row({ id: 'L-FOREIGN', problem: '别的写者在我读完之后追加的行' }));
   const res = appendRowsVerified({
@@ -213,4 +212,46 @@ test('判据⑦（写前重读）: 读出之后、替换之前有别的写者追
   const after = readFileSync(ledger, 'utf8');
   assert.ok(after.includes('L-FOREIGN'), '对方的行必须**原样还在**（这正是这条判据存在的理由）');
   assert.ok(!after.includes('L-MINE'), '我的行一个都不该落进去（fail-closed）');
+});
+
+// ── P1（被治理项目侧提的"全作用域前置断言"）─────────────────────────────────────
+// 现场事故：同一教训已被**另一会话**合规登记，当事人不知情又登了一遍 ⇒ 重复条目会把正确教训挤出 top-1。
+// 根因：前置断言只看了"这一行还能不能改"（对象局部），没看"这件事是否已被别处做过"（全作用域）。
+
+test('判据⑧（写前重读・前置断言）: record 必须打印该纪律的既有登记面', () => {
+  const dir = fixture('pre-1', { rows: [row({ id: 'L-A' }), row({ id: 'L-B', problem: '另一条' })] });
+  const out = capture((io) => runRulekeeper([
+    'record', ...LANDS, dir, '--rule', 'GATE-DISCIPLINE', '--problem', '新的一条', '--root-cause', 'r', '--solution', 's',
+    '--mechanism', 'text', '--no-activation', '自测',
+  ], io, {}));
+  assert.equal(out.rc, 0, `应当允许（该纪律还没有 guard 登记）; stderr=${out.err}`);
+  const m = /RK_RECORD_PRECHECK rule=(\S+) entries=(\d+) live=(\d+) guard_rows=(\d+) superseded=(\d+)/.exec(out.out);
+  assert.ok(m !== null, `输出里必须有 RK_RECORD_PRECHECK 读数；out=${out.out}`);
+  assert.equal(m[2], '2', '既有条目数要如实');
+  assert.equal(m[4], '0', '还没有 guard 登记');
+});
+
+test('判据⑨（前置断言的闸）: 该纪律已有 guard 登记 ⇒ 拒写，`--force` 才放行', () => {
+  const dir = fixture('pre-2', {
+    rows: [
+      row({ id: 'L-A' }),
+      // 已有一条 guard 登记（形状合法：点名了拦截面）
+      { ...row({ id: 'L-G' }), mechanism: 'guard', guardRef: 'hook:pre-commit' },
+    ],
+  });
+  const args = [
+    'record', ...LANDS, dir, '--rule', 'GATE-DISCIPLINE', '--problem', '可能重复的一条', '--root-cause', 'r', '--solution', 's',
+    '--mechanism', 'text', '--no-activation', '自测',
+  ];
+  const blocked = capture((io) => runRulekeeper(args, io, {}));
+  assert.equal(blocked.rc, 1, '没有 --force 必须拒写（防"同一件事叠着登记"）');
+  assert.match(blocked.err, /已有 1 条 guard 登记/);
+  assert.match(blocked.out, /guard_rows=1/);
+  const before = readFileSync(join(dir, 'ledger.jsonl'), 'utf8').trim().split('\n').length;
+  assert.equal(before, 2, '拒写时账本不得改动');
+
+  const forced = capture((io) => runRulekeeper([...args, '--force'], io, {}));
+  assert.equal(forced.rc, 0, `--force 应当放行；stderr=${forced.err}`);
+  const after = readFileSync(join(dir, 'ledger.jsonl'), 'utf8').trim().split('\n').length;
+  assert.equal(after, 3, '放行后才追加一行');
 });

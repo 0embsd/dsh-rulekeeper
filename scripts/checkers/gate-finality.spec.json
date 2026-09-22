@@ -23,5 +23,12 @@
   },
   "checkerVersion": "gate-finality@1",
   "timeoutMs": 20000,
-  "notes": "收尾门禁四件齐备且真能跑：.gitattributes 显式钉 eol=lf / 四件齐备且子命令传对 / 索引 mode 100755 / 行尾纯 LF。红态样本每次现造。"
+  "notes": "收尾门禁四件齐备且真能跑：.gitattributes 显式钉 eol=lf / 四件齐备且子命令传对 / 索引 mode 100755 / 行尾纯 LF。红态样本每次现造。",
+  "applicability": {
+    "scope": "any-with-git-hooks",
+    "requires": [
+      ".githooks/pre-commit"
+    ],
+    "note": "收尾门禁四件齐备且真能跑（子命令传对 / 索引 mode / 行尾）。要求本仓用 dsh-rulekeeper 的四件钩子；无 .githooks ⇒ exit 2"
+  }
 }

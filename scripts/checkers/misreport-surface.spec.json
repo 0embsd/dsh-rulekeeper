@@ -23,5 +23,13 @@
   },
   "checkerVersion": "misreport-surface@1",
   "timeoutMs": 30000,
-  "notes": "误报面：对 rules.json 里每条 checker 绑定核「绿样本上必须 exit=0 / 红样本上必须非 0 / 必须写明绿样本」。规则 53 的机械面。递归护栏：命令里含本检查器的绑定跳过并计数（不判自己）。"
+  "notes": "误报面：对 rules.json 里每条 checker 绑定核「绿样本上必须 exit=0 / 红样本上必须非 0 / 必须写明绿样本」。规则 53 的机械面。递归护栏：命令里含本检查器的绑定跳过并计数（不判自己）。",
+  "applicability": {
+    "scope": "plugin-repo-only",
+    "requires": [
+      "scripts/checkers/misreport-surface.mjs 在 cwd 下",
+      "rules.json 里有 checker 绑定"
+    ],
+    "note": "**不可搬迁**：它按 cwd 解析各绑定的 spec 与 command，要求\"项目根相对路径\"这套前提成立 ⇒ 只适合插件仓自身（及把检查器整套搬过去的仓）。无 rules.json ⇒ exit 2"
+  }
 }

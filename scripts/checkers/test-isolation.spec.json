@@ -23,5 +23,12 @@
   },
   "checkerVersion": "test-isolation@1",
   "timeoutMs": 20000,
-  "notes": "用例不得写真实落点：判据钉在\"真实落点来源 + 写动作\"同处，且整套用例必须有进程级隔离机制面（isolateProcessUserLanding）。红态样本每次现造。"
+  "notes": "用例不得写真实落点：判据钉在\"真实落点来源 + 写动作\"同处，且整套用例必须有进程级隔离机制面（isolateProcessUserLanding）。红态样本每次现造。",
+  "applicability": {
+    "scope": "js-project-with-tests",
+    "requires": [
+      "test/**/*.mjs"
+    ],
+    "note": "**仅适用于有 JS 用例树的工程**：判\"用例不得写真实落点\"。无 .mjs 用例树 ⇒ exit 2（2026-09-21 修正：此前返回 0，会在无对象时给出**空转绿**）"
+  }
 }

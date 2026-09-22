@@ -23,5 +23,12 @@
   },
   "checkerVersion": "ledger-live-verdict@1",
   "timeoutMs": 20000,
-  "notes": "判据必须落在被测对象自身：凭据引用即须存在（仓库外历史凭据须登记缺口）；落点级故障与对象级判据分开报。红态样本每次现造。"
+  "notes": "判据必须落在被测对象自身：凭据引用即须存在（仓库外历史凭据须登记缺口）；落点级故障与对象级判据分开报。红态样本每次现造。",
+  "applicability": {
+    "scope": "any",
+    "requires": [
+      ".dsh-ai/rulekeeper/ledger.jsonl"
+    ],
+    "note": "凭据\"引用即须存在\" + 落点级与对象级故障分开报。**历史账本噪声多**的仓需先用 `[evidence-repair]` 行登记已知缺口（见 README 的 ACKNOWLEDGED_GAPS 口径）；无账本 ⇒ exit 2"
+  }
 }

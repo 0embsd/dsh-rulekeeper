@@ -22,5 +22,12 @@
   },
   "checkerVersion": "byte-discipline@1",
   "timeoutMs": 30000,
-  "notes": "行尾纪律必须显式钉住（L648/L653 的通用化）：①混行尾（同一文件既有 CRLF 又有裸 LF）②.gitattributes 有却零钉规则 ③.githooks 未被显式钉 eol=lf。夹具面 test-fixtures/** 豁免（那里放故意违规的样本）。"
+  "notes": "行尾纪律必须显式钉住（L648/L653 的通用化）：①混行尾（同一文件既有 CRLF 又有裸 LF）②.gitattributes 有却零钉规则 ③.githooks 未被显式钉 eol=lf。夹具面 test-fixtures/** 豁免（那里放故意违规的样本）。",
+  "applicability": {
+    "scope": "any",
+    "requires": [
+      ".gitattributes 或 .githooks/"
+    ],
+    "note": "文本行尾纪律：混行尾 / .gitattributes 零钉规则 / .githooks 未显式钉 eol=lf。不假定语言与目录结构；`test-fixtures/**` 豁免。两者都无 ⇒ exit 2"
+  }
 }
