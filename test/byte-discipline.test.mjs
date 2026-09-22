@@ -73,3 +73,55 @@ test('判据③: 没有被测对象 ⇒ rc=2', () => {
   assert.equal(res.rc, 2);
   assert.match(res.out, /SUBJECT=absent/);
 });
+
+// ── D/E（BOM / 结尾换行）与"提前 continue"那个 bug ─────────────────────────────
+// 现场：检查器为省两次计数加了 `if (!crlf) continue;`，把 D/E 一起跳过 ⇒ **LF 文件从不参与**
+// "结尾换行"检查（本仓 `src/gate.mjs` 缺结尾换行、判据却报 0，且该 bug 活过了一版与一次误报面检查）。
+// 这些用例就是为这种情况写的：**纯 LF 文件**也必须被 D/E 判到。
+
+test('判据④: 纯 LF 文件缺结尾换行 ⇒ 必须报（钉住"提前 continue"那个回归）', () => {
+  const dir = tempDir('byte-noeol');
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, '.gitattributes'), '*.mjs text eol=lf\n', 'utf8');
+  // 纯 LF、但结尾没有换行（无 CRLF ⇒ 旧实现的 `if (!crlf) continue` 会让它整条被跳过）
+  writeFileSync(join(dir, 'src', 'noeol.mjs'), 'const a = 1;', 'utf8');
+  const res = run(dir);
+  assert.equal(res.rc, 1, `应报"缺结尾换行"；out=${res.out}`);
+  assert.match(res.out, /BYTE_NO_TRAILING_NEWLINE/);
+  assert.match(res.out, /src\/noeol\.mjs/);
+});
+
+test('判据⑤: UTF-8 BOM ⇒ 必须报；无 BOM 的同样内容 ⇒ 绿', () => {
+  const withBom = tempDir('byte-bom');
+  mkdirSync(join(withBom, 'src'), { recursive: true });
+  writeFileSync(join(withBom, '.gitattributes'), '*.mjs text eol=lf\n', 'utf8');
+  writeFileSync(join(withBom, 'src', 'bom.mjs'), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('const a = 1;\n', 'utf8')]));
+  const resBom = run(withBom);
+  assert.equal(resBom.rc, 1);
+  assert.match(resBom.out, /BYTE_BOM_PRESENT/);
+
+  const noBom = tempDir('byte-nobom');
+  mkdirSync(join(noBom, 'src'), { recursive: true });
+  writeFileSync(join(noBom, '.gitattributes'), '*.mjs text eol=lf\n', 'utf8');
+  writeFileSync(join(noBom, 'src', 'ok.mjs'), 'const a = 1;\n', 'utf8');
+  assert.equal(run(noBom).rc, 0);
+});
+
+test('判据⑥: D/E 只扫"手写面"（生成态目录不参与，可用环境变量改）', () => {
+  const dir = tempDir('byte-scope');
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  mkdirSync(join(dir, 'generated'), { recursive: true });
+  writeFileSync(join(dir, '.gitattributes'), '*.mjs text eol=lf\n', 'utf8');
+  // 生成态里放一个"无结尾换行"的文件 —— 默认不该报（噪声止损）
+  writeFileSync(join(dir, 'generated', 'x.mjs'), 'const a = 1;', 'utf8');
+  const def = run(dir);
+  assert.equal(def.rc, 0, `生成态默认不扫；out=${def.out}`);
+
+  // 显式把生成态纳入扫描面 ⇒ 就该报
+  const res2 = spawnSync(process.execPath, [CHECKER], {
+    cwd: PKG_ROOT, encoding: 'utf8',
+    env: { ...process.env, RULEKEEPER_SAMPLE_DIR: dir, RULEKEEPER_BYTE_STRICT_DIRS: 'generated' },
+  });
+  assert.equal(res2.status, 1, `显式声明扫描面后应报；out=${res2.stdout}`);
+  assert.match(res2.stdout ?? '', /BYTE_NO_TRAILING_NEWLINE/);
+});
