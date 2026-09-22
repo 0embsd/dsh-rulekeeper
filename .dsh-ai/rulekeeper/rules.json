@@ -180,6 +180,35 @@
       "notes": "误报面：对 rules.json 里每条 checker 绑定核「绿样本上必须 exit=0 / 红样本上必须非 0 / 必须写明绿样本」。规则 53 的机械面。递归护栏：命令里含本检查器的绑定跳过并计数（不判自己）。",
       "proposal": "P-20260921-cat-verify-misreport",
       "activatedAt": "2026-09-21T16:06:45.180Z"
+    },
+    {
+      "kind": "checker",
+      "rule": "CAT-CODE",
+      "spec": "scripts/checkers/byte-discipline.spec.json",
+      "checkerRef": "@self/scripts/checkers/byte-discipline.mjs",
+      "command": [
+        "node",
+        "D:\\opt\\dsh-rulekeeper\\scripts\\checkers\\byte-discipline.mjs"
+      ],
+      "expectRed": {
+        "exitCode": 1
+      },
+      "expectGreen": {
+        "exitCode": 0
+      },
+      "redSample": {
+        "kind": "tree",
+        "source": "test-fixtures/byte-red"
+      },
+      "greenSample": {
+        "kind": "tree",
+        "source": "."
+      },
+      "checkerVersion": "byte-discipline@1",
+      "timeoutMs": 30000,
+      "notes": "行尾纪律必须显式钉住（L648/L653 的通用化）：①混行尾（同一文件既有 CRLF 又有裸 LF）②.gitattributes 有却零钉规则 ③.githooks 未被显式钉 eol=lf。夹具面 test-fixtures/** 豁免（那里放故意违规的样本）。",
+      "proposal": "P-20260921-cat-code-byte",
+      "activatedAt": "2026-09-22T00:12:05.385Z"
     }
   ],
   "inject": []

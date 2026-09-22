@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "rule": "CAT-CODE",
+  "checkerRef": "@self/scripts/checkers/byte-discipline.mjs",
+  "command": [
+    "node",
+    "scripts/checkers/byte-discipline.mjs"
+  ],
+  "expectRed": {
+    "exitCode": 1
+  },
+  "expectGreen": {
+    "exitCode": 0
+  },
+  "redSample": {
+    "kind": "tree",
+    "source": "test-fixtures/byte-red"
+  },
+  "greenSample": {
+    "kind": "tree",
+    "source": "."
+  },
+  "checkerVersion": "byte-discipline@1",
+  "timeoutMs": 30000,
+  "notes": "行尾纪律必须显式钉住（L648/L653 的通用化）：①混行尾（同一文件既有 CRLF 又有裸 LF）②.gitattributes 有却零钉规则 ③.githooks 未被显式钉 eol=lf。夹具面 test-fixtures/** 豁免（那里放故意违规的样本）。"
+}

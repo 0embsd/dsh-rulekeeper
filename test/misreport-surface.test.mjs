@@ -73,7 +73,13 @@ test('判据①: 真仓零违规；假检查器（绿样本上恒定非 0）必�
   const real = runChecker(PKG_ROOT);
   assert.equal(real.rc, 0, `真仓上应零违规；out=${real.out}`);
   assert.match(real.out, /MISREPORT_VIOLATIONS=0/);
-  assert.match(real.out, /CHECKED=5/, '五条已绑定判据都应被核到');
+  // **别绷死数字**：这条断言原先写死 `CHECKED=5`，新增一条绑定就红（当场踩到）。
+  // 真正要钉的是"每条已绑定判据都要么被核过、要么被记进'跳过自己'" ⇒ 用读数算出来。
+  const m = /BINDINGS=(\d+) CHECKED=(\d+) SKIPPED_SELF=(\d+)/.exec(real.out);
+  assert.ok(m !== null, `输出里应有 BINDINGS/CHECKED/SKIPPED_SELF 读数；out=${real.out}`);
+  const [, bindings, checked, skippedSelf] = m.map(Number);
+  assert.equal(checked + skippedSelf, bindings, `每条绑定都要被处理（核过或记进跳过自己）：${checked}+${skippedSelf} vs ${bindings}`);
+  assert.ok(checked >= 6, `至少六条真判据应被核过（实得 ${checked}）`);
 
   const selfMade = runChecker(fakeTree('mis-red-self'));
   assert.equal(selfMade.rc, 1, `自造红树应判红；out=${selfMade.out}`);
