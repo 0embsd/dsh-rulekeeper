@@ -82,6 +82,15 @@ fail-closed 清单（任一不满足 ⇒ **不落盘**，`rules.json` 逐字节�
 这条守卫是**探针实测**出来的：此前那种写法会一路走普通加绑定分支 ⇒ 旧绑定留着、又加一条同 rule 绑定，
 `supersedes` 声明**一声不响地丢了**（与"字段名分裂 ⇒ 静默空转"同族）。
 
+**跨仓落点怎么重签（实测，含一处会绊人的默认值）**：`planActivation` 按 **`counterExample` 里的路径
+相对 `projectRoot`** 找规格文件，且**不消费 `checkerRef`**（那个只在读侧 `resolveCheckerCommand` 用）。
+于是"落点在仓 A、规格文件在插件包"的绑定（**跨仓 `checkerRef` 的标准形态**）：
+**从 A 里跑会 `EFFECT_CHECKER_SPEC_MISSING`**，必须显式把 `--project` 指到**插件包**——
+即 `rk-effect apply --landing <A 的落点> --project <插件包根> --proposal <id> --by human`。
+默认 `--project` 是当前工作目录 ⇒ 站在插件仓里操作别人的落点没问题，
+站在别人仓里操作自己的落点就会撞上这条。
+（读侧与写侧在这点上的不对称是**已知缺口**：读侧能靠 `checkerRef` 跨仓解析，写侧要求规格文件就在脚下。）
+
 **体检语义**：换绑之后该纪律**不得**被读成 `retired`（旧绑定退场 ≠ 整条纪律退场）——`plan` 判退役
 时同时要求"现在没有活着的绑定"。
 
