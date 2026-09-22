@@ -215,3 +215,30 @@ test('判据⑧: 提案形状守卫按 required 区分（可选字段可以不�
   assert.equal(assertProposalShape(missing).ok, false, '缺必填键必须拒');
   assert.equal(validateProposalValues({ ...base, supersedes: undefined }).ok, true, '可选字段为空 = 合法缺省，不是"字段为空"');
 });
+
+// ── 判据⑨：换绑标记的**作用域守卫**（探针实测出来的真缺陷）──────────────────────────
+// 现场：给"文件载体绑定"写换绑声明（`counterExample` 是 `path:`）时，代码**一路走普通加绑定分支** ——
+// 旧绑定留着、又加一条同 rule 绑定，`supersedes` 声明**一声不响地丢了**（探针输出：`ok:true kind:activate`）。
+// 与 P9（字段名分裂 ⇒ 静默空转）同族：报告成功、实际没按你说的做。
+test('判据⑨: 换绑只支持 checker 绑定；对文件载体绑定声明换绑 ⇒ 拒写（不许静默丢掉声明）', () => {
+  const { project, landing } = scene('sup-scope', { withExisting: false });
+  // 先落一条文件载体绑定（模拟"想给它换一个载体"的现场）
+  const rulesFile = join(landing, 'rules.json');
+  const rules = JSON.parse(readFileSync(rulesFile, 'utf8'));
+  rules.checks = [{ kind: 'file_untracked_change', rule: RULE, carrier: 'src/a.mjs', gate: 'pre-commit', patterns: ['src/a.mjs'] }];
+  writeFileSync(rulesFile, `${JSON.stringify(rules, null, 2)}\n`, 'utf8');
+  const before = readFileSync(rulesFile, 'utf8');
+
+  const out = planActivation({
+    landingDir: landing, projectRoot: project,
+    proposal: {
+      ...proposalFor(RULE, { redCriteria: `${SUPERSEDE_MARK} 想给文件载体绑定换载体`, supersedes: { carrier: 'src/a.mjs', reason: '改判据对象（用例探测）' } }),
+      counterExample: 'path:src/b.mjs',
+    },
+  });
+  assert.equal(out.ok, false, `必须拒写；findings=${JSON.stringify(out.findings)}`);
+  const f = out.findings.find((x) => x.code === 'EFFECT_SUPERSEDE_UNSUPPORTED');
+  assert.ok(f !== undefined, JSON.stringify(out.findings));
+  assert.match(f.message, /EFFECT_RETIRE_CANDIDATE/, '必须给出这条形态的合法出路（整条退役后重挂）');
+  assert.equal(readFileSync(rulesFile, 'utf8'), before, '拒写时 rules.json 必须逐字节不变');
+});

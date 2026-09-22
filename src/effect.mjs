@@ -981,6 +981,32 @@ export function planActivation(opts = {}) {
   const loaded = loadLandingRules(landingDir);
   const before = loaded.rulesResult.rules ?? { schema: SCHEMA_VERSION, project: 'unknown', protected_paths: [], gates: [], checks: [], inject: [] };
 
+  // ── 换绑标记的**作用域守卫**（2026-09-22，探针实测出来的真缺陷）────────────────────────────
+  // 现状：换绑只在 **checker 分支**里实现（`counterExample` = `checker:<规格>`）。但"提案正文带
+  // `EFFECT_SUPERSEDE`、而载体是文件路径"这种写法，会**一路走普通加绑定分支**：旧绑定留着、又加一条
+  // 同 rule 绑定，`supersedes` 声明**一声不响地丢了** —— 与 P9（字段名分裂 ⇒ 静默空转）同族，
+  // 正是本模块存在的理由（规则 43：自称型控制不是边界）。
+  // 故：声明了标记却没走 checker 换绑 ⇒ **fail-closed 拒写**，并如实说清"哪些形态支持、哪些不支持"。
+  const supersedeDeclared = typeof proposal.redCriteria === 'string' && proposal.redCriteria.includes(SUPERSEDE_MARK);
+  // 载体只解析一次：`parseCarrier` 是**纯函数**（无状态），但同一次 plan 里解两遍会让"两处口径"
+  // 有机会漂移 —— 这正是本仓反复踩的那类坑（读写侧不同源）。
+  const ce = parseCarrier(proposal.counterExample);
+  if (supersedeDeclared && ce.kind !== 'checker') {
+    return {
+      ok: false,
+      findings: [{
+        code: 'EFFECT_SUPERSEDE_UNSUPPORTED',
+        message: `${rule}: 提案带了 ${SUPERSEDE_MARK} 标记，但 counterExample 不是 \`checker:<规格文件>\``
+          + `（收到 ${JSON.stringify(String(proposal.counterExample ?? '')).slice(0, 80)}）⇒ 拒绝落盘。`
+          + '换绑**当前只支持 checker 绑定**（判据演进是它存在的理由）；'
+          + '文件载体绑定要改对象，请走整条退役（' + RETIRE_MARK + '）后用一条新提案重挂，'
+          + '否则会把 supersede 声明静默丢掉、还多留一条同 rule 绑定。',
+      }],
+      candidate: null,
+      additions: null,
+    };
+  }
+
   // ── **退役**分支（LF-A55）：提案带 RETIRE_MARK ⇒ 摘绑定，而不是加绑定 ────────────────────
   // 判据：只摘**这条纪律自己的** checks 绑定；其 `patterns` 若仍被**别的**绑定声明，则**不许摘**
   //（否则会顺手把别人的保护面削掉 —— 那是"退役"变"拆台"）。
@@ -1021,7 +1047,6 @@ export function planActivation(opts = {}) {
   }
 
   const carriers = [];
-  const ce = parseCarrier(proposal.counterExample);
 
   // ── **checker 分支**（2026-09-19，objective ③ 的收口）────────────────────────────────
   // 提案的 `counterExample` 写 `checker:<项目根相对的规格文件>` ⇒ 由**已入库的规格文件**构造
