@@ -36,6 +36,37 @@
 派生读数（复发计数、机制面统计、凭据对象面）**跳过**它们；人工教训**不要**占用——
 占用会污染复发判定与"凭证须晚于生效"判定（2026-09-21 实测踩过，见账本里的登记缺口行）。
 
+## 已知欠账怎么登记（`ACKNOWLEDGED_GAPS` 口径，2026-09-21）
+
+历史账本里"凭据是仓库外的东西、复核不了"的行，**不要**去删也不要改（账本 append-only），
+而是**另起一行**把它挑明（`category: 登记缺口`）：
+
+```
+[evidence-repair] 缺口=<仓库外文件名> 缺口=<另一个>
+```
+
+- 语义：**这条凭据确属仓库外**（验收现场/会话期一次性产物），手里没有可复核的对象。
+- 读侧：`scripts/checkers/ledger-live-verdict.mjs` 认这个标记 —— 被 `缺口=` 点名的文件**不算违规**，
+  并且会计数打印（`ACKNOWLEDGED_GAPS=n`，**可见、不静默**）。
+- 边界（如实）：只对**逐条点名**的文件生效（不认"整个仓已知欠账"这种笼统豁免——那会把判据作废）。
+- 事件行（`生效登记`/`生效退役`）里的**绝对路径**单独一档：它们是事件事实、不是教训凭据，
+  故只计数（`OUT_OF_SCOPE_ABS=n`）**不判红**（对象错位，规则 41 的同族）。
+
+## 检查器能不能搬去别的项目？看 spec 的 `applicability`
+
+8 份 spec 都有 `applicability: { scope, requires, note }`。要点：
+- `scope: any` —— 与语言/工程类型无关（`byte-discipline` / `adoption-contract` / `ledger-live-verdict`）
+- `scope: js-project-with-*` —— 只适用含 `src/` 或 `test/**/*.mjs` 的 JS 工程
+- `scope: plugin-repo-only` —— **不可搬迁**（`misreport-surface`：它按 `cwd` 解析各绑定的 spec/command，
+  要求"项目根相对路径"这套前提成立）
+- `scope: any-with-git-hooks` —— 要求本仓装了 `.githooks/**`
+- `scope: public-repo-only` —— `leak-check`（公开面泄漏）：私有仓用它是**错档** ⇒ 该检查器会**拒跑并
+  报 `LEAK_CHECK_SUBJECT=wrong-tier`（exit 2）**，而不是把自家名字全报成违规（实测 296 条）
+
+**统一口径**：没有被测对象 ⇒ **exit 2**（判据不适用），**不是 0**。按"exit 0 就是绿"去绑会在无对象的
+仓上拿到**空转绿**。
+
+
 ## 读写侧的口径必须同源（两处踩过的坑）
 
 | 坑 | 现象 | 现在怎么做 |

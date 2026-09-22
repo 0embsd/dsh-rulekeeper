@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "rule": "CAT-ENV",
+  "checkerRef": "@self/scripts/checkers/leak-check.mjs",
+  "command": [
+    "node",
+    "scripts/checkers/leak-check.mjs"
+  ],
+  "expectRed": {
+    "exitCode": 1
+  },
+  "expectGreen": {
+    "exitCode": 0
+  },
+  "redSample": {
+    "kind": "tree",
+    "source": "test/fixtures/checker/red-sample",
+    "note": "已有的公开面违规样本（含本机盘符路径）——本仓既有的第一条 checker 绑定就用它"
+  },
+  "greenSample": {
+    "kind": "tree",
+    "source": "test/fixtures/checker/green-sample"
+  },
+  "checkerVersion": "leak-check@1",
+  "timeoutMs": 20000,
+  "applicability": {
+    "scope": "public-repo-only",
+    "requires": [
+      "一个仓库根"
+    ],
+    "note": "**公开面**泄漏判据（内部项目名/内部工具名/本机盘卷路径）。它自带一份**独立**模式表（不 import `src/selfcheck.mjs`，为的是能单跑），因此**不读**落点 config 的 `repoKind`。对**私有仓**它在语义上不适用——私有仓里\"本仓自己的名字\"不是泄漏（见 `src/repo-patterns.mjs` 的分档口径）。私有仓要扫敏感面请用 `rk-gate precommit`（它按 `repoKind` 分档）或 `byte-discipline`（字节纪律）。**无被测对象时 exit 2**。"
+  },
+  "notes": "公开面泄漏（S8 同源模式的独立实现）。给被治理项目引用时先确认\"这个仓是公开的吗\"：私有仓用它是**错档**（会把本仓自己的名字当泄漏）。"
+}
