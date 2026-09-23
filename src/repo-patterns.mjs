@@ -34,6 +34,16 @@ export const REPO_KIND_DEFAULT = 'private';
 /** 判定"这个仓是公开的还是私有的"的**显式开关名**（写在落点的 config.json 里） */
 export const REPO_KIND_FIELD = 'repoKind';
 
+/** 散文口令判据里"值"的形状（供正则与 `allow()` 共用，避免两处口径不一致） */
+const PROSE_VALUE_RE = /[A-Za-z_][A-Za-z0-9_@#$%^&*+=.!~-]{3,}$/;
+/** 关键词（`allow()` 复核用；与上面那条正则的关键词表**必须同源**，改一处就要改另一处） */
+const PROSE_KEYWORD_RE = /(?:password|passwd|pwd|api[_-]?key|secret[_-]?key|access[_-]?key|私钥|密钥|密码|口令)/i;
+/**
+ * 更严的那条凭据判据（`key[:=] "值"`，值 ≥8 字符）。**必须与 INFRA_PATTERNS 里的字面量同源**：
+ * 这里只用它做"本条是否与它重叠"的判定（重叠 ⇒ 不重复报），口径漂移会导致漏报或重复报。
+ */
+const STRICT_CRED_RE = /\b(?:ali[_-]?key|ali[_-]?secret|cf[_-]?token|aws_secret_access_key|api[_-]?key|password|passwd)\b\s*[:=]\s*['"][^'"]{8,}/i;
+
 /**
  * **identity 类**：只在**公开仓**里才算泄漏 —— 它们的泄漏语义来自"这个仓的名字/编号不该对外出现"。
  * 私有仓里这些是它自己的标识，扫它们等于自己拦自己。
@@ -69,6 +79,57 @@ export const INFRA_PATTERNS = Object.freeze([
     allow: (rel, s) => s === '127.0.0.1' || s === '0.0.0.0',   // 回环/未指定不算基础设施标识
   },
   { re: /\b(?:ali[_-]?key|ali[_-]?secret|cf[_-]?token|aws_secret_access_key|api[_-]?key|password|passwd)\b\s*[:=]\s*['"][^'"]{8,}/i, why: '云凭据/口令真值' },
+  {
+    // **散文语境的口令**（P15，2026-09-23）。工单实测的漏检形态：上面那条只认 `key[:=] "值"`，
+    // 而"⟨关键词⟩是⟨口令值⟩"这种**散文写法**一路漏过去（他们那边真漏过一次）。
+    // ⚠ 本注释里那个真实样例**故意不写成连续字面量**（写成示例会被本条判据自己命中 —— 实测过一次）：
+    //   要复现请用 `node -e` 拼串，或看 `test/prose-secret.test.mjs` 的**运行时拼装**样本（规则 51 同向）。
+    // 判定 = 关键词 + **分隔符（是/为/＝/=/:/：，或英文 is）** + 口令值：
+    //   · 值以字母/下划线开头、≥4 字符（挡 `0640` / `77-81` 这类行号）；
+    //   · `allow` 再挡三类**代码/占位**写法（见下方注释）。
+    //
+    // 误报面（规则 53 第①步：先量后写，**误报面读数**）：真仓 279 文件 **0 命中**；
+    // 被治理仓 1292 文件 **0 命中**（但那仓有一处硬编码口令的测试样本由**上面那条**判据拦到，
+    // 本条不重复报；具体串不写进本文件 —— 写进来会被 S8 判成"本文件含凭据真值"，实测过一次）。
+    // 判别力（负样本 15/15 不命中、正样本 5/5 命中）；样本清单与推导留在提交信息与用例里。
+    //
+    // **已登记边界（不当成"已覆盖"）**：值旁边没有任何分隔符的写法（`口令 hunter2x`）与
+    // 纯字母的裸值（`密码是 correcthorse`，正则分不出"普通词"与"口令"）**不报**。
+    // 收紧优先于放宽：公开面误报会拦住正常提交，而"漏一种写法"由人复核兜。
+    re: /(?<![\w.$:])(?:password|passwd|pwd|api[_-]?key|secret[_-]?key|access[_-]?key|私钥|密钥|(?<!口)密码|口令)\s*(?:是|为|＝|=|:|：|\bis\b)\s*["'「『]?([A-Za-z_][A-Za-z0-9_@#$%^&*+=.!~-]{3,})/gi,
+    why: '散文语境里的口令真值',
+    allow: (rel, s) => {
+      // `rel` 未用：这里没有**按文件豁免**，只有按内容判定（见下）—— 与规则 51 同向：不为用例开例外。
+      void rel;
+      const value = PROSE_VALUE_RE.exec(s)?.[0] ?? '';
+      const kw = PROSE_KEYWORD_RE.exec(s);
+      const tail = kw === null ? s : s.slice(kw.index + kw[0].length);
+      // ① 与上面那条更严的判据（`key[:=] "值"`，值 ≥8 字符）**不重叠**：那条已经**真会**拦的，本条不再重复报。
+      //    判据是"同一个串会不会被那条拦"，不是"有没有等号" —— 实测栽过：`pwd = "短值"` 里 `pwd`
+      //    不在那条的关键词表里 ⇒ 那条根本拦不住，被这条的重叠守卫顺手放过去就是**漏检**。
+      if (STRICT_CRED_RE.test(s)) return true;
+      // ①b **无空白的整串赋值**（`KEY=VALUE`）：这是"把凭据钉在代码或文档里举例"的写法，属**凭据样本**
+      //    而非"散文里提到口令" —— 它的拦截面归上面那条（以及 redact 判据），本条不抢。
+      //    实测：本仓夹具串（拼接而成，见用例）就是这一形态，漏掉这个约束会让新判据把**检测器自己的
+      //    样本**报成泄漏（一次性红了 16 条用例，实测过）。
+      //    ⚠ **不能**写成 `\S+\s*[:=]\s*\S+`（允许空白）：那会把我要抓的正样本 `pwd = "值"` 一起放掉
+      //      （写宽一档就漏检，写窄一档就误报检测器自己的样本 —— 这条线是两向实测压出来的）。
+      if (/^\S+[:=]\S+$/.test(s)) return true;
+      // ② 占位词：`password: example` / `your` / `xxx` / `changeme`…
+      if (/^(?:example|your|the|my|some|xxx+|todo|none|null|undefined|false|true|string|number|changeme|placeholder|redacted)$/i.test(value)) return true;
+      // ② 代码赋值（`=` 紧跟值之前）：那是实现里的写法，不是散文 —— 实测 `password = splitCred(args[2])` 最常误报
+      if (/=\s*$/.test(tail.slice(0, Math.max(0, tail.lastIndexOf(value))))) return true;
+      // ③ 值是**全大写标识符**（环境变量名，如 `apiKey = OPENAI_API_KEY`）⇒ 不是口令
+      if (/^[A-Z][A-Z0-9_]*$/.test(value)) return true;
+      // ④ 散文里"关键词 + 是/为 + 单个普通小写词"（`密码是 restore` / `password 是 msmtp`）：
+      //    裸值**必须含数字**（真口令通常带数字，普通词几乎不带）—— 本轮实测收窄出来的那条线。
+      const quoted = /["'「『]/.test(s) && /["'」』]/.test(s);
+      if (!/\d/.test(value) && !quoted) return true;
+      // ⑤ 带引号但引号里不是口令（含非 ASCII，如 `"见附件"`）
+      if (quoted && !/^[\x20-\x7e]*$/.test(value)) return true;
+      return false;
+    },
+  },
   {
     // **只看真正的路径形态**（规则 53：新判据先在真仓跑误报面）。这一条改了两轮，两轮都是**实测**逼出来的：
     //   ① 旧写法 `\b(?:id_rsa|id_ed25519)\b|\.pem\b` 命中**子串** ⇒ `.gitignore` 里的忽略规则
