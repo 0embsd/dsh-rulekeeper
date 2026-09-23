@@ -22,12 +22,20 @@ import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+// **用法**（2026-09-23 补：要让 CI 与本地跑**同一条命令**）：
+//   · 参数里以 `-` 开头的一律当作 **node 自己的选项**（如 `--test-reporter=tap`），透传给 node；
+//   · 其余参数当作**测试路径**（显式列文件）；不带路径时按下面的 glob 只跑用例面。
+// 为什么需要前者：CI 的 test 任务要 TAP（注解要机器可解析），而它此前跑的是裸 `node --test`
+// ⇒ 与本机 `rk-test` **不是同一条命令** ⇒ 夹具面差异导致远端恒红（实测 2026-09-23）。
 const args = process.argv.slice(2);
+const nodeOpts = args.filter((a) => a.startsWith('-'));
+const pathArgs = args.filter((a) => !a.startsWith('-'));
 
 if (args.includes('--help') || args.includes('-h')) {
-  console.log('用法: rk-test [<test-file-or-dir> ...]');
-  console.log('说明: 转调 `node --test`（cwd=包根）；不带参数跑 test/ 全部用例；rc 原样透传。');
-  console.log('注意: 带参数 = 部分运行，**不构成交付凭证**；交付请跑全量 rk-test + rk-selfcheck。');
+  console.log('用法: rk-test [node 选项…] [<test-file-or-dir> …]');
+  console.log('说明: 转调 `node --test`（cwd=包根）；不带路径参数时只跑 `test/**/*.test.mjs`（用例面）；rc 原样透传。');
+  console.log('      `-` 开头的参数视为 node 选项（例：--test-reporter=tap）。');
+  console.log('注意: 带路径参数 = 部分运行，**不构成交付凭证**；交付请跑全量 rk-test + rk-selfcheck。');
   process.exit(0);
 }
 
@@ -36,18 +44,22 @@ if (args.includes('--help') || args.includes('-h')) {
 //   **故意违规的样本**也被当成用例执行 ⇒ 全量跑多一条"失败"（而那条"失败"恰恰是夹具的本意）。
 //   样本是判据的**输入**，不是用例。故无参数时只跑 `test/**/*.test.mjs`（用例面），
 //   其余深度（含 `.dsh-ai/tmp/` 与 `test-fixtures/`）不进用例面。
-const discovered = args.length > 0
+const discovered = pathArgs.length > 0
   ? []
   : globSync('test/**/*.test.mjs', { cwd: ROOT }).sort();
-const runArgs = args.length > 0 ? args : discovered;
+const runArgs = pathArgs.length > 0 ? pathArgs : discovered;
 
-const partial = args.length > 0;
+const partial = pathArgs.length > 0;
 if (partial) {
-  console.error(`⚠ rk-test: **部分**运行（只跑 ${args.length} 个指定路径）——这**不是**交付凭证。`);
-  console.error('   交付判据 = 全量 `rk-test`（不带参数）+ `rk-selfcheck --root <包根>`（S8 脱敏 / S9 可达性 / 文档漂移等**包级**不变量）。');
+  console.error(`⚠ rk-test: **部分**运行（只跑 ${pathArgs.length} 个指定路径）——这**不是**交付凭证。`);
+  console.error('   交付判据 = 全量 `rk-test`（不带路径参数）+ `rk-selfcheck --root <包根>`（S8 脱敏 / S9 可达性 / 文档漂移等**包级**不变量）。');
 }
 
-const res = spawnSync(process.execPath, ['--test', ...runArgs], { cwd: ROOT, stdio: 'inherit' });
+// ⚠ **参数顺序的坑（2026-09-23 实测）**：`node --test <files…> --test-reporter=tap` 形态**不可用** ——
+//   `--test-reporter` 是**变参**（`--test-reporter=a --test-reporter=b` 也是合法的），于是它会把
+//   后面跟的**所有文件路径**当成分隔符之后的第二个 reporter 值吃掉 ⇒ 实测只跑了 269 条（应有 795），
+//   凭空多出 59 条"失败"。所以**必须**写成：`node --test [node 选项…] -- <文件…>`（用 `--` 分隔）。
+const res = spawnSync(process.execPath, ['--test', ...nodeOpts, '--', ...runArgs], { cwd: ROOT, stdio: 'inherit' });
 if (res.error) {
   console.error(`rk-test: 无法启动 node --test: ${String(res.error.message || res.error)}`);
   process.exit(1);

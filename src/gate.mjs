@@ -1131,20 +1131,29 @@ export const ENGINE_NODE = engineNodeMajor();
  * 所以失败时必须把「用例名 + 断言信息 + 文件:行」打成 `::error::` 工作流命令：
  * 只把输出留在日志里，仓外只读的审阅者（含本项目的自检流程）就看不到失败原因。
  * 输出转 TAP 是为了**机器可解析**（`spec` 是人看的、`tap` 才带 key: value 诊断块）。
+ *
+ * **为什么改成 rk-test 而不是裸 node --test（2026-09-23 远端实测）**：
+ *   裸 node --test 会**自动发现**任意深度下匹配命名约定的文件 ⇒ 把
+ *   test-fixtures/red/test/violating.sample.mjs（**故意违规的样本**）也当用例执行 ⇒ 两个平台恒红，
+ *   而本机跑 rk-test 是绿的（它 2026-09-21 就改成只跑 test 目录下的用例文件）。
+ *   同一条纪律两处实现 ⇒ 必然漂移；现在 CI 与本地**跑同一条命令**（同一入口、同一用例面）。
+ *   ⚠ 注意本行以上是 **JS 模板字面量之外的文档注释**，但下面 CI_TEST_SCRIPT 是模板字符串 ——
+ *   往里写反引号会直接终止字符串（本次实测踩到：SyntaxError 让 78 个用例文件全部加载失败，
+ *   表现为"只跑了 269 条、59 条失败"这种极难归因的形态）。
  */
 export const CI_TEST_SCRIPT = [
   'set +e',
-  'node --test --test-reporter=tap > "$RUNNER_TEMP/rk-tap.txt" 2>&1',
+  'node bin/rk-test.mjs --test-reporter=tap > "$RUNNER_TEMP/rk-tap.txt" 2>&1',
   'rc=$?',
   'if [ "$rc" -eq 0 ]; then',
   '  # 成功也发一条 ::notice:: 注解（注解无凭证可读）⇒ "本平台真跑过 N 条用例"成了可公开复核的凭证，',
   '  # 而不是只能看结论色的自述（本仓此前 README 只能写 macOS 未实测，就是缺这条凭证）',
   '  summary=$(grep -E \'^# (tests|pass|fail|skipped) \' "$RUNNER_TEMP/rk-tap.txt" | tr \'\\n\' \' \')',
-  '  echo "::notice::node --test 通过：$summary"',
+  '  echo "::notice::rk-test 通过：$summary"',
   '  tail -n 5 "$RUNNER_TEMP/rk-tap.txt"',
   '  exit 0',
   'fi',
-  'echo "::error::node --test 失败（rc=$rc）：先把失败的用例名占满注解配额，再补第一条的关键诊断"',
+  'echo "::error::rk-test 失败（rc=$rc）：先把失败的用例名占满注解配额，再补第一条的关键诊断"',
   'n=$(grep -c -E \'not ok \' "$RUNNER_TEMP/rk-tap.txt")',
   'echo "::error::失败行共 $n 条（含文件级汇总行）；GitHub 每步只展示 10 条注解，超出的看本步日志"',
   'grep -E \'not ok \' "$RUNNER_TEMP/rk-tap.txt" | head -n 8 | while IFS= read -r line; do echo "::error::$line"; done',

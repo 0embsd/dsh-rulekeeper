@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CI_TEST_SCRIPT, ciWorkflowYaml } from '../src/gate.mjs';
@@ -21,12 +21,32 @@ const GIT_BASH = process.platform === 'win32' ? 'C:\\Program Files\\Git\\bin\\ba
 const HAS_BASH = existsSync(GIT_BASH);
 const skipNoBash = HAS_BASH ? false : `本机没有可用的 bash（${GIT_BASH}）⇒ 跳过`;
 
+const PKG = join(import.meta.dirname, '..');
+
 function tempDir(label) {
   return mkdtempSync(join(tmpdir(), `lf-ci-annotate-${label}-`));
 }
 
-/** 真跑生成物里那份脚本（必要时在用例里删掉，验红用） */
+/** 真跑生成物里那份脚本（必要时在用例里删掉，验红用）
+ *
+ * **2026-09-23 调整**：生成物里的 `test` 步骤改成调 `bin/rk-test.mjs`（与本地同一条命令，
+ * 见 `CI_TEST_SCRIPT` 的来历注释）。那条命令行**故意**用"包根相对路径"（CI 的 cwd = 仓库根，
+ * 这是它该有的形态），而本用例在临时目录里跑 ⇒ 必须把**同一份**文件面造出来：
+ * 临时目录里放 `bin/rk-test.mjs`（转调 `node --test -- <本目录 *.test.mjs>`）+ 待跑的用例文件。
+ * 这样测的仍是**生成物里那份脚本本身**（同样的 grep/注解逻辑），而不是另写一套。
+ */
+function rkTestShim() {
+  return "#!/usr/bin/env node\n"
+    + "import { spawnSync } from 'node:child_process';\n"
+    + "import { globSync } from 'node:fs';\n"
+    + "const paths = globSync('*.test.mjs').sort();\n"
+    + "const res = spawnSync(process.execPath, ['--test', '--test-reporter=tap', '--', ...paths], { stdio: 'inherit' });\n"
+    + "process.exit(res.status ?? 1);\n";
+}
+
 function runStep(dir, script) {
+  mkdirSync(join(dir, 'bin'), { recursive: true });
+  writeFileSync(join(dir, 'bin', 'rk-test.mjs'), rkTestShim(), 'utf8');
   const file = join(dir, 'step.sh');
   writeFileSync(file, script, 'utf8');
   const env = { ...process.env, RUNNER_TEMP: dir };   // 生成物只依赖 RUNNER_TEMP（GitHub 提供）
@@ -45,6 +65,11 @@ test('判据: 生成物里的 test 步骤**逐字**内嵌 CI_TEST_SCRIPT（单�
   }
   assert.equal(yml.includes('run: node --test\n'), false,
     '不得退回"一句话 run: node --test"（那样失败原因只剩需凭证的日志）');
+  // **2026-09-23（远端实测的漂移）**：CI 必须调 `rk-test` 这个**单一入口**，不得退回裸 `node --test` ——
+  // 裸命令会**自动发现**任意深度的测试文件，把 `test-fixtures/red/**` 里那份**故意违规的样本**当用例跑，
+  // 于是两个平台恒红（本机 `rk-test` 是绿的，因为它只跑用例面）。同一条纪律两处实现 = 必然漂移。
+  assert.equal(yml.includes('node bin/rk-test.mjs'), true,
+    'CI 必须走 rk-test（与本地同一条命令、同一用例面）；退回裸 node --test 会让夹具被当用例执行 ⇒ 恒红');
   assert.equal(yml.includes('--test-reporter=tap'), true, '必须用 TAP 报告器：只有它带 key: value 诊断块');
   assert.equal(yml.includes('::error::'), true, '必须发 GitHub 注解工作流命令（注解无凭证可读）');
   // 注解能力实测（2026-09-16）：v4 系动作仍能用，但会被强制跑在 Node 24 上并附降级告警 —— 用 v5 消掉噪声
@@ -60,7 +85,7 @@ test('green: 用例全过 ⇒ 退出码 0、无 error 注解，但有 **notice �
     assert.equal(r.status, 0, `全过时脚本必须返回 0:\n${r.stdout}${r.stderr}`);
     assert.equal(r.stdout.includes('::error::'), false, `全过时不得有 error 注解:\n${r.stdout}`);
     // 与失败侧同源：TAP 摘要里的 tests/pass/fail/skipped 必须原样进注解（注解无凭证可读 ⇒ 这就是凭证）
-    assert.match(r.stdout, /^::notice::node --test 通过：# tests 1 # pass 1 # fail 0 # skipped 0 $/m,
+    assert.match(r.stdout, /^::notice::rk-test 通过：# tests 1 # pass 1 # fail 0 # skipped 0 $/m,
       `全过时必须给出可复核的摘要注解:\n${r.stdout}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -79,7 +104,7 @@ test('red: 有用例失败 ⇒ 注解里必须有用例名 + 断言信息 + 文�
     assert.match(r.stdout, /^::error::.*not ok .*探针必红$/m, `注解里必须有失败用例名:\n${r.stdout}`);
     assert.match(r.stdout, /^::error::.*deliberate probe failure$/m, `注解里必须有断言信息:\n${r.stdout}`);
     assert.match(r.stdout, /^::error::.*bad\.test\.mjs:\d+/m, `注解里必须有 文件:行（否则不知道该去哪看）:\n${r.stdout}`);
-    assert.equal(r.stdout.includes('::error::node --test 失败'), true, `必须先给一条总体失败注解:\n${r.stdout}`);
+    assert.equal(r.stdout.includes('::error::rk-test 失败'), true, `必须先给一条总体失败注解:\n${r.stdout}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

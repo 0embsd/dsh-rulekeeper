@@ -31,17 +31,17 @@ jobs:
       - name: 全量用例（Windows 之外的两平台同源复核）
         run: |
           set +e
-          node --test --test-reporter=tap > "$RUNNER_TEMP/rk-tap.txt" 2>&1
+          node bin/rk-test.mjs --test-reporter=tap > "$RUNNER_TEMP/rk-tap.txt" 2>&1
           rc=$?
           if [ "$rc" -eq 0 ]; then
             # 成功也发一条 ::notice:: 注解（注解无凭证可读）⇒ "本平台真跑过 N 条用例"成了可公开复核的凭证，
             # 而不是只能看结论色的自述（本仓此前 README 只能写 macOS 未实测，就是缺这条凭证）
             summary=$(grep -E '^# (tests|pass|fail|skipped) ' "$RUNNER_TEMP/rk-tap.txt" | tr '\n' ' ')
-            echo "::notice::node --test 通过：$summary"
+            echo "::notice::rk-test 通过：$summary"
             tail -n 5 "$RUNNER_TEMP/rk-tap.txt"
             exit 0
           fi
-          echo "::error::node --test 失败（rc=$rc）：先把失败的用例名占满注解配额，再补第一条的关键诊断"
+          echo "::error::rk-test 失败（rc=$rc）：先把失败的用例名占满注解配额，再补第一条的关键诊断"
           n=$(grep -c -E 'not ok ' "$RUNNER_TEMP/rk-tap.txt")
           echo "::error::失败行共 $n 条（含文件级汇总行）；GitHub 每步只展示 10 条注解，超出的看本步日志"
           grep -E 'not ok ' "$RUNNER_TEMP/rk-tap.txt" | head -n 8 | while IFS= read -r line; do echo "::error::$line"; done
