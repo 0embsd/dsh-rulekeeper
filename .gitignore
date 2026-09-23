@@ -14,6 +14,15 @@
 .dsh-ai/rulekeeper/*
 !.dsh-ai/rulekeeper/config.json
 !.dsh-ai/rulekeeper/rules.json
+# 2026-09-23（发布时实测踩到）：**取证台账必须入库**。
+#   `rk-gate ci`（服务端门，CI 里跑的那条）判定"受保护路径的改动有没有留证"读的就是本文件；
+#   它原来被 ignore ⇒ **干净 clone 里没有台账** ⇒ 任何动过保护面的提交都被判
+#   `GATE_BYPASS_NO_EVIDENCE`（本机绿、CI 恒红）。台账是"审计要看的事实"，
+#   跑完就丢的临时文件不是事实。行的 `committed` 会与提交 blob 对账（`unverifiedPaths`），
+#   所以入库不等于自证（手工塞一行对不上物证 ⇒ 判 `ledger-unverified`）。
+!.dsh-ai/rulekeeper/logs/
+.dsh-ai/rulekeeper/logs/*
+!.dsh-ai/rulekeeper/logs/gate.jsonl
 !.dsh-ai/lessonflow/
 .dsh-ai/lessonflow/*
 !.dsh-ai/lessonflow/config.json
