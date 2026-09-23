@@ -13,17 +13,21 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { cleanupAll, PKG_ROOT, tempDir } from './helpers/sandbox.mjs';
+import { cleanupAll, PKG_ROOT, runCheckerVerdict, tempDir } from './helpers/sandbox.mjs';
 
 test.after(cleanupAll);
 
 const CHECKER = join(PKG_ROOT, 'scripts', 'checkers', 'byte-discipline.mjs');
 
-function run(sampleDir, extraEnv = {}) {
-  const res = spawnSync(process.execPath, [CHECKER], {
-    cwd: PKG_ROOT, encoding: 'utf8', env: { ...process.env, RULEKEEPER_SAMPLE_DIR: sampleDir, ...extraEnv },
-  });
-  return { rc: res.status, out: res.stdout ?? '', err: res.stderr ?? '' };
+/**
+ * 跑检查器。**统一走 `runCheckerVerdict` 守卫**（2026-09-23 自进化）：
+ * 它默认要求"有结论"，`exit 2`（不适用）会**直接判失败** —— 防的正是"我没判"被读成"判绿"。
+ * 需要断言"不适用"的用例（下方判据③）**显式**传 `{ expect: 'not-applicable' }`。
+ * 字段名 `rc/out/err` 保持不变，避免大范围改断言。
+ */
+function run(sampleDir, extraEnv = {}, opts = {}) {
+  const r = runCheckerVerdict(CHECKER, { sampleDir, env: extraEnv, label: 'byte-discipline', ...opts });
+  return { rc: r.status, out: r.stdout, err: r.stderr };
 }
 
 /** 把临时目录变成**真 git 仓**（默认扫描面靠 `git ls-files` 判定，夹具必须真） */
@@ -75,9 +79,9 @@ test('判据②c: 纯 CRLF（**不混**）不算违规 —— 判的是"混"与"
   assert.equal(res.rc, 0, `统一 CRLF 也有显式声明 ⇒ 不违规；out=${res.out}`);
 });
 
-test('判据③: 没有被测对象 ⇒ rc=2', () => {
+test('判据③: 没有被测对象 ⇒ rc=2（**显式**声明"不适用"，不许当绿）', () => {
   const empty = tempDir('byte-empty');
-  const res = run(empty);
+  const res = run(empty, {}, { expect: 'not-applicable' });
   assert.equal(res.rc, 2);
   assert.match(res.out, /SUBJECT=absent/);
 });

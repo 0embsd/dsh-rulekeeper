@@ -8,15 +8,14 @@
 
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 
 import { resolveUserLanding } from '../../src/platform/paths.mjs';
 
-/** dsh-rulekeeper 包根（<pkg>/test/helpers/sandbox.mjs → 上溯 3 级） */
-export const PKG_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+/** dsh-rulekeeper 包根（<pkg>/test/helpers/sandbox.mjs → 上溯 3 级） */export const PKG_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 export const FIXTURES_DIR = join(PKG_ROOT, 'test', 'fixtures');
 
 const CLEANUPS = [];
@@ -205,6 +204,59 @@ export function realUserLandingGuard() {
         `${label}把测试会话写进了**真实**用户级落点 ${file}（实际 emissions 键：${JSON.stringify(keys)}）`);
     },
   };
+}
+
+/** 检查器（`scripts/checkers/*.mjs`）约定的"不适用"退出码（与 `git diff --exit-code` 同族用 2） */
+export const CHECKER_EXIT_NOT_APPLICABLE = 2;
+
+/**
+ * **退出码语义守卫**：跑一个检查器脚本，并把"不适用"与"通过"**强制分开**。
+ *
+ * 来历（2026-09-23，本会话差点交付假绿）：给交付判据换绿样本夹具时，第一版夹具是个"没有可核绑定的落点"，
+ * 于是 `misreport-surface` 在它上面走"不适用"路径 **exit 2** —— 而我的**断言写的是 `rc === 0`**，
+ * 按说应当红；但同一批用例里凡是把"不适用"当"绿"来读的地方都看不出来。
+ * 更早点还有同族两例：`ledger-live-verdict` 判据③（存在性被前导点欺骗）、`test-isolation` 首版 58 条误报。
+ * 共同点：**"我没判"被读成了"判绿"**（规则 41 的同族：判据必须落在对象自己的事实上）。
+ *
+ * 约定：
+ *   · `expect: 'verdict'`（默认，**判据面**）⇒ 断言"有结论"：`exit 0` 通过、`exit 1` 失败，
+ *     而 `exit 2`（不适用）**直接判失败并给出可操作提示** —— 因为判据在"没有被测对象"时给出的是"未判"，
+ *     把它当绿就是空转。
+ *   · `expect: 'not-applicable'`（**只有显式声明**的用例才允许）⇒ 断言"确实是不适用"，且必须正好是 2。
+ *   · 其他退出码：一律失败（如实报出）。
+ *
+ * @returns {{status: number|null, stdout: string, stderr: string, script: string, sampleDir: string|null}}
+ */
+export function runCheckerVerdict(script, { sampleDir = null, env = {}, cwd = PKG_ROOT, expect = 'verdict', label = '' } = {}) {
+  const sampleAbs = sampleDir === null ? null : resolve(sampleDir);
+  const childEnv = { ...process.env, ...env };
+  if (sampleAbs === null) delete childEnv.RULEKEEPER_SAMPLE_DIR;
+  else childEnv.RULEKEEPER_SAMPLE_DIR = sampleAbs;
+  const res = spawnSync(process.execPath, [resolve(PKG_ROOT, script)], { cwd, encoding: 'utf8', env: childEnv });
+  const info = {
+    status: typeof res.status === 'number' ? res.status : null,
+    stdout: res.stdout ?? '',
+    stderr: res.stderr ?? '',
+    script,
+    sampleDir: sampleAbs,
+  };
+  const who = `${label === '' ? script : `${label}（${script}）`}`;
+  if (expect === 'not-applicable') {
+    assert.equal(info.status, CHECKER_EXIT_NOT_APPLICABLE,
+      `${who}: 本用例显式断言"不适用"（exit 2），实得 exit=${info.status}\n${info.stdout}${info.stderr}`);
+    return info;
+  }
+  if (info.status === CHECKER_EXIT_NOT_APPLICABLE) {
+    assert.fail(`${who}: 检查器给出**"不适用"**（exit 2）而不是判定 —— "我没判"不等于"判绿"。\n`
+      + `  被检根：${info.sampleDir ?? '(默认 cwd)'}\n`
+      + `  输出首行：${String(info.stdout).split('\n').map((l) => l.trim()).filter((l) => l !== '')[0] ?? '(空)'}\n`
+      + '  修法：要么给检查器一个**真有被测对象**的样本（例如落点里含至少一条由规格支撑的绑定），\n'
+      + '        要么本用例确实在断言"不适用"⇒ 显式传 { expect: "not-applicable" }。');
+  }
+  if (info.status !== 0 && info.status !== 1) {
+    assert.fail(`${who}: 非契约退出码 exit=${info.status}（判据面只接受 0=通过 / 1=命中 / 2=不适用）\n${info.stdout}${info.stderr}`);
+  }
+  return info;
 }
 
 /**

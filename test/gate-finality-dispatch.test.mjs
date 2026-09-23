@@ -20,20 +20,22 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { cleanupAll, PKG_ROOT, tempDir } from './helpers/sandbox.mjs';
+import { cleanupAll, PKG_ROOT, runCheckerVerdict, tempDir } from './helpers/sandbox.mjs';
 
 test.after(cleanupAll);
 
 const CHECKER = join(PKG_ROOT, 'scripts', 'checkers', 'gate-finality.mjs');
 const EXPECTED = ['pre-commit', 'commit-msg', 'post-commit', 'pre-push'];
 
-/** 在指定树上跑**诊断模式**（只读、只打印、不参与判定路径） */
-function exportTree(dir) {
-  const res = spawnSync(process.execPath, [CHECKER], {
-    cwd: PKG_ROOT, encoding: 'utf8',
-    env: { ...process.env, GATE_FINALITY_MODE: 'export', RULEKEEPER_SAMPLE_DIR: dir },
+/**
+ * 在指定树上跑**诊断模式**（只读、只打印、不参与判定路径）。
+ * **统一走 `runCheckerVerdict` 守卫**（2026-09-23）：默认要求"有结论"，`exit 2`（不适用）直接判失败。
+ */
+function exportTree(dir, opts = {}) {
+  const r = runCheckerVerdict(CHECKER, {
+    sampleDir: dir, env: { GATE_FINALITY_MODE: 'export' }, label: 'gate-finality', ...opts,
   });
-  return { rc: res.status, out: res.stdout ?? '', err: res.stderr ?? '' };
+  return { rc: r.status, out: r.stdout, err: r.stderr };
 }
 
 /** 无 MUTEX 的 runner 调用形态（③ 用它证明"名字装错"会被抓） */

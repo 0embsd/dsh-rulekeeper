@@ -15,21 +15,21 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { cleanupAll, PKG_ROOT, tempDir } from './helpers/sandbox.mjs';
+import { cleanupAll, PKG_ROOT, runCheckerVerdict, tempDir } from './helpers/sandbox.mjs';
 
 test.after(cleanupAll);
 
 const CHECKER = join(PKG_ROOT, 'scripts', 'checkers', 'misreport-surface.mjs');
 const SHIPPED_RED = join(PKG_ROOT, 'test-fixtures', 'misreport-red');
 
-/** 跑检查器：`--sample` 为被检根。**cwd 恒为包根**（与绑定层一致：规格/命令按 cwd 相对解析） */
-function runChecker(sampleDir) {
-  const res = spawnSync(process.execPath, [CHECKER], {
-    cwd: PKG_ROOT,
-    encoding: 'utf8',
-    env: { ...process.env, RULEKEEPER_SAMPLE_DIR: sampleDir },
-  });
-  return { rc: res.status, out: res.stdout ?? '', err: res.stderr ?? '' };
+/**
+ * 跑检查器：`--sample` 为被检根。**cwd 恒为包根**（与绑定层一致：规格/命令按 cwd 相对解析）。
+ * **统一走 `runCheckerVerdict` 守卫**（2026-09-23 自进化）：默认要求"有结论"，`exit 2`（不适用）
+ * 会直接判失败 —— 防"我没判"被读成"判绿"；要断言"不适用"的用例**显式**传 `{ expect: 'not-applicable' }`。
+ */
+function runChecker(sampleDir, opts = {}) {
+  const r = runCheckerVerdict(CHECKER, { sampleDir, label: 'misreport-surface', ...opts });
+  return { rc: r.status, out: r.stdout, err: r.stderr };
 }
 
 /**
@@ -124,9 +124,9 @@ test('判据④: 递归护栏 —— 命令里含本检查器的绑定被跳过�
   assert.match(res.out, /CHECKED=0/);
 });
 
-test('判据⑤: 没有被测对象 ⇒ rc=2（不是"通过"）', () => {
+test('判据⑤: 没有被测对象 ⇒ rc=2（**显式**声明"不适用"，不是"通过"）', () => {
   const empty = tempDir('mis-empty');
-  const res = runChecker(empty);
+  const res = runChecker(empty, { expect: 'not-applicable' });
   assert.equal(res.rc, 2);
   assert.match(res.out, /MISREPORT_RULES=absent/);
 });

@@ -20,17 +20,16 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { cleanupAll, PKG_ROOT, tempDir } from './helpers/sandbox.mjs';
+import { cleanupAll, PKG_ROOT, runCheckerVerdict, tempDir } from './helpers/sandbox.mjs';
 
 test.after(cleanupAll);
 
 const CHECKER = join(PKG_ROOT, 'scripts', 'checkers', 'byte-discipline.mjs');
 
-function run(sampleDir, extraEnv = {}) {
-  const res = spawnSync(process.execPath, [CHECKER], {
-    cwd: PKG_ROOT, encoding: 'utf8', env: { ...process.env, RULEKEEPER_SAMPLE_DIR: sampleDir, ...extraEnv },
-  });
-  return { rc: res.status, out: res.stdout ?? '', err: res.stderr ?? '' };
+/** 跑检查器。**统一走 `runCheckerVerdict` 守卫**（2026-09-23）：默认要求"有结论"，`exit 2` 直接判失败 */
+function run(sampleDir, extraEnv = {}, opts = {}) {
+  const r = runCheckerVerdict(CHECKER, { sampleDir, env: extraEnv, label: 'byte-discipline', ...opts });
+  return { rc: r.status, out: r.stdout, err: r.stderr };
 }
 
 /** 仓库根 = root，`-C root` 显式（不继承测试进程 cwd，避免 sibling 进程污染） */
