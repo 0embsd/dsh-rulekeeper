@@ -1466,7 +1466,7 @@ export function runGate(argv, io = defaultIo(), env = process.env) {
 export function runGateCommitmsg(argv, io = defaultIo(), env = process.env) {
   let flags;
   try {
-    flags = scanFlags(argv, { '--file': 'string', '--range': 'string', '--repo': 'string', '--json': 'boolean', '--help': 'boolean' });
+    flags = scanFlags(argv, { '--file': 'string', '--range': 'string', '--repo': 'string', '--landing': 'string', '--json': 'boolean', '--help': 'boolean' });
   } catch (err) {
     if (err instanceof UsageError) {
       io.err(`rk-gate commitmsg: ${err.message}\n用法: rk-gate commitmsg --file <提交正文文件> | --repo <仓库根> --range <A..B> [--json]\n`);
@@ -1487,9 +1487,26 @@ export function runGateCommitmsg(argv, io = defaultIo(), env = process.env) {
     io.err('rk-gate commitmsg: 二选一 —— `--file <提交正文文件>`（commit-msg）或 `--repo <仓库根> --range <A..B>`（pre-push）\n');
     return RC.USAGE;
   }
+  // ── **档位口径唯一**（P16，2026-09-23）──────────────────────────────────────────
+  // 现场：`precommit` 走 `resolveRepoPatterns`（读落点 `repoKind`），而本命令与 `refs` 却**没传落点**
+  // ⇒ `resolveLeakPatterns` 兜底成"公开仓完整表" ⇒ **同一段 identity 文本：文件面 pass、正文面 fail**
+  // （被治理项目被拦过一次，且他们那档是 private）。修法是**让三面读同一个口径**。
+  // ⚠ **只在落点真的存在时才传它**（实测教训）：`resolveRepoPatterns` 对"没有声明"的兜底是 **private**（少扫一类），
+  // 而"压根没落点"应当走**保守默认（公开面完整表）**。若把"不存在的落点路径"也传进去，
+  // 没配落点的仓会从"多扫一类"退化成"少扫一类" —— 那等于修 P16 时把检查放松了。
+  const resolveLeakLanding = (repoRoot) => {
+    const explicit = typeof flags.landing === 'string' && flags.landing.trim() !== '' ? resolve(flags.landing) : null;
+    const candidate = explicit ?? (() => { try { return resolveProjectLanding(resolve(repoRoot)); } catch { return null; } })();
+    if (candidate === null) return null;
+    // 落点必须**有 config.json** 才算"声明过档位"；否则交给 resolveLeakPatterns 走保守默认
+    return existsSync(join(candidate, 'config.json')) ? candidate : null;
+  };
+  const repoRootForLeak = hasFile
+    ? resolve(flags.repo ?? process.cwd())
+    : resolve(flags.repo ?? process.cwd());
   const r = hasFile
-    ? commitMessageGate({ messageFile: resolve(flags.file) })
-    : commitMessageGate({ repoRoot: resolve(flags.repo ?? process.cwd()), range: flags.range.trim() });
+    ? commitMessageGate({ messageFile: resolve(flags.file), repoRoot: repoRootForLeak, landingDir: resolveLeakLanding(repoRootForLeak) })
+    : commitMessageGate({ repoRoot: repoRootForLeak, range: flags.range.trim(), landingDir: resolveLeakLanding(repoRootForLeak) });
   if (flags.json === true) {
     io.out(jsonStable(r));
     return r.ok === true ? RC.OK : RC.FAIL;
@@ -1512,7 +1529,7 @@ export function runGateCommitmsg(argv, io = defaultIo(), env = process.env) {
 export function runGateRefs(argv, io = defaultIo(), env = process.env) {
   let flags;
   try {
-    flags = scanFlags(argv, { '--file': 'string', '--json': 'boolean', '--help': 'boolean' });
+    flags = scanFlags(argv, { '--file': 'string', '--repo': 'string', '--landing': 'string', '--json': 'boolean', '--help': 'boolean' });
   } catch (err) {
     if (err instanceof UsageError) {
       io.err(`rk-gate refs: ${err.message}\n用法: rk-gate refs --file <refs 文件（每行 <localRef> <localSha> <remoteRef> <remoteSha>）> [--json]\n`);
@@ -1534,7 +1551,17 @@ export function runGateRefs(argv, io = defaultIo(), env = process.env) {
   if (existsSync(file)) {
     try { text = readFileSync(file, 'utf8'); } catch { text = ''; }
   }
-  const r = refsGate({ text });
+  // **档位口径唯一**（P16）：与 `precommit`/`commitmsg` 同源 —— 引用名同样按落点 `repoKind` 分档。
+  // refs 的 stdin 里没有仓库路径，故落点按 `--repo`（缺省 cwd）解析；显式 `--landing` 优先。
+  const refsRepoRoot = resolve(flags.repo ?? process.cwd());
+  const refsLanding = (() => {
+    const explicit = typeof flags.landing === 'string' && flags.landing.trim() !== '' ? resolve(flags.landing) : null;
+    const candidate = explicit ?? (() => { try { return resolveProjectLanding(refsRepoRoot); } catch { return null; } })();
+    if (candidate === null) return null;
+    // 与 commitmsg 同一取舍：落点必须**有 config.json** 才算"声明过档位"（否则走保守默认，而不是退化成 private）
+    return existsSync(join(candidate, 'config.json')) ? candidate : null;
+  })();
+  const r = refsGate({ text, repoRoot: refsRepoRoot, landingDir: refsLanding });
   if (flags.json === true) {
     io.out(jsonStable(r));
     return r.ok === true ? RC.OK : RC.FAIL;
@@ -1581,7 +1608,11 @@ export function runGatePrecommit(argv, io = defaultIo(), env = process.env) {
     }
     now = new Date(parsed);
   }
-  const landingDir = flags.landing === undefined ? undefined : resolve(flags.landing);
+  // **档位口径唯一**（P16）：与 `commitmsg`/`refs` 一致 —— 未显式给 `--landing` 时也解析**项目落点**，
+  // 否则 `repoPatterns` 会退回"远端探测 → 兜底 private"，同一段文本在三面上的判定就可能不同。
+  const landingDir = flags.landing === undefined
+    ? (() => { try { return resolveProjectLanding(repoRoot); } catch { return undefined; } })()
+    : resolve(flags.landing);
   const r = precommitGate({ repoRoot, landingDir, clearIndex: flags['clear-index'] === true, now });
   if (r.isGit !== true) {
     if (flags.json === true) {
