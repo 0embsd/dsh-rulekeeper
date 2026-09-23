@@ -1,0 +1,1 @@
+{"schema":1,"id":"V-GREEN-1","ts":"2026-01-01T00:00:00.000Z","rule":"CRED-FRESHNESS","category":"技术","problem":"凭据要能复核（本夹具演示合格形态）","root_cause":"引用不可复核的历史结论","solution":"evidence 每一项都指向仓库内**存在**的对象","mechanism":"mechanized","evidence":["docs/x.md（对象锚点=仓库内文件；本夹具里真实存在）"],"status":"active"}

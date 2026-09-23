@@ -19,7 +19,8 @@
   },
   "greenSample": {
     "kind": "tree",
-    "source": "."
+    "source": "test-fixtures/verdict-green",
+    "note": "**必须入库**（2026-09-23 修）：此前写 `.`（本仓根）是**不可复现样本** —— 本机有 `.dsh-ai/rulekeeper/ledger.jsonl` 才绿，而干净 clone（CI / 新装机）里台账不存在 ⇒ 检查器判 exit 2（判据不适用）⇒ 误报面检查判 MISREPORT_GREEN_FALSE_POSITIVE、两个平台恒红。规则 42 的\"样本必须能重跑\"对**绿样本同样成立**。"
   },
   "checkerVersion": "ledger-live-verdict@1",
   "timeoutMs": 20000,
