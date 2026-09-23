@@ -119,19 +119,70 @@ test('判据⑤: adopt 不写 rules.json（逐字节不变）', () => {
   assert.deepEqual(readFileSync(rulesPath), before, 'rules.json 不得被 adopt 改动一个字节');
 });
 
-test('判据⑥: scanSpecs 只认规格自己的 rule 字段（坏规格如实报，不静默跳过）', () => {
+test('判据⑥: scanSpecs 只认规格自己的 rule 字段（非规格形状的 JSON 如实记账，不静默跳过）', () => {
   const { root } = fixture('adopt-specs', {
     specs: {
       'scripts/checkers/ok.spec.json': specFor('CAT-OK'),
       'scripts/checkers/norule.spec.json': { schema: 1, command: ['node', 'x.mjs'] },
     },
   });
-  const { specs, findings } = scanSpecs(root);
+  const { specs, findings, skipped } = scanSpecs(root);
   assert.equal(specs.length, 1);
   assert.equal(specs[0].rule, 'CAT-OK');
-  assert.equal(findings.length, 1);
-  assert.equal(findings[0].code, 'ADOPT_SPEC_NO_RULE');
+  // P21 起：缺 rule 的文件从"报 finding"改为"进 skipped 读数并写明理由"
+  // （它确实不是规格，不是坏规格；两种处置都必须**看得见**，不许静默 0 条）
+  assert.equal(findings.length, 0);
+  assert.equal(skipped.length, 1);
+  assert.match(skipped[0].reason, /不是规格形状/);
 });
+
+// ── P21：认对方命名（`tools/rulekeeper/checkers/*.json`）+ "账本自称 vs 实际已绑"两个数分开 ──────
+// 现场（2026-09-23，被治理项目实测）：他们落点 `adopt` 报 `mechanized=0 ALREADY_BOUND=0`，
+// 同日 `plan` 报 `VERIFIED=4` ⇒ 两个读数被读成"互相矛盾"。根因：`scanSpecs` 只认 `*.spec.json`，
+// 而他们的规格叫 `tools/rulekeeper/checkers/gate-discipline-hooks.json` ⇒ 一个都扫不到。
+
+test('P21①: `tools/rulekeeper/checkers/*.json`（无 `.spec.json` 后缀）必须被当规格扫到', () => {
+  const { root } = fixture('p21-naming', {
+    specs: {
+      'tools/rulekeeper/checkers/gate-discipline-hooks.json': specFor('GATE-DISCIPLINE', 'tools/rulekeeper/red'),
+      'tools/rulekeeper/checkers/catproc-adoption.json': specFor('CAT-PROC', 'tools/rulekeeper/red'),
+    },
+  });
+  const { specs, skipped } = scanSpecs(root);
+  assert.equal(specs.length, 2, `两种命名都必须认；实得 ${JSON.stringify(specs.map((s) => s.rel))}`);
+  assert.deepEqual(specs.map((s) => s.rule).sort(), ['CAT-PROC', 'GATE-DISCIPLINE']);
+  assert.equal(skipped.length, 0);
+});
+
+test('P21②: 同目录里的**非规格** JSON（数据/清单）必须进 skipped 且写明理由，不当规格也不静默', () => {
+  const { root } = fixture('p21-nonspec', {
+    specs: {
+      'tools/rulekeeper/checkers/ok.json': specFor('CAT-PROC'),
+      'tools/rulekeeper/mechanism-face-registry.json': { schema: 1, faces: ['text', 'mechanized'] },
+    },
+  });
+  const { specs, skipped } = scanSpecs(root);
+  assert.equal(specs.length, 1);
+  assert.equal(skipped.length, 0, 'registry 不在 checkers/ 目录里 ⇒ 不属于本扫描面（目录边界即口径）');
+  const { skipped: skipped2 } = scanSpecs(root, { dirs: ['tools/rulekeeper'] });
+  assert.equal(skipped2.length >= 1, true, '把目录放宽到 tools/rulekeeper 时，registry 必须被如实记为"不是规格形状"');
+});
+
+test('P21③: 报告必须**分开**给出"账本自称"与"实际已绑"，且后者来自 rules.json', () => {
+  const { root, landing } = fixture('p21-two-numbers', {
+    rows: [baseRow({ rule: 'CAT-PROC', mechanism: 'mechanized' })],
+    checks: [{ kind: 'checker', rule: 'CAT-PROC', carrier: 'checker:tools/rulekeeper/checkers/ok.json', gate: 'close', patterns: [] }],
+    specs: { 'tools/rulekeeper/checkers/ok.json': specFor('CAT-PROC') },
+  });
+  const rep = adoptionReport({ landingDir: landing, projectRoot: root });
+  // 账本自称：1 条 mechanized；实际已绑：rules.json 里 1 条 checker 绑定 —— 两个数**分别**可读
+  assert.equal(rep.stats.faceCount.mechanized, 1, '账本自称');
+  assert.equal(rep.stats.boundCheckerRules, 1, '实际已绑（checker 类）');
+  assert.equal(rep.stats.boundChecks, 1, '实际已绑（checks 条数）');
+  assert.equal(rep.stats.boundRules, 1);
+  assert.equal(rep.plans[0].decision, 'already-bound', '已有绑定 ⇒ 不再出草稿（也不该被读成"没绑"）');
+});
+
 
 test('判据⑦: mechanismStats 把空 mechanism 记成「(空)」而不是当合法档', () => {
   const byRule = mechanismStats([baseRow({ mechanism: '' })]);

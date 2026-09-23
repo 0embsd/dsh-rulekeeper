@@ -2659,7 +2659,11 @@ function runCliEffect(argv, io, env) {
     io.out(line(`RK_ADOPT_LANDING=${toPosix(landing)}`));
     io.out(line(`RK_ADOPT_ENTRIES=${s.entries} EVENT_ROWS=${s.eventRows} RULES=${s.rules}`));
     io.out(line(`RK_ADOPT_FACE text=${s.faceCount.text} mechanized=${s.faceCount.mechanized} guard=${s.faceCount.guard} question=${s.faceCount.question} unregistered=${s.faceCount.unregistered}`));
-    io.out(line(`RK_ADOPT_SPECS=${s.specs} DRAFTS=${s.drafts} ALREADY_BOUND=${s.alreadyBound} OPEN_PROPOSAL=${s.openProposal}`));
+    io.out(line(`RK_ADOPT_SPECS=${s.specs} SPECS_SKIPPED=${s.specsSkipped ?? 0} DRAFTS=${s.drafts} ALREADY_BOUND=${s.alreadyBound} OPEN_PROPOSAL=${s.openProposal}`));
+    // **账本自称 vs 实际已绑**（P21）：两个数分开命名、各自标明来源，禁止被读成同一件事。
+    io.out(line(`RK_ADOPT_BINDINGS source=rules.json rules=${s.boundRules} checker_rules=${s.boundCheckerRules} checks=${s.boundChecks}`));
+    io.out(line(`RK_ADOPT_LEDGER_SELFCLAIM source=ledger.jsonl mechanized=${s.faceCount.mechanized}（账本自称的"已机械化"条数；与上面检查器绑定数**不是同一件事**）`));
+    for (const sk of report.skippedSpecs ?? []) io.out(line(`RK_ADOPT_SPEC_SKIPPED rel=${sk.rel} reason=${sk.reason}`));
     io.out(line(`RK_ADOPT_APPLIED=${flags.apply === true ? 1 : 0} WRITTEN=${written.length} SKIPPED=${skipped.length}`));
     for (const p of report.plans) io.out(line(`RK_ADOPT_PLAN rule=${p.rule} entries=${p.entries} spec=${p.spec} decision=${p.decision}`));
     for (const d of report.drafts) io.out(line(`RK_ADOPT_DRAFT rule=${d.rule} spec=${d.spec} proposal=${d.proposal.id}`));

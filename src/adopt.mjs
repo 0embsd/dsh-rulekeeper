@@ -29,8 +29,27 @@ import { buildProposal, writeProposal, listProposals } from './proposal.mjs';
 import { canonicalRule } from './ruleid.mjs';
 import { toPosix } from './platform/paths.mjs';
 
-/** 规格文件默认搜索目录（项目根相对） */
+/**
+ * 规格文件默认搜索目录（项目根相对）。
+ * `tools/rulekeeper/checkers` 是**被治理项目的约定目录**（2026-09-23 P21 实测：他们确实放在这里）。
+ */
 export const DEFAULT_SPEC_DIRS = Object.freeze(['scripts/checkers', 'tools/rulekeeper/checkers']);
+
+/**
+ * 一份 JSON 是不是**规格文件**（而不是同名目录里的数据/清单文件）。
+ * 判据 = 该文件自己的事实：`rule` 非空 **且** 至少有一个"判据面"字段（`command` / `checkerRef`）。
+ * 为什么不用文件名后缀当判据（P21）：被治理项目的规格叫 `tools/rulekeeper/checkers/*.json`
+ * （如 `gate-discipline-hooks.json`），**不带 `.spec.json` 后缀** ⇒ 原实现（只认 `.spec.json`）
+ * 一个都扫不到 ⇒ `adopt` 报 `mechanized=0 ALREADY_BOUND=0`，而同一天 `plan` 报 `VERIFIED=4`
+ * （两边读数各说各话，被读成"矛盾"）。名字是**约定**，内容是**事实**；判据落在事实上。
+ */
+function looksLikeSpec(spec) {
+  if (spec === null || typeof spec !== 'object' || Array.isArray(spec)) return false;
+  if (typeof spec.rule !== 'string' || spec.rule.trim() === '') return false;
+  const hasCommand = Array.isArray(spec.command) && spec.command.length > 0;
+  const hasRef = typeof spec.checkerRef === 'string' && spec.checkerRef.trim() !== '';
+  return hasCommand || hasRef;
+}
 
 /**
  * 扫可机械化类目的**规格文件**并配对账本类目。
@@ -38,11 +57,15 @@ export const DEFAULT_SPEC_DIRS = Object.freeze(['scripts/checkers', 'tools/rulek
  * 规格文件的形状见 SCHEMA.md 的 `checkerRef` 小节与 `scripts/checkers/*.spec.json`。
  * 配对判据是**规格自己的 `rule` 字段**（不是文件名）—— 防止"把 A 的检查器挂到 B 上"。
  *
- * @returns {{specs: object[], findings: object[]}}
+ * 接受两种命名（P21）：`*.spec.json`（本仓约定）与**目录下任何形状像规格的 `*.json`**
+ * （被治理项目约定）；被跳过的文件都进 `skipped` 读数，不做静默丢弃。
+ *
+ * @returns {{specs: object[], findings: object[], skipped: object[]}}
  */
 export function scanSpecs(projectRoot, { dirs = DEFAULT_SPEC_DIRS } = {}) {
   const specs = [];
   const findings = [];
+  const skipped = [];
   for (const dir of dirs) {
     const abs = join(projectRoot, dir);
     if (!existsSync(abs)) continue;
@@ -53,7 +76,8 @@ export function scanSpecs(projectRoot, { dirs = DEFAULT_SPEC_DIRS } = {}) {
       continue;
     }
     for (const name of names) {
-      if (!name.endsWith('.spec.json')) continue;
+      // 只看 JSON；非 JSON 是脚本本体/README，不算"没认出来的规格"
+      if (!/\.json$/i.test(name)) continue;
       const rel = toPosix(join(dir, name).split(sep).join('/'));
       let spec;
       try {
@@ -62,14 +86,15 @@ export function scanSpecs(projectRoot, { dirs = DEFAULT_SPEC_DIRS } = {}) {
         findings.push({ code: 'ADOPT_SPEC_BAD_JSON', message: `${rel}: 不是合法 JSON（${String(err?.message ?? err)}）` });
         continue;
       }
-      if (spec === null || typeof spec !== 'object' || typeof spec.rule !== 'string' || spec.rule.trim() === '') {
-        findings.push({ code: 'ADOPT_SPEC_NO_RULE', message: `${rel}: 缺非空 rule（无法与账本类目配对）` });
+      if (!looksLikeSpec(spec)) {
+        // 明确记账：这个 JSON **没被当规格**，理由是什么（不再"静默 0 条"）
+        skipped.push({ rel, reason: '不是规格形状（缺非空 rule，或缺 command/checkerRef）' });
         continue;
       }
       specs.push({ rel, rule: canonicalRule(spec.rule), spec, mtimeMs: statSync(join(abs, name)).mtimeMs });
     }
   }
-  return { specs, findings };
+  return { specs, findings, skipped };
 }
 
 /** 账本按 rule 聚合（条数 / 机制面取值分布 / 首末时间） */
@@ -163,7 +188,7 @@ export function adoptionReport(opts = {}) {
     if ((b.checks ?? []).some((c) => c !== null && typeof c === 'object' && c.kind === 'checker')) boundCheckerRules.add(rule);
   }
 
-  const { specs, findings: specFindings } = scanSpecs(projectRoot);
+  const { specs, findings: specFindings, skipped: skippedSpecs } = scanSpecs(projectRoot);
   for (const f of specFindings) findings.push(f);
 
   const drafts = [];
@@ -208,12 +233,21 @@ export function adoptionReport(opts = {}) {
       rules: byRule.size,
       faceCount,
       specs: specs.length,
+      specsSkipped: skippedSpecs.length,
       drafts: drafts.length,
       alreadyBound: plans.filter((p) => p.decision === 'already-bound').length,
       openProposal: plans.filter((p) => p.decision === 'open-proposal').length,
+      // ── **实际已绑**（读 `rules.json`，不是读账本自称）────────────────────────────
+      // P21 的症结是"两个数被读成同一件事"：账本里 `mechanism=mechanized` 的条数是**自称**，
+      // 而 `rules.json` 的 checks 才是**实际**。两个数必须**同时、分开命名**地摆在输出里，
+      // 并各自标明来源，读者才不会拿一个去反驳另一个。
+      boundRules: bindings.size,
+      boundCheckerRules: boundCheckerRules.size,
+      boundChecks: [...bindings.values()].reduce((n, b) => n + (b.checks ?? []).length, 0),
     },
     plans,
     drafts,
+    skippedSpecs,
     findings,
   };
 }
