@@ -9,6 +9,10 @@
 // 判据（五条，任一命中 ⇒ exit 1）：
 //   A. `BYTE_EOL_INCONSISTENT`：同一文件里既有 CRLF 又有裸 LF（**按字节计数**判，不靠肉眼）
 //      —— 混行尾是最常见的"肉眼看不见"事故形态。
+//      **修法提示按现场分诊**（P19，2026-09-23）：`[EOL_FIX=git-restore]`（已钉 `eol=lf`，或未钉但
+//      本仓取回不做转换）／`[EOL_FIX=pin-then-renormalize]`（未钉 + `autocrlf=true`：`git restore`
+//      不解决问题，要先补声明再 `add --renormalize` 再取回）／`[EOL_FIX=probe-unavailable]`（不在
+//      git 仓内，如实降级不猜）。来历见该分支上方注释：原提示在 `autocrlf=true` 且未钉的仓上是**空操作**。
 //   B. `BYTE_NOT_DECLARED`：有 `.gitattributes`，但里面**没有**任何"显式钉住"的行
 //      （`text` / `-text` / `eol=lf` 三者任一）⇒ 行尾完全交给机器默认配置。
 //   C. `BYTE_EXT_PIN_MISSING`：`.githooks/**` 存在，但没被显式钉 —— L648 的原形（无扩展名文件
@@ -158,10 +162,93 @@ const byPathThenCode = (code) => (a, b) => (a < b ? -1 : a > b ? 1 : 0) || (code
 mixed.sort(byPathThenCode('BYTE_EOL_INCONSISTENT'));
 boms.sort(byPathThenCode('BYTE_BOM_PRESENT'));
 noEol.sort(byPathThenCode('BYTE_NO_TRAILING_NEWLINE'));
+// ── P19：修法提示必须**按现场分诊**，不能给一句在有些仓上恰好是空操作的命令 ──────────
+// 来历（2026-09-23，被治理项目实测 + 本轮受控实验各一次）：
+//   原提示写「修法优先 `git restore -- <路径>`」。在 `autocrlf=true` 且**该文件没被
+//   `.gitattributes` 显式钉住**的仓上，`git restore` 把工作区刷成**整份 CRLF**（不是回到 LF）
+//   ⇒ 提示被照做，字节却没修好，下一轮照报（他们因此白跑）。
+//   本轮受控实验（3 组 × 3 工况，逐字节回读，仓路径在凭证里）：
+//     · 文件**已钉** `eol=lf`（或 `-text`）⇒ `git restore` 真修（29B/0 CRLF）。
+//     · 文件**未钉** + `autocrlf=true` ⇒ `git restore` 之后 **32B/3 CRLF**（全 CRLF），
+//       「先删后取」同样 32B/3 CRLF —— 即"删了再取"并不是判据本身缺声明时的真修法。
+//     · 真修法（实测 29B/0 CRLF）：补 `.gitattributes` 钉住 → `git add --renormalize -- <路径>`
+//       → 删工作区文件 → `git restore -- <路径>`。
+//   分诊来源是 git 的公开接口：`git check-attr text eol` + `git config core.autocrlf`
+//   （不自己复刻 git 的属性匹配规则）。两个探测都在**只读**面，且只在真有混行尾文件时才跑。
+const GIT_TIMEOUT_MS = 10_000;
+const runGitText = (args) => {
+  const r = spawnSync('git', ['-c', 'core.quotePath=false', '-C', root, ...args], {
+    encoding: 'utf8', timeout: GIT_TIMEOUT_MS,
+  });
+  return r.status === 0 && typeof r.stdout === 'string' ? r.stdout : null;
+};
+let autocrlfCache;
+const autocrlfOf = () => {
+  if (autocrlfCache === undefined) {
+    const raw = runGitText(['config', '--get', 'core.autocrlf']);
+    autocrlfCache = raw === null ? '' : raw.trim().toLowerCase();
+  }
+  return autocrlfCache;
+};
+/** 该文件在 git 眼里是否"按文本处理且钉死在 LF"（`text` 且 `eol=lf`，或 `-text` 不做转换） */
+const eolPinnedInGit = (rel) => {
+  const out = runGitText(['check-attr', 'text', 'eol', '--', rel]);
+  if (out === null) return null; // 探测不可用 ⇒ 如实降级，不猜
+  const fields = out.split(/\r?\n/).filter((l) => l.trim() !== '')
+    .map((l) => l.slice(l.lastIndexOf(':') + 1).trim().toLowerCase());
+  const text = fields[fields.length - 2] ?? '';
+  const eol = fields[fields.length - 1] ?? '';
+  return eol === 'lf' || text === 'unset' || text === 'false';
+};
+/** 分诊结果：{ ref, hint }。ref 是**机器可判**的稳定 token（用例断言它，不断言散文字句） */
+const eolFixFor = (rel) => {
+  const pinned = eolPinnedInGit(rel);
+  if (pinned === true) {
+    return {
+      ref: 'git-restore',
+      hint: '该文件在 git 里已显式钉住行尾（`check-attr` 得到 `eol=lf` 或 `-text`）⇒ 混行尾只是**工作区**现象，'
+        + '`git restore -- <路径>` 即可回到纯 LF（零内容改动、无需提交）；修完**逐字节回读**确认（数 CRLF 必须为 0），别只看退出码。',
+    };
+  }
+  if (pinned === false) {
+    const ac = autocrlfOf();
+    // 实测口径（本轮四轮受控实验，逐字节回读）：
+    //   `autocrlf=input` ⇒ `git restore` 得到**纯 LF**（29B/0 CRLF）⇒ 真修（不要凭"input 只在提交侧转换"推理，实测过才写）。
+    //   `autocrlf=false`/未设 ⇒ 取回即 blob 字节（纯 LF）⇒ 真修。
+    //   `autocrlf=true`（含系统级配置带来的 true）⇒ 取回被 smudge 成整份 CRLF ⇒ **治不了**。
+    const converting = ac === 'true';
+    if (!converting) {
+      return {
+        ref: 'git-restore',
+        hint: '该文件在 git 里**没有被显式钉住行尾**，但本仓取回工作区不做 CRLF 转换'
+          + `（\`core.autocrlf\` = ${ac === '' ? '未设' : ac}，实测其取回结果是纯 LF）`
+          + '⇒ `git restore -- <路径>` 能把工作区刷回 blob 里的纯 LF；修完**逐字节回读**确认（CRLF 必须为 0）。'
+          + '⚠ 这条修法**依赖机器配置**：换一台 `core.autocrlf=true` 的机器（或 CI/对端 checkout）同一文件会再混一次 ——'
+          + '要断根，仍应在 `.gitattributes` 里显式钉住它。',
+      };
+    }
+    return {
+      ref: 'pin-then-renormalize',
+      hint: `该文件在 git 里**没有被显式钉住行尾**（\`check-attr\` 得到 text/eol 都是 unspecified），且本仓 \`core.autocrlf=${ac}\` `
+        + '⇒ 此时取回工作区会被转成 CRLF，`git restore -- <路径>` **不解决问题**（实测刷成整份 CRLF；先删后取也一样）——'
+        + '按序做三步：① `.gitattributes` 补一行钉住它（如 `* text eol=lf` 或该路径的专属规则）；'
+        + '② `git add --renormalize -- <路径>`（按新属性重写索引）；③ 删掉工作区文件再 `git restore -- <路径>`。'
+        + '最后**逐字节回读**：CRLF 必须为 0（`BYTE_EOL_INCONSISTENT` 的根因是"没声明"，只刷工作区治不了复发）。',
+    };
+  }
+  return {
+    ref: 'probe-unavailable',
+    hint: '本仓 git 属性探测不可用（不在 git 仓内或 git 不可执行）⇒ 这里给不出分诊结论：'
+      + '先确认该文件在 `.gitattributes` 里有没有显式钉住行尾，再选 `git restore` 或"先补声明再 renormalize"。'
+      + '无论走哪条，修完都要**逐字节回读**。',
+  };
+};
+
 // **全量收集**（不再 slice）：逐条推入 hits；截断交给末行的 PRINTED/TOTAL 显式交代。
 for (const rel of mixed) {
+  const fix = eolFixFor(rel);
   hits.push(`BYTE_EOL_INCONSISTENT: ${rel} 同一文件里既有 CRLF 又有裸 LF（混行尾：肉眼看不见，逐字比对会假红）。`
-    + '修法优先 `git restore -- <路径>`（从 blob 刷新工作区：blob 本就是 LF，混行尾只是**工作区**现象 ⇒ 零内容改动、无需提交）；'
+    + `修复 [EOL_FIX=${fix.ref}] ${fix.hint}`
     + '确实要改内容时才动字节，**别对二进制做行尾手术**。');
 }
 for (const rel of boms) {
