@@ -2168,6 +2168,9 @@ export function runGateHooks(argv, io = defaultIo(), env = process.env) {
       configured: v.configured,
       expectedPath: v.expectedPath,
       manifest: v.manifest === null ? null : { hooksPath: v.manifest.hooksPath, hooks: v.manifest.hooks },
+      localStatePresent: v.localStatePresent === true,
+      scope: v.scope ?? 'manifest',
+      stateSource: v.stateSource ?? 'none',
       hooks: v.hooks,
       findings: v.findings,
     }));
@@ -2178,6 +2181,10 @@ export function runGateHooks(argv, io = defaultIo(), env = process.env) {
   io.out(line(`RK_GATE_HOOKS_CONFIGURED=${v.configured === '' ? '(empty)' : v.configured}`));
   io.out(line(`RK_GATE_HOOKS_EXPECTED=${v.expectedPath ?? '(none)'}`));
   io.out(line(`RK_GATE_HOOKS_MANIFEST=${v.manifest === null ? 'missing' : 'present'}`));
+  // P14：跨机核的是**钩子名**（清单入库）；runner 指纹是**本机事实**（hooks.local.json）。分开可读。
+  io.out(line(`RK_GATE_HOOKS_LOCAL_STATE=${v.localStatePresent === true ? 'present' : 'missing'}`));
+  io.out(line(`RK_GATE_HOOKS_SCOPE=${v.scope ?? 'manifest'}`));
+  io.out(line(`RK_GATE_HOOKS_STATE_SOURCE=${v.stateSource ?? 'none'}`));
   io.out(line(`RK_GATE_HOOKS_CHECKED=${v.hooks.length}`));
   io.out(line(`RK_GATE_HOOKS_OK=${v.hooks.filter((h) => h.present === true && h.match === true && h.execOk !== false).length}`));
   io.out(line(`RK_GATE_HOOKS_MISSING=${v.hooks.filter((h) => h.present === false).length}`));

@@ -19,7 +19,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 
 import { runGate } from '../src/cli.mjs';
-import { DEFAULT_HOOKS_PATH, HOOK_RUNNER, HOOKS_MANIFEST, installHooks, sha256File } from '../src/hooks.mjs';
+import { DEFAULT_HOOKS_PATH, HOOK_RUNNER, HOOKS_LOCAL_STATE, HOOKS_MANIFEST, installHooks, sha256File } from '../src/hooks.mjs';
 import { landingDataWitness } from '../src/uninstall.mjs';
 import { RC } from '../src/rc.mjs';
 import { cleanupAll, copyPkg, ledgerEntry, tempDir } from './helpers/sandbox.mjs';
@@ -91,16 +91,17 @@ test('green: install 记下"安装前的 core.hooksPath"（原本没有 -> exist
   const root = gitRepo('lf810-prev-none');
   const ins = installHooks({ repoRoot: root, gateBin: GATE_BIN });
   assert.equal(ins.ok, true, JSON.stringify(ins.reasons));
-  const m = JSON.parse(readFileSync(join(root, '.dsh-ai', 'rulekeeper', HOOKS_MANIFEST), 'utf8'));
-  assert.deepEqual(m.previous, { hooksPath: null, existed: false }, '必须把"本来就没有"这件事本身记下来（否则卸载只能靠猜）');
+  // P14：安装前状态住**本机态**（`hooks.local.json`）—— 它是"这台机器上的事实"，不入版本库
+  const l = JSON.parse(readFileSync(join(root, '.dsh-ai', 'rulekeeper', HOOKS_LOCAL_STATE), 'utf8'));
+  assert.deepEqual(l.previous, { hooksPath: null, existed: false }, '必须把"本来就没有"这件事本身记下来（否则卸载只能靠猜）');
 });
 
 test('green: 装前已有 core.hooksPath -> 记原值，且卸载后回到原值', () => {
   const root = gitRepo('lf810-prev-some', { hooksPath: '.myhooks' });
   const ins = installHooks({ repoRoot: root, gateBin: GATE_BIN });
   assert.equal(ins.ok, true, JSON.stringify(ins.reasons));
-  const m = JSON.parse(readFileSync(join(root, '.dsh-ai', 'rulekeeper', HOOKS_MANIFEST), 'utf8'));
-  assert.deepEqual(m.previous, { hooksPath: '.myhooks', existed: true });
+  const l = JSON.parse(readFileSync(join(root, '.dsh-ai', 'rulekeeper', HOOKS_LOCAL_STATE), 'utf8'));
+  assert.deepEqual(l.previous, { hooksPath: '.myhooks', existed: true });
   assert.equal(git(root, 'config', '--get', 'core.hooksPath').out, DEFAULT_HOOKS_PATH, 'install 期间库里的值应指向本工具的 hooksPath');
 
   const r = uninstall(['--repo', root]);
@@ -239,8 +240,12 @@ test('红态⑥: 清单被改写指向数据文件 -> 拒绝删除（防"卸载�
   const manifestFile = join(root, '.dsh-ai', 'rulekeeper', HOOKS_MANIFEST);
   const m = JSON.parse(readFileSync(manifestFile, 'utf8'));
   m.hooks = [...m.hooks, { name: '../../../ledger.jsonl', sha256: sha256File(join(root, '.dsh-ai', 'rulekeeper', 'ledger.jsonl')), bytes: 1 }];
-  m.runner = { path: 'config.json', sha256: sha256File(join(root, '.dsh-ai', 'rulekeeper', 'config.json')), bytes: 1 };
   writeFileSync(manifestFile, `${JSON.stringify(m, null, 2)}\n`, 'utf8');
+  // P14：runner 指纹在**本机态**里 ⇒ 要伪造"清单被改写指向数据文件"必须改这里
+  const localFile = join(root, '.dsh-ai', 'rulekeeper', HOOKS_LOCAL_STATE);
+  const l = JSON.parse(readFileSync(localFile, 'utf8'));
+  l.runner = { path: 'config.json', sha256: sha256File(join(root, '.dsh-ai', 'rulekeeper', 'config.json')), bytes: 1 };
+  writeFileSync(localFile, `${JSON.stringify(l, null, 2)}\n`, 'utf8');
 
   const before = dataWitness(root);
   const r = uninstall(['--repo', root]);
@@ -251,23 +256,24 @@ test('红态⑥: 清单被改写指向数据文件 -> 拒绝删除（防"卸载�
 });
 
 
-test('红态（CR-M3）: 旧格式清单（无 previous/configChanged）卸载后必须把 config 还回去', () => {
+test('红态（CR-M3）: 旧格式（无 previous/configChanged）卸载后必须把 config 还回去', () => {
   // 独立审查 M3：旧实现先判 `configChanged !== true` ⇒ 直接 skip，把"旧清单"分支变成不可达代码，
   // 于是 hook 被摘、`core.hooksPath` 仍指向 `.githooks`（git 从此静默不跑 hook）却 exit=0。
+  // P14：这两个字段现在住**本机态**里；"旧格式"= 本机态里没有它们（拆分前装的老落点就是这形状）。
   const root = gitRepo('lf810-legacy');
   installHooks({ repoRoot: root, gateBin: GATE_BIN });
   writeData(root);
-  const manifestFile = join(root, '.dsh-ai', 'rulekeeper', HOOKS_MANIFEST);
-  const m = JSON.parse(readFileSync(manifestFile, 'utf8'));
-  delete m.previous;
-  delete m.configChanged; // 旧格式：两个字段都没有
-  writeFileSync(manifestFile, `${JSON.stringify(m, null, 2)}\n`, 'utf8');
+  const localFile = join(root, '.dsh-ai', 'rulekeeper', HOOKS_LOCAL_STATE);
+  const l = JSON.parse(readFileSync(localFile, 'utf8'));
+  delete l.previous;
+  delete l.configChanged; // 老格式：两个字段都没有
+  writeFileSync(localFile, `${JSON.stringify(l, null, 2)}\n`, 'utf8');
   assert.equal(git(root, 'config', '--get', 'core.hooksPath').out, DEFAULT_HOOKS_PATH);
 
   const r = uninstall(['--repo', root]);
   assert.equal(r.rc, RC.OK, r.err);
   assert.match(r.out, /RK_GATE_HOOKS_CONFIG_ACTION=unset-unknown-previous/);
-  assert.equal(git(root, 'config', '--get', 'core.hooksPath').status, 1, '旧清单也必须把 config 还回去（不能只摘 hook）');
+  assert.equal(git(root, 'config', '--get', 'core.hooksPath').status, 1, '旧格式也必须把 config 还回去（不能只摘 hook）');
   assert.equal(existsSync(join(root, DEFAULT_HOOKS_PATH, 'pre-commit')), false);
 });
 
@@ -276,8 +282,8 @@ test('红态（CR-M4）: 连装两次不许把自己的值当"原值"（卸载�
   installHooks({ repoRoot: root, gateBin: GATE_BIN });
   const again = installHooks({ repoRoot: root, gateBin: GATE_BIN, force: true });
   assert.equal(again.ok, true, JSON.stringify(again.reasons));
-  const m = JSON.parse(readFileSync(join(root, '.dsh-ai', 'rulekeeper', HOOKS_MANIFEST), 'utf8'));
-  assert.deepEqual(m.previous, { hooksPath: null, existed: false }, '第二次安装必须沿用旧清单里的原值（不是自己上次设的 .githooks）');
+  const l = JSON.parse(readFileSync(join(root, '.dsh-ai', 'rulekeeper', HOOKS_LOCAL_STATE), 'utf8'));
+  assert.deepEqual(l.previous, { hooksPath: null, existed: false }, '第二次安装必须沿用旧记录里的原值（不是自己上次设的 .githooks）');
   assert.equal(again.previous.hooksPath, null);
 
   const r = uninstall(['--repo', root]);

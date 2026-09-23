@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "hooksPath": ".githooks",
+  "hooks": [
+    {
+      "name": "pre-commit",
+      "sha256": "d665aefb4ed037183a1c0c0be2266b83095dad773bbfa8c974057551b050257d",
+      "bytes": 420
+    },
+    {
+      "name": "commit-msg",
+      "sha256": "b569637bb8fbffcd84d505a6674b4913552d497a814bb3cc0335f798eec5803c",
+      "bytes": 420
+    },
+    {
+      "name": "post-commit",
+      "sha256": "9dbc5b4e6c015a539f00fc5f06093c5e2f4422ef96e7f3ef96ae3185ad9094c3",
+      "bytes": 422
+    },
+    {
+      "name": "pre-push",
+      "sha256": "8621018e293074493090603b983f56c56dad9975c10d3fcaaf70613c9446797b",
+      "bytes": 416
+    }
+  ]
+}

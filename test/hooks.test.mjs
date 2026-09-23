@@ -221,7 +221,10 @@ test('判据: 生成物是"可携带"的 —— hook 脚本 LF 无 BOM、不含�
   assert.equal(/(^|[^A-Za-z])[A-Za-z]:[\\/]/.test(script), false, 'hook 脚本里不得含盘符绝对路径（要能跨机携带）');
   assert.equal(script.includes('.dsh-ai/rulekeeper/hook.mjs'), true, '靠落点里的 runner 落地载荷');
   const runner = readFileSync(join(root, '.dsh-ai', 'rulekeeper', HOOK_RUNNER), 'utf8');
-  assert.match(runner, process.platform === 'win32' ? /const GATE_BIN = "[A-Za-z]:\// : /const GATE_BIN = "\//, 'runner 里的本机路径必须写成可携带的正斜杠形式');
+  // P14：runner **不再**写死本机路径，改为运行时解析 rk-gate 入口 ⇒ 任意安装位置 sha 相同（可跨机携带）
+  assert.match(runner, /resolveGate\(\)/, 'runner 必须**运行时解析** rk-gate 入口（P14：本机路径不得写进生成物）');
+  assert.equal(/(^|[^A-Za-z])[A-Za-z]:[\\/]/.test(runner), false, 'runner 里不得含盘符绝对路径（换机/换目录 sha 必须相同）');
+  assert.equal(runner.includes('gateBin'), true, '解析链里应包含落点 config.json 的 gateBin 兜底');
   assert.equal(/[A-Za-z]:\\/.test(runner), false, 'runner 里不得出现"盘符+反斜杠"（避免 Windows 转义地狱）');
   assert.equal(runner.includes('gate'), true);
   assert.equal(runner.includes("'write'"), true, '载荷 = LF-530 的 gate write（LF-500 会在此之上加暂存区语义）');
@@ -364,7 +367,8 @@ test('判据（2026-09-21 CI 等价门禁）: pre-push 钩子真的会跑 `ci`�
   const refs = 'refs/heads/main 1111111 refs/heads/main 2222222\n';
   const run = (input, rc) => spawnSync(process.execPath, [runner, 'pre-push'], {
     // 真实 git 调钩子时 cwd = 仓库根；用例显式给 RULEKEEPER_REPO（runner 认这个变量）等价模拟
-    encoding: 'utf8', input, env: { ...process.env, FAKE_GATE_LOG: logFile, FAKE_GATE_RC: rc, RULEKEEPER_REPO: root },
+    // P14：runner 改为**运行时解析** rk-gate 入口（解析链第一优先 = `RK_GATE_BIN`）⇒ 假 gate 从这里注入
+    encoding: 'utf8', input, env: { ...process.env, FAKE_GATE_LOG: logFile, FAKE_GATE_RC: rc, RULEKEEPER_REPO: root, RK_GATE_BIN: fakeGate },
   });
 
   // ①门禁红 ⇒ 钩子必须非零（拦住推送）
@@ -402,7 +406,8 @@ test('判据（2026-09-21 提交正文脱敏）: `commit-msg` 钩子扫正文 �
   assert.ok(ins.installed.some((h) => h.name === 'commit-msg'), '默认就要装 commit-msg');
   const runner = join(root, '.dsh-ai', 'rulekeeper', HOOK_RUNNER);
   const msgFile = join(root, '..', 'COMMIT_EDITMSG');
-  const run = () => spawnSync(process.execPath, [runner, 'commit-msg', msgFile], { encoding: 'utf8' });
+  // P14：这条用例要**真的**跑通 runner（它现在自己解析 rk-gate 入口）⇒ 显式指到本包入口
+  const run = () => spawnSync(process.execPath, [runner, 'commit-msg', msgFile], { encoding: 'utf8', env: { ...process.env, RK_GATE_BIN: GATE_BIN } });
 
   // ①正文里出现内部项目名/盘符路径 ⇒ 必须拦住（这一条正是漏掉的那个洞）
   //    注：钩子 runner 用 `stdio:'inherit'`（让门禁输出直接进终端），故**只断言退出码**；
@@ -434,7 +439,7 @@ test('判据（2026-09-21 提交正文脱敏）: `commit-msg` 钩子扫正文 �
   assert.equal(stripped.status, 0, `注释与 diff 不得当成正文；实得 status=${stripped.status}`);
 
   // ④读不到正文 ⇒ **fail-closed**（不许假装扫过了）
-  const missing = spawnSync(process.execPath, [runner, 'commit-msg', join(root, '..', 'no-such-msg')], { encoding: 'utf8' });
+  const missing = spawnSync(process.execPath, [runner, 'commit-msg', join(root, '..', 'no-such-msg')], { encoding: 'utf8', env: { ...process.env, RK_GATE_BIN: GATE_BIN } });
   assert.notEqual(missing.status, 0, '读不到正文必须非零（fail-closed）');
   const missingCli = gate(['commitmsg', '--file', join(root, '..', 'no-such-msg')]);
   assert.match(missingCli.out, /GATE_COMMITMSG_UNREADABLE/);

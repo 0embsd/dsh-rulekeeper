@@ -29,6 +29,10 @@ test.after(cleanupAll);
 
 const PKG = join(import.meta.dirname, '..');
 const GATE_BIN = join(PKG, 'bin', 'rk-gate.mjs');
+// P14（2026-09-23）：生成的 `hook.mjs` **不再写死本机路径**，改为运行时解析 rk-gate 入口
+//   （解析链：`RK_GATE_BIN` → 项目 `node_modules/dsh-rulekeeper` → 落点 `config.json.gateBin`）。
+// 本文件的临时仓里这三路都不天然成立 ⇒ 显式把入口指到本包，让"钩子真的跑起来"这件事照旧可测。
+process.env.RK_GATE_BIN = GATE_BIN;
 /** 工作流里默认引用的入口（上游仓布局）；fixture 里放一个占位文件让它"指向真实存在的东西" */
 const CI_BIN_SUB = join('dsh-rulekeeper', 'bin', 'rk-gate.mjs');
 

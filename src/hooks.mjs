@@ -22,6 +22,15 @@ import { join, relative, resolve } from 'node:path';
 import { LANDING_DIRNAME, LEGACY_LANDING_DIRNAME, resolveProjectLanding, toPosix } from './platform/paths.mjs';
 
 export const HOOKS_MANIFEST = 'hooks.json';
+/**
+ * **本机态**文件名（P14，2026-09-23）：装的是"随机器变化"的那几个字段 ——
+ *   `createdAt`（安装时刻）/ `runner{path,sha256,bytes}`（本轮已去机器相关性，但仍是本机安装事实）/
+ *   `previous` + `configChanged`（LF-810 卸载所需的"安装前 hooksPath 原值"）。
+ * 为什么拆出来：`hooks.json` 要**入库**（对方工单 §P14 拍板：清单入库 + `hook:` 点名只核名字），
+ * 而入库的文件里**不得有随机器变化的内容** —— 否则换机跑一次 install 就把它改写 ⇒ 工作区变脏 ⇒
+ * 在本仓（pre-push「脏树即阻断」）上直接推不出去。本文件**保持被 .gitignore 忽略**。
+ */
+export const HOOKS_LOCAL_STATE = 'hooks.local.json';
 export const HOOK_RUNNER = 'hook.mjs';
 export const DEFAULT_HOOKS_PATH = '.githooks';
 /**
@@ -111,40 +120,79 @@ export function hookScriptContent({ name = 'pre-commit' } = {}) {
 }
 
 /**
- * hook runner（本机产物，含 dsh-rulekeeper 绝对路径）：按 hook 名决定**载荷**。
+ * hook runner（**不含任何机器相关路径**，故内容在任意安装位置逐字节相同 —— P14 验收判据②）。
  *   pre-commit  → ① `precommit --repo`（LF-500：暂存区视角，改受保护路径未留证即拒）② `write --project`（LF-530：工作区视角）
  *   post-commit → `postcommit --repo`（LF-510：记录本次提交的取证结论；`--no-verify` 时它仍会跑 ⇒ 绕过留痕）
  *   pre-push    → `ci --base <远端已有 sha> --head HEAD`（2026-09-21：本机 CI 等价门禁，逐条 ref 比对基点；
  *                  新分支/删引用时基点全零 ⇒ **如实跳过并喊一声**，不假装通过）
  * 为什么 pre-commit 要两道门：它只看得见暂存区，**未暂存的直写**天生看不见（LF-530 是覆盖那一段的唯一位置）。
+ *
+ * **P14（2026-09-23）为什么要收掉 `gateBin` 参数**：原先这里写死 `const GATE_BIN = "<包根>/bin/rk-gate.mjs"`
+ *   ⇒ 换机器/换目录 runner 内容与 sha 必变 ⇒ 把它记进清单就等于把**必然跨机失配**的指纹入库
+ *   （新 clone 上"钩子被改"的假红）。现在改成**运行时解析**（`resolveGate()`），解析不到时**大声失败**，
+ *   而不是静默回落到一个死路径 —— 后者是"以为有闸、其实没有"的同族问题。
  */
-export function hookRunnerContent({ gateBin }) {
+export function hookRunnerContent() {
   return [
     '#!/usr/bin/env node',
     '// dsh-rulekeeper hook runner（由 `rk-gate hooks install` 生成；本机产物，请勿手改）',
     "import { spawnSync } from 'node:child_process';",
-    "import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';",
+    "import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';",
     "import { tmpdir } from 'node:os';",
-    "import { join } from 'node:path';",
-    `const GATE_BIN = ${JSON.stringify(toPosix(gateBin))};`,
+    "import { dirname, join } from 'node:path';",
     'const hook = process.argv[2] ?? \'\';',
     'const repo = process.env.RULEKEEPER_REPO ?? process.cwd();',
+    '// ── rk-gate 入口的**运行时解析**（P14）：四处按序试，任一处**命中且存在**即用 ──────────────',
+    '//   ① 环境变量 `RK_GATE_BIN`（显式覆盖；也便于用例注入替身）',
+    '//   ② 本机态 `hooks.local.json` 的 `gateBin` —— 装钩子时**已经解析好**的那个入口，最贴近现实',
+    '//      （少了这一路，`hooks install` 装完钩子当场不工作：真机实测踩到过一次）',
+    '//   ③ 项目里的 `node_modules/dsh-rulekeeper/bin/rk-gate.mjs`（干净 clone 由包管理器提供时）',
+    '//   ④ 落点配置 `config.json` 的 `gateBin`（显式声明面；这个文件可能被跟踪 ⇒ 不主动写它）',
+    '// 四处全落空 ⇒ **大声失败**（不静默回落到死路径：那会变成"以为有闸、其实没有"）。',
+    'function readLandingJson(name) {',
+    '  for (const rel of [\'rulekeeper\', \'lessonflow\']) {',
+    '    const p = join(repo, \'.dsh-ai\', rel, name);',
+    '    try { const c = JSON.parse(readFileSync(p, \'utf8\')); if (c && typeof c === \'object\') return c; } catch { /* 没有就继续 */ }',
+    '  }',
+    '  return {};',
+    '}',
+    'function resolveGate() {',
+    '  const tried = [];',
+    '  const env = process.env.RK_GATE_BIN;',
+    '  if (typeof env === \'string\' && env !== \'\') {',
+    '    if (existsSync(env)) return { bin: env, from: \'env:RK_GATE_BIN\' };',
+    '    tried.push(\'env:RK_GATE_BIN=\' + env + \'（不存在）\');',
+    '  } else { tried.push(\'env:RK_GATE_BIN（未设）\'); }',
+    '  const local = readLandingJson(\'hooks.local.json\').gateBin;',
+    '  if (typeof local === \'string\' && local !== \'\') {',
+    '    if (existsSync(local)) return { bin: local, from: \'本机态 hooks.local.json gateBin\' };',
+    '    tried.push(\'hooks.local.json gateBin=\' + local + \'（不存在）\');',
+    '  } else { tried.push(\'hooks.local.json gateBin（未设）\'); }',
+    '  const packed = join(repo, \'node_modules\', \'dsh-rulekeeper\', \'bin\', \'rk-gate.mjs\');',
+    '  if (existsSync(packed)) return { bin: packed, from: \'node_modules\' };',
+    '  tried.push(\'node_modules/dsh-rulekeeper/bin/rk-gate.mjs（不存在）\');',
+    '  const cfg = readLandingJson(\'config.json\').gateBin;',
+    '  if (typeof cfg === \'string\' && cfg !== \'\') {',
+    '    if (existsSync(cfg)) return { bin: cfg, from: \'落点 config.json gateBin\' };',
+    '    tried.push(\'config.json gateBin=\' + cfg + \'（不存在）\');',
+    '  } else { tried.push(\'config.json gateBin（未设）\'); }',
+    '  process.stderr.write(\'dsh-rulekeeper hook: **找不到 rk-gate 入口**，本次门禁**未执行**（fail-closed）\\\\n\'',
+    '    + \'  试过：\' + tried.join(\' / \') + \'\\\\n\'',
+    '    + \'  修法：在本仓重跑一次 `rk-gate hooks install`（会把入口记进本机态），或设 RK_GATE_BIN，\'',
+    '    + \'或在落点 config.json 写 "gateBin"\\\\n\');',
+    '  process.exit(1);',
+    '}',
+    'const gate = resolveGate();',
+    'function runGate(args) { return spawnSync(process.execPath, [gate.bin, ...args], { stdio: \'inherit\' }); }',
     '// **pre-push 三件可拆**（P22）：载荷是**生成物、不吃命令行参数** ⇒ 开关放在**落点配置**里，由本载荷自己读。',
     '// 语义：`prePush.noCi=true` ⇒ 跳过第②段（与远端 workflow 同一条 CI 等价门禁），只跑 refs + 未推正文。',
     '// 为什么需要：没有服务端工作流的仓上，`ci` 会报 CI_WORKFLOW_MISSING/CI_BIN_MISSING ⇒ 整条 pre-push exit 1，',
     '// 而第①②段其实是干净的。⚠ 这是**声明型开关**（能改 config 的人也能打开它）—— 故默认 false，且跳过时**大声说明**。',
-    'const prePushConfig = (() => {',
-    '  for (const rel of [\'rulekeeper\', \'lessonflow\']) {',
-    '    const p = join(repo, \'.dsh-ai\', rel, \'config.json\');',
-    '    try { const c = JSON.parse(readFileSync(p, \'utf8\')); if (c && typeof c === \'object\') return c; } catch { /* 没有就继续 */ }',
-    '  }',
-    '  return {};',
-    '})();',
-    'const noCi = prePushConfig?.prePush?.noCi === true;',
+    'const noCi = readLandingJson(\'config.json\')?.prePush?.noCi === true;',
     "// commit-msg：正文文件路径由 git 作为**第一个参数**传进来（`$1`），扫同一份公开面模式表",
     "if (hook === 'commit-msg') {",
     "  const msgFile = process.argv[3] ?? '';",
-    "  const r = spawnSync(process.execPath, [GATE_BIN, 'commitmsg', '--file', msgFile], { stdio: 'inherit' });",
+    "  const r = runGate(['commitmsg', '--file', msgFile]);",
     '  if (r.error) { process.stderr.write("dsh-rulekeeper commit-msg: 无法执行 commitmsg: " + r.error.message + "\\n"); process.exit(1); }',
     "  process.exit(typeof r.status === 'number' ? r.status : 1);",
     '}',
@@ -168,7 +216,7 @@ export function hookRunnerContent({ gateBin }) {
     "  try {",
     "    const refsFile = join(tmpdir(), 'rk-prepush-refs-' + process.pid + '.txt');",
     "    writeFileSync(refsFile, input, 'utf8');",
-    "    const rf = spawnSync(process.execPath, [GATE_BIN, 'refs', '--file', refsFile], { stdio: 'inherit' });",
+    "    const rf = runGate(['refs', '--file', refsFile]);",
     "    try { unlinkSync(refsFile); } catch {}",
     '    if (rf.error) { process.stderr.write("dsh-rulekeeper pre-push: 无法执行 refs: " + rf.error.message + "\\n"); process.exit(1); }',
     "    if (typeof rf.status !== 'number' || rf.status !== 0) process.exit(typeof rf.status === 'number' ? rf.status : 1);",
@@ -181,7 +229,7 @@ export function hookRunnerContent({ gateBin }) {
     '  }',
     '  for (const base of bases) {',
     "    // ①**先扫未推提交的正文**（离机之前的最后一道；兜住 --no-verify 提交、钩子装上之前的旧提交、amend 改过的正文）",
-    "    const m = spawnSync(process.execPath, [GATE_BIN, 'commitmsg', '--repo', repo, '--range', base + '..HEAD'], { stdio: 'inherit' });",
+    "    const m = runGate(['commitmsg', '--repo', repo, '--range', base + '..HEAD']);",
     '    if (m.error) { process.stderr.write("dsh-rulekeeper pre-push: 无法执行 commitmsg: " + m.error.message + "\\n"); process.exit(1); }',
     "    if (typeof m.status !== 'number' || m.status !== 0) process.exit(typeof m.status === 'number' ? m.status : 1);",
     "    // ②再跑与远端 workflow 同一条 CI 等价门禁（`prePush.noCi=true` 时**跳过并大声说明**）",
@@ -190,7 +238,7 @@ export function hookRunnerContent({ gateBin }) {
     "        + 'refs 与未推正文已扫过 —— 这是**声明型开关**，本仓自己声明不需要服务端工作流那一面\\n');",
     "      continue;",
     "    }",
-    "    const r = spawnSync(process.execPath, [GATE_BIN, 'ci', '--base', base, '--head', 'HEAD'], { stdio: 'inherit' });",
+    "    const r = runGate(['ci', '--base', base, '--head', 'HEAD']);",
     '    if (r.error) { process.stderr.write("dsh-rulekeeper pre-push: 无法执行 ci: " + r.error.message + "\\n"); process.exit(1); }',
     "    if (typeof r.status !== 'number' || r.status !== 0) process.exit(typeof r.status === 'number' ? r.status : 1);",
     '  }',
@@ -206,7 +254,7 @@ export function hookRunnerContent({ gateBin }) {
     '  process.exit(0);',
     '}',
     'for (const [cmd, args] of steps) {',
-    '  const r = spawnSync(process.execPath, [GATE_BIN, cmd, ...args], { stdio: \'inherit\' });',
+    "  const r = runGate([cmd, ...args]);",
     '  if (r.error) { process.stderr.write("dsh-rulekeeper hook: 无法执行 " + cmd + ": " + r.error.message + "\\n"); process.exit(1); }',
     '  if (typeof r.status !== \'number\' || r.status !== 0) process.exit(typeof r.status === \'number\' ? r.status : 1);',
     '}',
@@ -222,6 +270,63 @@ export function landingDirOf(repoRoot) {
 export function manifestPathOf(repoRoot) {
   return join(landingDirOf(repoRoot), HOOKS_MANIFEST);
 }
+/** 本机态文件（P14：`createdAt` / runner 指纹 / 安装前 hooksPath 原值 / configChanged）——**不入版本库** */
+export function localStatePathOf(repoRoot) {
+  return join(landingDirOf(repoRoot), HOOKS_LOCAL_STATE);
+}
+
+/**
+ * 读清单 + 本机态的**合并视图**（P14，向后兼容的单一入口）。
+ *
+ * 为什么要有它：清单已拆两半 ——
+ *   · `hooks.json`（**稳定、入库**）：`schema` / `hooksPath` / `hooks[]`（名字 + sha256 + bytes ± adopted）
+ *   · `hooks.local.json`（**本机、忽略**）：`createdAt` / `runner{path,sha256,bytes}` / `previous` / `configChanged`
+ * 老落点（拆分之前装的）把后四个字段**混在清单里**。读取端一律走这里，**local 优先、清单回退**
+ * ⇒ 老落点不炸、新落点不脏。返回 `source` 让调用方能如实说出"本机态是从哪来的"（不静默）。
+ *
+ * @returns {{manifest: object|null, local: object|null, previous: object|null, configChanged: boolean|null,
+ *            runner: object|null, source: 'local'|'manifest-legacy'|'none', manifestFile: string, localFile: string,
+ *            localPresent: boolean, invalid: string|null}}
+ */
+export function readHooksState(repoRoot) {
+  const landing = landingDirOf(repoRoot);
+  const manifestFile = join(landing, HOOKS_MANIFEST);
+  const localFile = join(landing, HOOKS_LOCAL_STATE);
+  const out = {
+    manifest: null, local: null, previous: null, configChanged: null, runner: null,
+    source: 'none', manifestFile, localFile, localPresent: existsSync(localFile), invalid: null,
+  };
+  const load = (file) => {
+    if (!existsSync(file)) return null;
+    try {
+      const parsed = JSON.parse(readFileSync(file, 'utf8'));
+      return parsed !== null && typeof parsed === 'object' ? parsed : null;
+    } catch { return null; }
+  };
+  out.manifest = load(manifestFile);
+  out.local = load(localFile);
+  if (out.manifest !== null && !Array.isArray(out.manifest.hooks)) {
+    out.invalid = '缺 hooks 数组';
+    out.manifest = null;
+  }
+  const pick = (key) => {
+    const l = out.local?.[key];
+    if (l !== undefined && l !== null) return { value: l, from: 'local' };
+    const m = out.manifest?.[key];
+    if (m !== undefined && m !== null) return { value: m, from: 'manifest-legacy' };
+    return { value: null, from: null };
+  };
+  const prev = pick('previous');
+  const changed = pick('configChanged');
+  const runner = pick('runner');
+  out.previous = prev.value;
+  out.configChanged = typeof changed.value === 'boolean' ? changed.value : null;
+  out.runner = runner.value !== null && typeof runner.value === 'object' ? runner.value : null;
+  // 来源：只要有一个字段来自本机态就算 local；否则若来自清单（老落点）算 manifest-legacy
+  const froms = [prev.from, changed.from, runner.from].filter((f) => f !== null);
+  out.source = froms.includes('local') ? 'local' : (froms.length > 0 ? 'manifest-legacy' : 'none');
+  return out;
+}
 
 function writeLfNoBom(file, text) {
   writeFileSync(file, text, { encoding: 'utf8' });
@@ -236,8 +341,12 @@ export function indexModeOf(repoRoot, relPath, runGit = defaultRunGit) {
 }
 
 /**
- * `rk-gate hooks install`：写 hook 脚本（入 `<hooksPath>/`）+ runner + manifest，并把 `core.hooksPath` 指到 `<hooksPath>`。
- * **默认会改本仓 git config**（`--no-config` 可跳过）：不改的话 hook 根本不会被执行 —— 那是"假安全"。
+ * `rk-gate hooks install`：写 hook 脚本（入 `<hooksPath>/`）+ runner + **拆分后的清单/本机态**，
+ * 并把 `core.hooksPath` 指到 `<hooksPath>`。**默认会改本仓 git config**（`--no-config` 可跳过）：
+ * 不改的话 hook 根本不会被执行 —— 那是"假安全"。
+ *
+ * P14 之后 `gateBin` 只做两件事：① 校验"调用方确实有一个能用的 rk-gate 入口"（装机前置，缺了就整单失败）；
+ * ② 记进**本机态**文件（人看得见"这台机器是从哪装的"）。它**不再进入 runner 内容** ⇒ runner 跨机同 sha。
  */
 export function installHooks(opts = {}) {
   const repoRoot = resolve(opts.repoRoot ?? process.cwd());
@@ -292,29 +401,31 @@ export function installHooks(opts = {}) {
     try { chmodSync(file, 0o755); } catch { /* Windows：无 exec 位，忽略 */ }
     written.push({ name, sha256: sha, bytes: Buffer.byteLength(content, 'utf8') });
   }
-  const runner = hookRunnerContent({ gateBin });
+  const runner = hookRunnerContent();
   const runnerFile = join(landing, HOOK_RUNNER);
   writeLfNoBom(runnerFile, runner);
   const runnerSha = sha256Text(runner);
 
   let configSet = false;
   let configValue = null;
-  // LF-810 判据原文要求"摘 hook **先记原值**"：装之前先读一次，把"原本指向哪 / 原本就没设"这件事本身写进清单。
+  // LF-810 判据原文要求"摘 hook **先记原值**"：装之前先读一次，把"原本指向哪 / 原本就没设"这件事本身写下来。
   // 不记的话，卸载时只能靠猜（猜错 = 把用户原有的 hooksPath 抹掉，属"卸载破坏环境"）。
   //
   // M4（独立审查）：**重装**（升级重跑 / `--force`）时不能把"自己上次设的值"当成原值——
   //   否则卸载会把 `core.hooksPath` 还成一个指向已被删目录的悬空路径。判据：已有清单 + 当前值 == 该清单的
-  //   `hooksPath` ⇒ 沿用**旧清单里的 previous**（那才是真正的原值）。
+  //   `hooksPath` ⇒ 沿用**旧记录里的 previous**（那才是真正的原值）。
+  // P14：原值记录改放**本机态**；读取走 `readHooksState`（local 优先、清单回退）⇒ 老落点也能沿用旧值。
+  const priorState = readHooksState(repoRoot);
   const observed = readHooksPath(repoRoot, runGit);
   let previous = { hooksPath: observed.hooksPath, existed: observed.present };
-  try {
-    const old = JSON.parse(readFileSync(manifestPathOf(repoRoot), 'utf8'));
-    const oldPrev = old !== null && typeof old === 'object' ? old.previous : null;
-    if (old !== null && typeof old === 'object' && oldPrev !== null && typeof oldPrev === 'object'
-      && typeof old.hooksPath === 'string' && observed.present === true && observed.hooksPath === old.hooksPath) {
+  {
+    const oldPrev = priorState.previous;
+    const oldHooksPath = priorState.local?.hooksPath ?? priorState.manifest?.hooksPath ?? null;
+    if (oldPrev !== null && typeof oldPrev === 'object'
+      && typeof oldHooksPath === 'string' && observed.present === true && observed.hooksPath === oldHooksPath) {
       previous = { hooksPath: typeof oldPrev.hooksPath === 'string' ? oldPrev.hooksPath : null, existed: oldPrev.existed === true };
     }
-  } catch { /* 无旧清单 / 坏 JSON：按**实测**原值记（不猜） */ }
+  }
   if (opts.setConfig !== false) {
     const r = runGit(repoRoot, ['config', 'core.hooksPath', hooksPath]);
     configSet = r.ok;
@@ -337,17 +448,25 @@ export function installHooks(opts = {}) {
   const retained = previousHooks.filter((h) => h !== null && typeof h === 'object'
     && typeof h.name === 'string' && !writtenNames.has(h.name));
   const manifestHooks = [...written, ...retained];
+  // ── 清单**入库面**（P14）：只放**跨机稳定**的东西 —— 换机器跑 install 得到逐字节相同的内容 ──────
   const manifest = {
+    schema: 1,
+    hooksPath,
+    hooks: manifestHooks,
+  };
+  // ── **本机态**（P14）：随机器变化的东西一律在这里，文件保持被忽略 ────────────────────────────
+  const localState = {
     schema: 1,
     createdAt: now.toISOString(),
     hooksPath,
-    hooks: manifestHooks,
+    gateBin: gateBin === null ? null : toPosix(gateBin),
     runner: { path: HOOK_RUNNER, sha256: runnerSha, bytes: Buffer.byteLength(runner, 'utf8') },
     // LF-810：卸载所需的**安装前状态**（"原值 + 本来有没有" + 我们到底改没改过 config）
     previous: { hooksPath: previous.hooksPath, existed: previous.existed === true },
     configChanged: opts.setConfig !== false && configSet,
   };
   writeLfNoBom(manifestPathOf(repoRoot), `${JSON.stringify(manifest, null, 2)}${EOL}`);
+  writeLfNoBom(localStatePathOf(repoRoot), `${JSON.stringify(localState, null, 2)}${EOL}`);
   return {
     ok: reasons.length === 0,
     reasons,
@@ -361,8 +480,10 @@ export function installHooks(opts = {}) {
     runnerSha,
     configSet,
     configValue,
-    previous: manifest.previous,
-    configChanged: manifest.configChanged,
+    previous: localState.previous,
+    configChanged: localState.configChanged,
+    localStateFile: toPosix(localStatePathOf(repoRoot)),
+    manifest,
     names: [...names],
   };
 }
@@ -379,19 +500,17 @@ export function verifyHooks(opts = {}) {
 
   const landing = landingDirOf(repoRoot);
   const manifestFile = manifestPathOf(repoRoot);
-  let manifest = null;
+  // P14：合并视图（local 优先、清单回退）——`manifest` 只承载**稳定面**（hooksPath + hooks[]）。
+  const state = readHooksState(repoRoot);
+  let manifest = state.manifest;
   if (!existsSync(manifestFile)) {
     findings.push({ code: 'HOOK_MANIFEST_MISSING', message: `缺 hooks 清单（先跑 rk-gate hooks install）: ${toPosix(relative(repoRoot, landing))}/${HOOKS_MANIFEST}` });
-  } else {
-    try {
-      manifest = JSON.parse(readFileSync(manifestFile, 'utf8'));
-      if (manifest === null || typeof manifest !== 'object' || !Array.isArray(manifest.hooks)) {
-        findings.push({ code: 'HOOK_MANIFEST_INVALID', message: 'hooks 清单结构不合法（缺 hooks 数组）' });
-        manifest = null;
-      }
-    } catch (err) {
-      findings.push({ code: 'HOOK_MANIFEST_UNREADABLE', message: `hooks 清单读不了: ${err?.message ?? ''}` });
-    }
+  } else if (manifest === null) {
+    // 逐字保留原判据：**结构不合法**（读得动 JSON、但缺 hooks 数组）与**读不了**（坏 JSON）分开报
+    let parseError = null;
+    try { JSON.parse(readFileSync(manifestFile, 'utf8')); } catch (err) { parseError = err; }
+    if (parseError !== null) findings.push({ code: 'HOOK_MANIFEST_UNREADABLE', message: `hooks 清单读不了: ${parseError?.message ?? ''}` });
+    else findings.push({ code: 'HOOK_MANIFEST_INVALID', message: 'hooks 清单结构不合法（缺 hooks 数组）' });
   }
 
   const cfg = runGit(repoRoot, ['config', '--get', 'core.hooksPath']);
@@ -489,31 +608,53 @@ export function verifyHooks(opts = {}) {
     report.push({ name, path: rel, present: true, sha256: actual, match, execSource, execOk, inert });
   }
 
-  // runner：hook 脚本靠它落地载荷，缺了照样"有闸不落"
-  if (manifest !== null && manifest.runner !== null && typeof manifest.runner === 'object') {
-    const runnerRel = `${toPosix(relative(repoRoot, landing))}/${manifest.runner.path ?? HOOK_RUNNER}`;
-    const runnerFile = join(landing, manifest.runner.path ?? HOOK_RUNNER);
+  // ── runner：hook 脚本靠它落地载荷，缺了照样"有闸不落" ──────────────────────────────────────
+  // P14 口径：**跨机核的是名字（清单入库）**，runner 指纹是**本机事实**（`hooks.local.json`）。
+  //   有本机态 ⇒ 照核（改了/换机装错当场报 `HOOK_RUNNER_MODIFIED`）；
+  //   无本机态（新 clone / 别人给的树）⇒ **如实标注"本机指纹无从核"**（advisory，不判红），
+  //   绝不静默当成"核过了" —— 这正是 P14 要治的"静默失败"。
+  const runnerInfo = state.runner;
+  if (runnerInfo !== null) {
+    const runnerRel = `${toPosix(relative(repoRoot, landing))}/${runnerInfo.path ?? HOOK_RUNNER}`;
+    const runnerFile = join(landing, runnerInfo.path ?? HOOK_RUNNER);
     if (!existsSync(runnerFile)) {
       findings.push({ code: 'HOOK_RUNNER_MISSING', message: `hook runner 缺失（hook 会在运行时失败）: ${runnerRel}` });
     } else {
       const actual = sha256File(runnerFile);
-      if (typeof manifest.runner.sha256 === 'string' && actual !== manifest.runner.sha256) {
+      if (typeof runnerInfo.sha256 === 'string' && actual !== runnerInfo.sha256) {
         findings.push({
           code: 'HOOK_RUNNER_MODIFIED',
-          message: `hook runner 与清单不符: ${runnerRel} expected=${manifest.runner.sha256.slice(0, 12)} actual=${actual.slice(0, 12)}`,
+          message: `hook runner 与${state.source === 'local' ? '本机态' : '清单（旧格式）'}不符: ${runnerRel} expected=${runnerInfo.sha256.slice(0, 12)} actual=${actual.slice(0, 12)}`,
         });
       }
     }
+  } else if (existsSync(manifestFile)) {
+    findings.push({
+      code: 'HOOK_RUNNER_UNVERIFIED',
+      message: `无本机态（${HOOKS_LOCAL_STATE} 不存在）⇒ runner 指纹**无从核**（跨机口径只核钩子名）: `
+        + `${toPosix(relative(repoRoot, landing))}/${HOOK_RUNNER}。要在本机核指纹就重跑一次 \`rk-gate hooks install\`（同参数，不改钩子内容）。`,
+      advisory: true,
+    });
   }
 
+  // P14：把「跨机核什么 / 本机核什么」在输出里**分开可读**（不让人把"核过名字"读成"核过一切"）
+  details.push({ key: 'HOOKS_SCOPE', value: state.localPresent ? 'manifest+local' : 'manifest' });
+  details.push({ key: 'HOOKS_LOCAL_STATE', value: state.localPresent ? `present(${HOOKS_LOCAL_STATE})` : `missing(${HOOKS_LOCAL_STATE})` });
+  details.push({ key: 'HOOKS_STATE_SOURCE', value: state.source });
+
   return {
-    ok: findings.length === 0,
+    ok: findings.filter((f) => f.advisory !== true).length === 0,
     repoRoot,
     hooksPath,
     configured,
     expectedPath,
     manifest,
     manifestFile: toPosix(manifestFile),
+    localStateFile: toPosix(localStatePathOf(repoRoot)),
+    localStatePresent: state.localPresent,
+    stateSource: state.source,
+    scope: state.localPresent ? 'manifest+local' : 'manifest',
+    details,
     hooks: report,
     names: names.length > 0 ? names : [...DEFAULT_HOOK_NAMES],
     findings,

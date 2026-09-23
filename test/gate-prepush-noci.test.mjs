@@ -50,17 +50,19 @@ function prePushRepo({ label, config = null, refsText }) {
   if (config !== null) writeFileSync(join(landing, 'config.json'), `${JSON.stringify(config, null, 2)}\n`, 'utf8');
   const gateBin = fakeGate();
   const runner = join(root, 'runner.mjs');
-  writeFileSync(runner, hookRunnerContent({ gateBin }), 'utf8');
+  // P14：runner 内容**不再吃 gateBin**（生成物里不带本机路径）⇒ 假门禁从**运行时解析链**注入
+  //   （第一优先 = `RK_GATE_BIN` 环境变量，见 `hookRunnerContent` 的 `resolveGate()`）
+  writeFileSync(runner, hookRunnerContent(), 'utf8');
   const refsFile = join(root, 'refs.txt');
   writeFileSync(refsFile, refsText, 'utf8');
-  return { root, runner, refsFile };
+  return { root, runner, refsFile, gateBin };
 }
 
 /** 跑载荷（git 调 pre-push 的形态：`runner pre-push` + refs 从 stdin 来，cwd=仓库根） */
-function runPrePush({ runner, refsFile, root }) {
+function runPrePush({ runner, refsFile, root, gateBin }) {
   const refs = readFileSync(refsFile, 'utf8');
   const r = spawnSync(process.execPath, [runner, 'pre-push'], {
-    cwd: root, encoding: 'utf8', input: refs,
+    cwd: root, encoding: 'utf8', input: refs, env: { ...process.env, RK_GATE_BIN: gateBin },
   });
   return { rc: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
@@ -68,12 +70,12 @@ function runPrePush({ runner, refsFile, root }) {
 const CLEAN_REFS = 'refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n';
 
 test('P22①: `prePush.noCi=true` ⇒ 跳过 ci 段：exit 0 且**大声说明**', () => {
-  const { root, runner, refsFile } = prePushRepo({
+  const { root, runner, refsFile, gateBin } = prePushRepo({
     label: 'p22-noci-on',
     config: { schema: 1, mode: 'observe', repoKind: 'private', prePush: { noCi: true } },
     refsText: CLEAN_REFS,
   });
-  const r = runPrePush({ runner, refsFile, root });
+  const r = runPrePush({ runner, refsFile, root, gateBin });
   assert.equal(r.rc, 0, `应当放行；out=${r.out}`);
   assert.doesNotMatch(r.out, /GATE_CALLED ci/, 'ci 段不该被调用');
   assert.match(r.out, /跳过\*\*? CI 等价门禁|跳过 CI 等价门禁/, '必须说明跳过了哪一段');
@@ -86,29 +88,27 @@ test('P22②: 不给开关 / `noCi=false` ⇒ **仍然**跑 ci 段（与改前�
     { schema: 1, mode: 'observe', repoKind: 'private' },
     { schema: 1, mode: 'observe', repoKind: 'private', prePush: { noCi: false } },
   ]) {
-    const { root, runner, refsFile } = prePushRepo({ label: `p22-noci-off-${cfg.prePush === undefined ? 'absent' : 'false'}`, config: cfg, refsText: CLEAN_REFS });
-    const r = runPrePush({ runner, refsFile, root });
+    const { root, runner, refsFile, gateBin } = prePushRepo({ label: `p22-noci-off-${cfg.prePush === undefined ? 'absent' : 'false'}`, config: cfg, refsText: CLEAN_REFS });
+    const r = runPrePush({ runner, refsFile, root, gateBin });
     assert.match(r.out, /GATE_CALLED ci/, `默认必须跑 ci 段；cfg=${JSON.stringify(cfg)} out=${r.out}`);
     assert.notEqual(r.rc, 0, '假门禁在 ci 段非 0 ⇒ 整条必须非 0（缺工作流时就是这种结论）');
   }
 });
 
 test('P22③: 开关只影响 ci 段 —— refs 段有泄漏时照样拒（不许顺手放过）', () => {
-  const { root, runner, refsFile } = prePushRepo({
+  const { root, runner, refsFile, gateBin } = prePushRepo({
     label: 'p22-refs-still-runs',
     config: { schema: 1, mode: 'observe', repoKind: 'private', prePush: { noCi: true } },
     refsText: CLEAN_REFS,
   });
-  // 把假门禁改成"refs 段判红"，验证 noCi 不会把 refs 一起放过
-  const gate = fakeGate();
-  writeFileSync(gate, [
+  // 把假门禁改成"refs 段判红"，验证 noCi 不会把 refs 一起放过（P14：改**同一个被解析到的**入口）
+  writeFileSync(gateBin, [
     "const sub = process.argv[2] ?? '';",
     "console.log('GATE_CALLED ' + sub);",
     "if (sub === 'refs') { console.log('REFS_LEAK'); process.exit(1); }",
     'process.exit(0);',
   ].join('\n') + '\n', 'utf8');
-  writeFileSync(runner, hookRunnerContent({ gateBin: gate }), 'utf8');
-  const r = runPrePush({ runner, refsFile, root });
+  const r = runPrePush({ runner, refsFile, root, gateBin });
   assert.notEqual(r.rc, 0, `refs 段判红必须仍拦住（noCi 只拆 ci 那一段）；out=${r.out}`);
   assert.match(r.out, /GATE_CALLED refs/);
   assert.doesNotMatch(r.out, /GATE_CALLED ci/, 'ci 段仍应被跳过');

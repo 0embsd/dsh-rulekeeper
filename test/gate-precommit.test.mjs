@@ -21,6 +21,12 @@ import { cleanupAll, tempDir } from './helpers/sandbox.mjs';
 
 test.after(cleanupAll);
 
+// P14（2026-09-23）：生成的 `hook.mjs` **不再写死本机路径**，改为运行时解析 rk-gate 入口
+//   （解析链：`RK_GATE_BIN` → 项目 `node_modules/dsh-rulekeeper` → 落点 `config.json.gateBin`）。
+// 本文件的临时仓里这三路都不天然成立 ⇒ 显式把入口指到本包；本文件只直接调 `precommit` 面，
+// 但 `--clear-index` 等路径会经钩子 ⇒ 一并指好，避免"钩子静默没跑"被读成"门禁放行"。
+process.env.RK_GATE_BIN = join(import.meta.dirname, '..', 'bin', 'rk-gate.mjs');
+
 function capture(fn) {
   let out = '';
   let err = '';

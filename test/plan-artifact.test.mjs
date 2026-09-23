@@ -132,10 +132,35 @@ test('计划⑤: **诚实边界**必须打印（判不了"是否真先想过" / 
   assert.match(r.stdout, /抓不到"已经动手了"|抓不到/, '必须自曝触发时机滞后');
 });
 
-test('计划⑥: 真仓（本仓未声明 planScope）⇒ exit 2，如实报"我没量到"而不是通过', () => {
-  const r = runCheckerVerdict(CHECKER, { sampleDir: null, label: 'plan-artifact@真仓', expect: 'not-applicable' });
+/**
+ * 造一个"**没声明 `planScope`** 的落点"（真的 git 仓 + 真的 config.json）——
+ * 用于"本检查器不适用时必须 exit 2"的那两条判据。
+ *
+ * 为什么不能拿**本仓**当这个现场（2026-09-23 实测踩到）：本仓现在**已经**声明了 `planScope`
+ * ⇒ 检查器会**真的判**（有计划行覆盖 ⇒ exit 0），于是"不适用 ⇒ exit 2"的断言变成**状态依赖**：
+ * 本仓声明一落地它就红，而它红的原因是"前提没了"，不是"检查器坏了"（规则 42：样本要构造，不靠现场）。
+ */
+function repoWithoutPlanScope(label) {
+  const dir = tempDir(label);
+  const landing = join(dir, '.dsh-ai', 'rulekeeper');
+  mkdirSync(landing, { recursive: true });
+  writeFileSync(join(landing, 'config.json'), `${JSON.stringify({ schema: 1, mode: 'observe', repoKind: 'private' }, null, 2)}\n`, 'utf8');
+  writeFileSync(join(dir, 'src-cli.mjs'), '// 代码类改动样本\n', 'utf8');
+  const g = (args) => spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+  g(['init', '-q', '-b', 'main']);
+  g(['config', 'user.email', 't@example.test']);
+  g(['config', 'user.name', 't']);
+  g(['add', '-A']);
+  g(['commit', '-q', '-m', 'init']);
+  return dir;
+}
+
+test('计划⑥: 落点未声明 `planScope` ⇒ exit 2，如实报"我没量到"而不是通过', () => {
+  const dir = repoWithoutPlanScope('plan-noscope');
+  const r = runCheckerVerdict(CHECKER, { sampleDir: dir, label: 'plan-artifact@无 planScope', expect: 'not-applicable' });
   assert.equal(r.status, 2);
   assert.match(r.stdout, /PLAN_CHECK=not-applicable/);
+  assert.match(r.stdout, /没声明 planScope/, '必须点名是"没声明 planScope"，别让人以为是"查过了没问题"');
   assert.doesNotMatch(r.stdout, /PLAN_CHECK_RESULT=pass/);
 });
 
@@ -171,9 +196,9 @@ test('计划⑨（护栏）: 样本宣告的时间线必须**自曝**，且真�
   const fx = runCheckerVerdict(CHECKER, { sampleDir: FX('plan-fx-green'), label: 'plan-fx-green' });
   assert.match(fx.stdout, /PLAN_CHECK_TIMELINE=fixture/, '用了样本宣告就必须自曝（否则它就是个后门）');
   assert.match(fx.stdout, /真台账行数按 0 计/, '必须说清"真台账没参与本次判定"');
-  // 生产路径（真仓）不得出现 fixture 字样
-  const real = runCheckerVerdict(CHECKER, { sampleDir: null, label: '真仓', expect: 'not-applicable' });
-  assert.doesNotMatch(real.stdout, /fixture/, '真仓上不得出现样本宣告的痕迹（生产不读那个文件）');
+  // 生产路径（**不适用**的现场）不得出现 fixture 字样 —— 用构造出来的现场，不拿本仓当赌注
+  const real = runCheckerVerdict(CHECKER, { sampleDir: repoWithoutPlanScope('plan-nofix'), label: '无 planScope 现场', expect: 'not-applicable' });
+  assert.doesNotMatch(real.stdout, /fixture/, '生产路径上不得出现样本宣告的痕迹（生产不读那个文件）');
 });
 
 test('计划⑪（回归）: glob 语义 —— `src/**/*.mjs` 必须匹配 `src/cli.mjs`（零层或多层）', () => {

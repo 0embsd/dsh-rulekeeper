@@ -18,14 +18,14 @@ import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 
 import {
-  DEFAULT_HOOKS_PATH, HOOK_RUNNER, HOOKS_MANIFEST, KNOWN_HOOK_NAMES,
-  defaultRunGit, landingDirOf, manifestPathOf, readHooksPath, sha256File,
+  DEFAULT_HOOKS_PATH, HOOK_RUNNER, HOOKS_LOCAL_STATE, HOOKS_MANIFEST, KNOWN_HOOK_NAMES,
+  defaultRunGit, landingDirOf, manifestPathOf, readHooksPath, readHooksState, sha256File,
 } from './hooks.mjs';
 import { readLedger } from './ledger.mjs';
 import { readGateLedger } from './gate.mjs';
 import { pathKey } from './platform/paths.mjs';
 
-/** 数据文件走查（**排除** hook runner 与 hooks 清单：那两个是安装态，卸载本来就要删） */
+/** 数据文件走查（**排除** hook runner 与 hooks 清单/本机态：那几个是安装态，卸载本来就要删） */
 function listDataFiles(dir, rel = '') {
   const out = [];
   let entries;
@@ -38,7 +38,7 @@ function listDataFiles(dir, rel = '') {
     const abs = join(dir, e.name);
     const r = rel === '' ? e.name : `${rel}/${e.name}`;
     if (e.isDirectory()) out.push(...listDataFiles(abs, r));
-    else if (e.name !== HOOK_RUNNER && e.name !== HOOKS_MANIFEST) out.push({ path: r, sha256: sha256File(abs) });
+    else if (e.name !== HOOK_RUNNER && e.name !== HOOKS_MANIFEST && e.name !== HOOKS_LOCAL_STATE) out.push({ path: r, sha256: sha256File(abs) });
   }
   return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
@@ -125,6 +125,9 @@ export function uninstallHooks(opts = {}) {
     findings.push({ code: 'HOOK_MANIFEST_INVALID', message: 'hooks 清单结构不合法（缺 hooks 数组）：不猜内容、直接停手' });
     return { ...base, ok: false, alreadyClean: false, dataBefore, dataAfter: dataBefore, dataPreserved: true, ledgerEntries: dataBefore.ledgerEntries, gateRows: dataBefore.gateRows };
   }
+  // P14：runner 指纹 / 安装前 hooksPath 原值 / configChanged 已移到 `hooks.local.json`
+  //   —— 读取走合并视图（local 优先、清单回退）⇒ 老落点照旧，新落点按新形状。
+  const state = readHooksState(repoRoot);
 
   const hooksPath = typeof manifest.hooksPath === 'string' && manifest.hooksPath !== '' ? manifest.hooksPath : DEFAULT_HOOKS_PATH;
   // M5（独立审查）：清单里的 `hooksPath` 是**可被改写的输入**，直接用它会删掉仓外文件。
@@ -182,7 +185,7 @@ export function uninstallHooks(opts = {}) {
   }
 
   // ② 摘 hook runner（同样只在内容相符时；且路径**必须**是我们装的那个名字）
-  const runnerRel = typeof manifest.runner?.path === 'string' ? manifest.runner.path : HOOK_RUNNER;
+  const runnerRel = typeof state.runner?.path === 'string' ? state.runner.path : HOOK_RUNNER;
   const runnerFile = join(landing, runnerRel);
   if (runnerRel !== HOOK_RUNNER) {
     // 清单被改写指向别的文件（例如 `ledger.jsonl`）⇒ 删它就是删数据。不删，如实报。
@@ -190,9 +193,9 @@ export function uninstallHooks(opts = {}) {
     findings.push({ code: 'HOOK_RUNNER_PATH_UNEXPECTED', message: `清单里的 runner 路径不是 ${HOOK_RUNNER}（拒绝删除，防误删数据）: ${JSON.stringify(runnerRel)}` });
   } else if (existsSync(runnerFile)) {
     const actual = sha256File(runnerFile);
-    if (typeof manifest.runner?.sha256 === 'string' && actual !== manifest.runner.sha256) {
-      kept.push({ name: runnerRel, reason: 'HOOK_RUNNER_MODIFIED_KEPT', actual, expected: manifest.runner.sha256 });
-      findings.push({ code: 'HOOK_RUNNER_MODIFIED_KEPT', message: `${runnerRel} 与清单 sha256 不符 ⇒ 保留不删` });
+    if (typeof state.runner?.sha256 === 'string' && actual !== state.runner.sha256) {
+      kept.push({ name: runnerRel, reason: 'HOOK_RUNNER_MODIFIED_KEPT', actual, expected: state.runner.sha256 });
+      findings.push({ code: 'HOOK_RUNNER_MODIFIED_KEPT', message: `${runnerRel} 与${state.source === 'local' ? '本机态' : '清单'} sha256 不符 ⇒ 保留不删` });
     } else {
       rmSync(runnerFile);
       removed.push(runnerRel);
@@ -200,13 +203,24 @@ export function uninstallHooks(opts = {}) {
   } else {
     absent.push(runnerRel);
   }
+  // ②b P14：本机态文件是我们自己写的安装记录（无数据价值）⇒ 与 runner 一起摘掉，卸载后才真的干净。
+  //   但**runner 路径越界时保留它**（那一支已经报了 `HOOK_RUNNER_PATH_UNEXPECTED`）：现场留证 > 目录干净，
+  //   否则"谁把 runner 指到别处去了"这条线索会随卸载一起消失。
+  if (existsSync(state.localFile)) {
+    if (runnerRel === HOOK_RUNNER) {
+      rmSync(state.localFile);
+      removed.push(HOOKS_LOCAL_STATE);
+    } else {
+      kept.push({ name: HOOKS_LOCAL_STATE, reason: 'HOOK_RUNNER_PATH_UNEXPECTED' });
+    }
+  }
 
-  // ③ 恢复 core.hooksPath（**不猜**：清单里记了什么就回什么）
+  // ③ 恢复 core.hooksPath（**不猜**：记录里写了什么就回什么）
   // M3（独立审查）：判断顺序必须是"**先看有没有原值记录**"，再看 `configChanged`。
   //   旧清单（本次改动之前装的）**没有** `configChanged` 字段；旧实现先判 `configChanged !== true`
   //   ⇒ 直接走 `skip-no-config-change`，把"旧清单"分支变成**不可达代码**，于是 config 没还回去却 exit=0。
-  const previous = manifest.previous ?? null;
-  const configUnchanged = manifest.configChanged === false;
+  const previous = state.previous ?? null;
+  const configUnchanged = state.configChanged === false;
   let config = { action: 'skip-no-config-change', value: null, previous, error: null };
   if (configUnchanged) {
     config = { action: 'skip-no-config-change', value: null, previous, error: null };
