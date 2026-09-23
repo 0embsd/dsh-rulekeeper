@@ -6,7 +6,7 @@
 //
 // 归属：core 模块（与 ledger/rules/io 同层）。零依赖：只用 node:*。
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -176,4 +176,28 @@ export function relativeToRoot(input, root) {
   if (t === b) return '.';
   if (!t.startsWith(`${b}/`)) return null;
   return target.slice(base.length + 1);
+}
+
+/**
+ * **软链归一后的**相对路径（2026-09-23 修，CI 的 Ubuntu/macOS 作业抓到）。
+ *
+ * 为什么必须单独一条（不能只靠 `relativeToRoot`）：纯字符串比较在**软链**上会假失败。
+ *   实证：macOS 的 `/tmp` 是 `/private/tmp` 的软链 ⇒ `--path`（经 `tmpdir()` = `/tmp/…`）与
+ *   `--landing`（经解析得到的 `/private/tmp/…`）**指向同一个目录却字符串前缀不同** ⇒ 相对化失败
+ *   ⇒ 索引里落**绝对路径**，而闸门与保护面 glob 都按项目相对比 ⇒ 受保护文件被判"从未留证"。
+ *   Linux 上则表现为"`os.tmpdir()` 给出 `/tmp/…`，而另一些 API 把 cwd 前缀拼进去"这类同族差异。
+ * 口径：`realpathSync` 把两侧都解析到物理路径后再做字符串相对化；任一侧解析不到（文件不存在/权限）
+ *   就**退回**纯字符串那条（宁可维持原行为，也不在这里抛错）。
+ * 返回**相对 input 的原始拼写**（不返回 realpath 结果）—— 调用方拿它写索引/比对，必须与传入路径同形。
+ */
+export function relativeToRootReal(input, root) {
+  const direct = relativeToRoot(input, root);
+  if (direct !== null) return direct;
+  try {
+    const realInput = realpathSync.native(String(input));
+    const realRoot = realpathSync.native(String(root));
+    return relativeToRoot(realInput, realRoot);
+  } catch {
+    return null;
+  }
 }

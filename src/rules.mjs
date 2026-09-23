@@ -13,7 +13,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { validateCheckerBinding } from './checker.mjs';
-import { pathKey, relativeToRoot, toPosix } from './platform/paths.mjs';
+import { pathKey, relativeToRootReal, toPosix } from './platform/paths.mjs';
 import { SCHEMA_VERSION } from './schema.mjs';
 
 export const RULES_FILE = 'rules.json';
@@ -184,7 +184,10 @@ export function globToRegExp(pattern) {
 /** 把任意输入归一为"相对项目根的 posix 路径"（判定一律在这个形态上做） */
 export function normalizeTarget(input, projectRoot) {
   if (typeof input !== 'string' || input.trim() === '') return null;
-  const relative = relativeToRoot(input, projectRoot);
+  // 2026-09-23：改走**软链归一**版（`relativeToRootReal`）。纯字符串比较在软链上会假失败：
+  //   实证 macOS `/tmp` → `/private/tmp`，`--path` 与 `--landing` 指向同一目录却字符串前缀不同
+  //   ⇒ 落绝对路径 ⇒ 闸门/保护面 glob（按项目相对比）判"从未留证"。该函数仍返回**输入原拼写**的相对段。
+  const relative = relativeToRootReal(input, projectRoot);
   if (relative !== null && relative !== '.') return toPosix(relative);
   return toPosix(input).replace(/^\.\//, '');
 }

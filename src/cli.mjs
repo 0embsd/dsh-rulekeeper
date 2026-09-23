@@ -56,7 +56,7 @@ import {
   CONSUMERS, checkConsumersConsistency, effectiveConfig, isProtected, loadLandingRules, loadRules,
 } from './rules.mjs';
 import { UsageError, resolveNow, stamp } from './platform/clock.mjs';
-import { dshHome, LANDING_DIRNAME, LANDING_REL, packageVersion, pathKey, resolveProjectLanding, toPosix } from './platform/paths.mjs';
+import { dshHome, LANDING_DIRNAME, LANDING_REL, packageVersion, pathKey, relativeToRoot, resolveProjectLanding, toPosix } from './platform/paths.mjs';
 import { escapeControl, jsonStable, line, resultLine, sortCodePoints, write as stdWrite, writeErr as stdWriteErr } from './platform/out.mjs';
 import { checkSkeleton } from './selfcheck.mjs';
 import { readMode } from './mode.mjs';
@@ -3830,24 +3830,25 @@ export function runSnap(argv, io = defaultIo(), env = process.env) {
     return RC.USAGE;
   }
   // 2026-09-23 修（**CI 的 Linux/macOS 作业抓到**，本地 Windows 全绿 ⇒ 平台相关）：
-  //   原口径 `flags.project ?? projectRootOfLanding(landing)`，而 `projectRootOfLanding` 推不出时**退回 cwd**
-  //   ⇒ 在"落点在别处、cwd 不是项目根"的调用形态下（消费方仓 / 夹具仓，都是真实用法）路径换算不出来
-  //   ⇒ `normalizeTarget` 落到"原样**绝对**路径" ⇒ 索引里存绝对路径，而闸门与保护面 glob 都按
+  //   原口径 `flags.project ?? projectRootOfLanding(landing)`，推不出时**退回 cwd** ⇒ 在"落点在别处、
+  //   cwd 不是项目根"的调用形态下（消费方仓 / 夹具仓，都是真实用法）路径换算不出来 ⇒
+  //   `normalizeTarget` 落到"原样**绝对**路径" ⇒ 索引里存绝对路径，而闸门与保护面 glob 都按
   //   **项目相对**比 ⇒ 受保护文件"永远没留证"（GATE_WRITE_NO_SNAPSHOT）、提交被拒。
-  //   现口径（三条，按可靠性排序）：
+  //   现口径（按可靠性排序，**全部是纯字符串运算**，不依赖 cwd/平台/文件系统解析）：
   //     ① 显式 `--project` 优先；
-  //     ② **从落点路径字符串推**：落点形如 `<项目>/.dsh-ai/<名字>` ⇒ 去掉最后两段就是项目根。
-  //        这是**纯字符串**运算，与平台/软链/cwd 全无关（本轮 Linux 上失效的正是"靠 cwd 兜底"那条）；
-  //     ③ 再退回 `projectRootOfLanding`（它本身有 cwd 兜底）。
-  //   ⚠ 仍**不声称**处理了符号链接差异：`normalizeTarget` 不做 realpath 归一，若 `--path` 与
-  //     `--landing` 来自不同软链形态（macOS `/tmp` → `/private/tmp`），索引仍可能落绝对路径 ——
-  //     那是**已知缺口**，本轮不在这里顺手改（它要动 `normalizeTarget`，影响面更大）。
+  //     ② `relativeToRoot(landing, cwd)` —— 落点在 cwd 之内时直接拿到相对段（不重新拼绝对路径，
+  //        避免"拼出来的根"与"解析出来的文件"在大小写/软链/分隔符上出现差异）；
+  //     ③ 从落点路径字符串推：落点形如 `<项目>/.dsh-ai/<名字>` ⇒ 去掉最后两段；
+  //     ④ 再退回 `projectRootOfLanding`（它本身有 cwd 兜底）。
   const landingParts = String(resolve(flags.landing)).split(/[\\/]/).filter((s) => s !== '');
+  const landingUnderCwd = relativeToRoot(landing, process.cwd());
   const projectRoot = flags.project !== undefined
     ? resolve(flags.project)
-    : (landingParts.length >= 2 && landingParts[landingParts.length - 2] === '.dsh-ai'
-      ? (resolve(landingParts.slice(0, -2).join('/')) || projectRootOfLanding(landing))
-      : projectRootOfLanding(landing));
+    : (landingUnderCwd !== null && landingUnderCwd !== '.'
+      ? resolve(process.cwd(), ...landingUnderCwd.split('/').map(() => '..'))
+      : (landingParts.length >= 2 && landingParts[landingParts.length - 2] === '.dsh-ai'
+        ? (resolve(landingParts.slice(0, -2).join('/')) || projectRootOfLanding(landing))
+        : projectRootOfLanding(landing)));
   let now = new Date();
   if (flags.now !== undefined) {
     now = new Date(flags.now);
@@ -3875,10 +3876,12 @@ export function runSnap(argv, io = defaultIo(), env = process.env) {
     io.out(line(`RK_SNAP_LANDING=${toPosix(landing)}`));
     io.out(line(`RK_SNAP_MODE=take`));
     // 2026-09-23：补两条**诊断读数**（判据面本来就没有"它到底把哪个根、哪个文件当目标"的可见性）。
-    //   来历：CI 的 Linux/macOS 作业上，索引落了**绝对路径**，而本机 Windows 不复现
+    //   来历：CI 的 Linux/macOS 作业上索引落了**绝对路径**，本机 Windows 不复现
     //   ⇒ 只凭"结果是绝对路径"这一条反推根因，猜了两轮都没中。把这两个值打出来，一次就能定位。
-    io.out(line(`RK_SNAP_PROJECT=${toPosix(projectRoot)}`));
-    io.out(line(`RK_SNAP_TARGET=${toPosix(snapTargetPath(flags.path, projectRoot))}`));
+    //   ⚠ 必须是**相对形态**：判据类输出不得含绝对路径（本仓纪律 + 同族用例"两入口逐字同源"
+    //     会因为绝对路径不同而直接判 red —— 实测抓到）。落点相对项目根 ⇒ `.dsh-ai/<名字>`。
+    io.out(line(`RK_SNAP_PROJECT=${toPosix(relativeToRoot(landing, projectRoot) ?? '.')}`));
+    io.out(line(`RK_SNAP_TARGET=${report.path ?? '(n/a)'}`));
     io.out(line(`RK_SNAP_PATH=${report.path ?? '(n/a)'}`));
     if (report.ok) {
       io.out(line(`RK_SNAP_SHA256_BEFORE=${report.sha256}`));
