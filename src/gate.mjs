@@ -1086,6 +1086,14 @@ export function closeGate(opts = {}) {
 
 /** 服务端入口的工作流文件（相对项目根）。目录形态与 GitHub Actions 对齐 */
 export const CI_WORKFLOW_REL = '.github/workflows/dsh-rulekeeper-gate.yml';
+/**
+ * 给了 `--tool-repo` 时工具仓的 checkout 目录名。**必须与 CLI 自动推导 bin 的口径一致**：
+ * 自动探测（`autoCiBinRel`）按"仓内真实布局"找 bin，而消费方仓里没有本包 ⇒ 它会回落到
+ * `bin/rk-gate.mjs`，于是工作流里写的 `.dsh-rulekeeper-tool/bin/rk-gate.mjs` 与校验侧期望的
+ * `bin/rk-gate.mjs` **不一致** ⇒ 报 `CI_WORKFLOW_TAMPERED`（假红，实测踩到）。
+ * 故 CLI 在 `--tool-repo` 下把 binPath 钉成 `<TOOL_CHECKOUT_DIR>/<默认 bin>`，两侧同源。
+ */
+export const TOOL_CHECKOUT_DIR = '.dsh-rulekeeper-tool';
 /** 生成物里引用的 dsh-rulekeeper 入口（上游仓布局；消费方可用 `--bin` 覆盖） */
 export const CI_BIN_REL = 'bin/rk-gate.mjs';
 /** 本包根目录（`src/gate.mjs` 上溯两级） */
@@ -1192,7 +1200,7 @@ export function ciWorkflowYaml(opts = {}) {
   //   （消费方一行没改，判定却从绿变红）——那是"判据恒错"的同族，必须拒绝而不是警告。
   const toolRepo = typeof opts.toolRepo === 'string' && opts.toolRepo.trim() !== '' ? opts.toolRepo.trim() : null;
   const toolRef = typeof opts.toolRef === 'string' && opts.toolRef.trim() !== '' ? opts.toolRef.trim() : null;
-  const TOOL_DIR = '.dsh-rulekeeper-tool';
+  const TOOL_DIR = TOOL_CHECKOUT_DIR;
   if (toolRepo !== null && (toolRef === null || !/^[0-9a-f]{40}$/.test(toolRef))) {
     throw new Error(
       'ciWorkflowYaml: 给了 toolRepo 就必须给**40 位小写 hex 的 toolRef**（收到 '
@@ -1203,6 +1211,9 @@ export function ciWorkflowYaml(opts = {}) {
   if (toolRepo !== null && toolRepo.split('/').length !== 2) {
     throw new Error(`ciWorkflowYaml: toolRepo 必须是 owner/repo 形态（收到 ${JSON.stringify(toolRepo)}）`);
   }
+  // 口径（一次前缀，别两处都加）：`binPath` = **工具仓内部**的入口相对路径；
+  //   给了 toolRepo 时这里**唯一一次**加上 checkout 目录前缀。
+  //   （实测坑：CLI 侧若也把前缀写进 binPath，就会变成 `.dsh-rulekeeper-tool/.dsh-rulekeeper-tool/bin/…`。）
   const effBin = toolRepo === null ? binPath : `${TOOL_DIR}/${binPath}`;
   const repoArg = toolRepo === null ? '' : ' --repo "$GITHUB_WORKSPACE"';
   const runLine = range !== null

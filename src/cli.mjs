@@ -19,7 +19,7 @@ import { runReplayAll } from './replay.mjs';
 import { recordBaseline, verifyBaseline } from './baseline.mjs';
 import { applyGc, planGc, shardLedger } from './shard.mjs';
 import { reconSnapshots, restoreSnapshot, takeSnapshot } from './snap.mjs';
-import { bypassRecon, ciGate, closeGate, commitMessageGate, parseHit, postCommitRecon, precommitGate, reconWrite, refsGate, writeCiWorkflow, CI_WORKFLOW_REL } from './gate.mjs';
+import { bypassRecon, ciGate, closeGate, commitMessageGate, parseHit, postCommitRecon, precommitGate, reconWrite, refsGate, writeCiWorkflow, CI_WORKFLOW_REL, TOOL_CHECKOUT_DIR } from './gate.mjs';
 import { DEFAULT_HOOKS_PATH, KNOWN_HOOK_NAMES, defaultRunGitRaw, installHooks, verifyHooks } from './hooks.mjs';
 import { uninstallHooks } from './uninstall.mjs';
 import { exportLanding, isInside, rebuildLanding, writeBundle } from './portable.mjs';
@@ -1842,13 +1842,17 @@ export function runGateCi(argv, io = defaultIo(), env = process.env) {
   }
 
   // 生成动作**显式**（不给默认开）：只写工作流文件，不跑对账 —— 生成与校验是两件事，别混成一个绿灯
+  // `--tool-repo` 下 bin 的口径**由本工具钉死**：`binPath` 表达的是**工具仓内部**的入口
+  //   （前缀由 `ciWorkflowYaml` 加**一次**）。实测坑：两侧各加一次前缀 ⇒ 路径变成
+  //   `.dsh-rulekeeper-tool/.dsh-rulekeeper-tool/bin/…`（真机验收当场抓到）。
+  const ciBinPath = flags.bin ?? (flags['tool-repo'] !== undefined ? 'bin/rk-gate.mjs' : undefined);
   if (flags['write-workflow'] === true) {
     const w = (() => {
       try {
         return writeCiWorkflow({
           projectRoot: repoRoot,
           rel: flags.workflow ?? CI_WORKFLOW_REL,
-          binPath: flags.bin,
+          binPath: ciBinPath,
           nodeVersion: flags['node-version'],
           range: flags['workflow-range'],
           // 消费方仓开关：本仓没有本包的全量用例时，带上 test 作业会让 CI **恒红**（实测）
@@ -1889,7 +1893,7 @@ export function runGateCi(argv, io = defaultIo(), env = process.env) {
     withTestJob: flags['no-test-job'] === true ? false : undefined,
     toolRepo: flags['tool-repo'],
     toolRef: flags['tool-ref'],
-    binPath: flags.bin,
+    binPath: ciBinPath,
     binSha: flags['bin-sha'],
     nodeVersion: flags['node-version'],
     claimRemote: flags['claim-remote'] === true,

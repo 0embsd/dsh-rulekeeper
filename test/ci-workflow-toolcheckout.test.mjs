@@ -52,6 +52,17 @@ test('②b 有 toolRepo 时 test 作业仍可 `--no-test-job` 去掉（两个开
     '去掉 test 作业后 checkout 步数 = 被治理仓 1 + 工具仓 1');
 });
 
+test('②c 工具仓前缀**只加一次**（真机验收抓到的坑：两侧各加一次 ⇒ 路径重复）', () => {
+  // 现场：CLI 侧若把前缀也算进 binPath，模板再加一次 ⇒ `.dsh-rulekeeper-tool/.dsh-rulekeeper-tool/bin/…`
+  //   ⇒ CI 里 node 直接找不到文件（而本机单测当时是绿的，因为单测自己传的就是裸 binPath）。
+  // 口径：`binPath` = **工具仓内部**的相对入口；前缀由生成侧加**唯一一次**。
+  const y = ciWorkflowYaml({ projectRoot: process.cwd(), binPath: 'bin/rk-gate.mjs', toolRepo: TOOL_REPO, toolRef: SHA40 });
+  const line = runLine(y);
+  const prefixed = line.split('.dsh-rulekeeper-tool').length - 1;
+  assert.equal(prefixed, 1, `工具仓目录必须恰好出现一次；实得 ${prefixed} 次：${line}`);
+  assert.match(line, /run: node \.dsh-rulekeeper-tool\/bin\/rk-gate\.mjs ci/);
+});
+
 test('③ `toolRef` 缺失 / 非 40hex（含浮动 ref）⇒ 拒绝生成，且给出可复制修法', () => {
   for (const bad of [undefined, '', 'main', 'v1.2.3', 'CC77BB2', SHA40.slice(0, 39), `${SHA40}a`]) {
     assert.throws(
