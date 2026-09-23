@@ -284,7 +284,7 @@ export const USAGE_EFFECT = `用法:
   rk-effect verify --landing <落点> [--project <项目根>] [--proposal <id>] [--all] [--now <ISO>] [--json] [--allow-exec]
                      （--allow-exec 才会**真的执行** kind:"checker" 绑定里写的命令；
                        未加时 checker 一律报 inconclusive，绝不判通过）
-  rk-effect apply  --landing <落点> --proposal <id> --by human [--pattern <glob>]... [--gate <机制>] [--apply] [--project <项目根>] [--now <ISO>] [--json]
+  rk-effect apply  --landing <落点> --proposal <id> --by human [--pattern <glob>]... [--gate <机制>] [--carrier <载体>] [--apply] [--project <项目根>] [--now <ISO>] [--json]
   rk-effect inject --landing <落点> [--max-per-session n] [--now <ISO>] [--json]
   rk-effect usage  --landing <落点> [--json]
   rk-effect draft-activation --landing <落点> [--limit n] [--write] [--json]
@@ -2538,6 +2538,7 @@ function runCliEffect(argv, io, env) {
     '--landing': 'string', '--project': 'string', '--now': 'string', '--stale-days': 'string',
     '--proposal': 'string', '--all': 'boolean', '--by': 'string', '--apply': 'boolean',
     '--pattern': 'string[]', '--gate': 'string', '--max-per-session': 'string', '--json': 'boolean',
+    '--carrier': 'string',
     '--limit': 'string', '--write': 'boolean', '--allow-exec': 'boolean',
   }, io);
   if (parsed.error !== null) return parsed.error;
@@ -2805,7 +2806,7 @@ function runCliEffect(argv, io, env) {
     const out = applyActivation({
       landingDir: landing, projectRoot, proposalId: flags.proposal, by: flags.by,
       patterns: Array.isArray(flags.pattern) ? flags.pattern : undefined,
-      gate: flags.gate, apply: flags.apply === true, now,
+      gate: flags.gate, carrier: flags.carrier, apply: flags.apply === true, now,
     });
     if (out.ok !== true) {
       io.out(line(`RK_EFFECT_APPLY_CODE=${out.code}`));

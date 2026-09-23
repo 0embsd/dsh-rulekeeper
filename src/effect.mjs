@@ -1007,28 +1007,87 @@ export function planActivation(opts = {}) {
     };
   }
 
-  // ── **退役**分支（LF-A55）：提案带 RETIRE_MARK ⇒ 摘绑定，而不是加绑定 ────────────────────
-  // 判据：只摘**这条纪律自己的** checks 绑定；其 `patterns` 若仍被**别的**绑定声明，则**不许摘**
-  //（否则会顺手把别人的保护面削掉 —— 那是"退役"变"拆台"）。
+  // ── **退役**分支（LF-A55；判据粒度 P11，2026-09-23）────────────────────────────────
+  // 两条不可退让的性质：
+  //   ① **只摘指定的那一条判据**。同一条纪律可以有多条 checks 绑定（不同载体/不同判据版本）；
+  //      原先这里把 `rule === rule` 的**全部**绑定一起摘掉 ⇒ 退役"某一条判据"会把同 rule 的其它
+  //      绑定一起带走，而输出只报一个总数，人看不出来（对方项目两次因此连带摘掉 `protected_paths` 条目）。
+  //   ② **不确定就不动**。多条绑定又没指定摘哪条 ⇒ fail-closed 拒绝，并把**候选逐条列出**；
+  //      不猜"大概是想全摘"（`retirementsFromLanding` 也读不出"哪一条"）。
+  // 指定方式：`--carrier <载体>`（CLI）或提案里的 `carrier` 字段；两种都为空且只有一条绑定时按那一条。
   if (typeof proposal.redCriteria === 'string' && proposal.redCriteria.includes(RETIRE_MARK)) {
     const mine = ruleBindings(before).get(rule) ?? { checks: [] };
     if (mine.checks.length === 0) {
       return { ok: false, findings: [{ code: 'EFFECT_PLAN_UNQUALIFIED', message: `${rule}: 没有可退役的 checks 绑定（已经是未绑定状态）` }], candidate: null, additions: null };
     }
-    const others = new Set();
+    const carrierLabel = (c) => (c.carrier === null ? '(无 carrier 字段)' : c.carrier);
+    // 绑定**身份键**：这里必须按值匹配，不能按对象引用 —— `ruleBindings()` 返回的是 `normalizeBinding()`
+    // 产出的**新对象**，与 `before.checks` 里的原始对象不是同一引用（P11 首版就这么栽了：
+    // `selected.includes(b)` 恒假 ⇒ 过滤等于没做，同 rule 的绑定照样全被摘掉）。
+    const tokenOf = (b) => [b.rule, b.carrier ?? '', b.proposal ?? '', b.activatedAt ?? '', b.kind].join('\u0000');
+    const pick = (v) => (typeof v === 'string' && v.trim() !== '' ? toPosix(v.trim().replace(/^\.\//, '')) : null);
+    // 选项名只有**一个**口径：`carrier`（`planActivation` 与 `applyActivation` 同名同义；
+    // 曾经 plan 侧叫 `retireCarrier`、apply 侧叫 `carrier`，属"同一个东西两处口径"，已统一）。
+    const wantCarrier = pick(opts.carrier) ?? pick(proposal.carrier);
+    let selected;
+    if (wantCarrier !== null) {
+      selected = mine.checks.filter((c) => c.carrier === wantCarrier);
+      if (selected.length === 0) {
+        return {
+          ok: false,
+          findings: [{
+            code: 'EFFECT_RETIRE_UNKNOWN_CARRIER',
+            message: `${rule}: --carrier ${wantCarrier} 没有匹配到任何绑定 ⇒ 未动 rules.json。`
+              + `该纪律现有绑定（共 ${mine.checks.length} 条，逐条列出）：`
+              + mine.checks.map((c, i) => `[${i + 1}] carrier=${carrierLabel(c)} kind=${c.kind}`).join('；'),
+          }],
+          candidate: null,
+          additions: null,
+        };
+      }
+    } else if (mine.checks.length === 1) {
+      selected = [mine.checks[0]];
+    } else {
+      return {
+        ok: false,
+        findings: [{
+          code: 'EFFECT_RETIRE_AMBIGUOUS',
+          message: `${rule}: 该纪律有 ${mine.checks.length} 条 checks 绑定，退役必须指明摘**哪一条**（否则会把同 rule 的其它绑定一起摘掉）。`
+            + `加 \`--carrier <载体>\`（或提案里写 carrier）再重跑；候选逐条列出：`
+            + mine.checks.map((c, i) => `[${i + 1}] carrier=${carrierLabel(c)} kind=${c.kind}`).join('；'),
+        }],
+        candidate: null,
+        additions: null,
+      };
+    }
+    // 这些判据**独占**的 patterns（别的绑定、别条纪律都没声明）⇒ 连同 protected_paths 一起善后
+    const stillUsedLower = new Set();
+    const addUsed = (list) => { for (const p of list ?? []) if (typeof p === 'string' && p.trim() !== '') stillUsedLower.add(toPosix(p.toLowerCase())); };
     for (const [r, g] of ruleBindings(before)) {
       if (r === rule) continue;
-      for (const c of g.checks) for (const p of c.patterns ?? []) others.add(toPosix(String(p).toLowerCase()));
+      for (const c of g.checks) addUsed(c.patterns);
     }
+    for (const c of mine.checks) if (!selected.includes(c)) addUsed(c.patterns);
     const removable = new Set();
-    for (const c of mine.checks) for (const p of c.patterns ?? []) removable.add(toPosix(String(p)));
-    const dropPatterns = [...removable].filter((p) => !others.has(toPosix(p.toLowerCase())));
+    for (const c of selected) for (const p of c.patterns ?? []) removable.add(toPosix(String(p)));
+    const dropPatterns = [...removable].filter((p) => !stillUsedLower.has(toPosix(p.toLowerCase())));
+    const dropLower = new Set(dropPatterns.map((p) => toPosix(p.toLowerCase())));
+    // `protected_paths` 里的条目可能是裸路径，也可能是 `path:<相对路径>` 形态 ⇒ 按**同一个**
+    // `RE_CARRIER` 口径取"路径那一段"，避免"两处口径不同源"（本仓反复踩过的那类坑）。
+    const patternOfPath = (p) => {
+      const m = RE_CARRIER.exec(String(p));
+      return toPosix((m === null ? String(p) : m[1]).replace(/^\.\//, ''));
+    };
+    const keepPath = (p) => !dropLower.has(toPosix(patternOfPath(p).toLowerCase()));
+    const selectedTokens = new Set(selected.map((c) => tokenOf(c)));
+    const remainingBindings = mine.checks.length - selected.length;
     const candidate = {
       ...before,
-      protected_paths: (Array.isArray(before.protected_paths) ? before.protected_paths : []).filter((p) => !dropPatterns.includes(toPosix(String(p)))),
+      protected_paths: (Array.isArray(before.protected_paths) ? before.protected_paths : []).filter(keepPath),
+      // **按选中的绑定**过滤（不是按 rule 过滤）：同 rule 的其它绑定必须原样留着
       checks: (Array.isArray(before.checks) ? before.checks : []).filter((e) => {
         const b = normalizeBinding(e);
-        return !(b !== null && b.rule === rule);
+        return !(b !== null && b.rule === rule && selectedTokens.has(tokenOf(b)));
       }),
     };
     return {
@@ -1036,11 +1095,20 @@ export function planActivation(opts = {}) {
       kind: 'retire',
       findings: [],
       rule,
-      gate: mine.checks[0].gate ?? DEFAULT_EFFECT_GATE,
-      carriers: mine.checks.map((c) => c.carrier).filter((c) => c !== null),
-      falsePositive: mine.checks[0].falsePositive ?? null,
+      gate: selected[0].gate ?? DEFAULT_EFFECT_GATE,
+      carriers: selected.map((c) => c.carrier).filter((c) => c !== null),
+      falsePositive: selected[0].falsePositive ?? null,
       patterns: dropPatterns,
-      additions: { patterns: [], binding: null, retirement: { removedPatterns: dropPatterns, removedBindings: mine.checks.length } },
+      additions: {
+        patterns: [],
+        binding: null,
+        retirement: {
+          removedPatterns: dropPatterns,
+          removedBindings: selected.length,
+          removedCarrier: selected.length === 1 ? selected[0].carrier : null,
+          remainingBindings,
+        },
+      },
       candidate,
       before,
     };
@@ -1312,7 +1380,7 @@ export function applyActivation(opts = {}) {
   } catch (err) {
     return fail('EFFECT_PROPOSAL_UNREADABLE', `提案不是合法 JSON: ${err?.message ?? String(err)}`);
   }
-  const planned = planActivation({ landingDir, proposal, patterns: opts.patterns, gate: opts.gate, now, projectRoot: opts.projectRoot ?? process.cwd() });
+  const planned = planActivation({ landingDir, proposal, patterns: opts.patterns, gate: opts.gate, carrier: opts.carrier, now, projectRoot: opts.projectRoot ?? process.cwd() });
   if (planned.ok !== true) {
     // **具体原因码必须活下来**（2026-09-19 实测）：以前只有 `EFFECT_PLAN_UNQUALIFIED` 一个大类码，
     // 于是"规格文件不存在""样本被改""rule 不一致"这些**可操作**的原因在 CLI 上全被拍平成一个码，
@@ -1415,7 +1483,7 @@ export function applyActivation(opts = {}) {
       rule: planned.rule,
       category: isRetire ? EFFECT_RETIRE_CATEGORY : EFFECT_EVENT_CATEGORY,
       problem: isRetire
-        ? `EFFECT_RETIRE rule=${planned.rule} proposal=${opts.proposalId} removedPatterns=${planned.additions.retirement.removedPatterns.length} removedBindings=${planned.additions.retirement.removedBindings}`
+        ? `EFFECT_RETIRE rule=${planned.rule} proposal=${opts.proposalId} removedPatterns=${planned.additions.retirement.removedPatterns.length} removedBindings=${planned.additions.retirement.removedBindings} removedCarrier=${planned.additions.retirement.removedCarrier ?? '-'} remainingBindings=${planned.additions.retirement.remainingBindings ?? 0}`
         : (planned.kind === 'activate-checker'
           ? `EFFECT_ACTIVATE rule=${planned.rule} proposal=${opts.proposalId} kind=checker spec=${planned.spec ?? '-'} exitRed=${planned.additions.binding.expectRed?.exitCode} exitGreen=${planned.additions.binding.expectGreen?.exitCode}`
           : `EFFECT_ACTIVATE rule=${planned.rule} proposal=${opts.proposalId} patterns=${planned.additions.patterns.length} gate=${planned.gate}`),
@@ -1425,7 +1493,7 @@ export function applyActivation(opts = {}) {
           ? '入账未生效：生效面此前没有绑定（rules.json 的 checks 无消费者）'
           : `判据本身演进：旧绑定（${supersede.identity}）被同一条纪律的新版本替换 —— 换绑不是"退役后重挂"，保护面无空窗`),
       solution: isRetire
-        ? `checks 摘掉 ${planned.additions.retirement.removedBindings} 条绑定；protected_paths -= [${planned.additions.retirement.removedPatterns.join(', ')}]`
+        ? `checks 摘掉 ${planned.additions.retirement.removedBindings} 条绑定（carrier=${planned.additions.retirement.removedCarrier ?? '-'}，同 rule 还剩 ${planned.additions.retirement.remainingBindings ?? 0} 条）；protected_paths -= [${planned.additions.retirement.removedPatterns.join(', ')}]`
         : (planned.kind === 'activate-checker'
           ? `checks += [kind=checker spec=${planned.spec ?? '-'} command=${(planned.additions.binding.command ?? []).join(' ')} sample=${planned.additions.binding.redSample?.source ?? '-'}]${supersede === null ? '' : `；同时摘掉 superseded=${supersede.identity}（原 proposal=${supersede.proposal ?? '-'} activatedAt=${supersede.activatedAt ?? '-'}）`}`
           : `protected_paths += [${planned.additions.patterns.join(', ')}]；checks += [carrier=${planned.additions.binding.carrier}]`),
