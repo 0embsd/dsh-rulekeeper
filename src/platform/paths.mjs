@@ -193,11 +193,18 @@ export function relativeToRoot(input, root) {
 export function relativeToRootReal(input, root) {
   const direct = relativeToRoot(input, root);
   if (direct !== null) return direct;
-  try {
-    const realInput = realpathSync.native(String(input));
-    const realRoot = realpathSync.native(String(root));
-    return relativeToRoot(realInput, realRoot);
-  } catch {
+  // ⚠ `realpathSync.native` **不是所有平台/版本都有**，且它自己也会抛（路径不存在、权限）。
+  //   2026-09-23 实测教训：原来把"取 realpath"整段放进一个 try 里，`native` 一抛就**直接返回 null**
+  //   ⇒ 连"退回纯字符串那条"都做不到（`direct` 已经是 null，兜底等于没做）⇒ 在 Linux 上表现为
+  //   "相对化彻底失败、索引落绝对路径"。现在逐级降级：native → realpathSync → 放弃（返回 null）。
+  const canon = (p) => {
+    for (const fn of [() => realpathSync.native(p), () => realpathSync(p)]) {
+      try { const r = fn(); if (typeof r === 'string' && r !== '') return r; } catch { /* 试下一个 */ }
+    }
     return null;
-  }
+  };
+  const ri = canon(String(input));
+  const rr = canon(String(root));
+  if (ri === null || rr === null) return null;
+  return relativeToRoot(ri, rr);
 }
