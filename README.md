@@ -474,12 +474,30 @@ afterward."）⇒ provider 用**该会话自己的 cwd**解析落点，不再需
 `rk-effect plan` 会显示 `RK_EFFECT_INJECTED=N`（而不是 `none`），`rk-effect inject` 用**该绑定自己声明的**
 `target/wanted/reason` 生成提醒（`inject` 条目的 `fields` 是**真被消费**的，不是装饰）。
 
-## 安装到 DSH（两种方式）
+## 安装到 DSH（三种方式：GitHub 装 / 本地挂 / npm〔未发布〕）
 
 本包既是 **CLI**（`node <包目录>/bin/rk-gate.mjs …`），也是 **DSH 插件/bundle**（入口 `index.js` + bundle 补丁 `dsh-rulekeeper.patch.yml`）。
 `dsh plugin` 子命令是对 **pnpm** 的直通（`dsh plugin --profile <档> add | remove | list`），所以两种方式在三平台一致。
 
-### 方式 1：本地挂载（推荐起步）
+**装什么不用猜**：本包**没有构建步骤**（纯 ESM、零 npm 依赖），也没有 `dist/`；但 `files` 白名单**必须**包含
+`scripts/checkers/**`（判据脚本与 spec）与两处样本目录（`test-fixtures/`、`test/fixtures/checker/`）——
+少了它们，装上之后所有判据都跑不起来（spec 的命令指不到脚本、红/绿样本不存在）。
+这条由 `test/package-face.test.mjs` 机械守住（发布面 ≠ 入口面：旧判据只核入口时，整整一层判据运行时依赖被漏掉）。
+
+### 方式 1：从 GitHub 装（推荐：可复现、钉版本）
+
+```bash
+# ① 固定 tag 的 tarball（内容不可变，最稳）
+dsh plugin --profile <你的档> add https://github.com/0embsd/dsh-rulekeeper/releases/download/v0.2.0/dsh-rulekeeper-0.2.0.tgz
+
+# ② 或直接钉 commit（不依赖 release）
+dsh plugin --profile <你的档> add "github:0embsd/dsh-rulekeeper#<commit-sha>"
+
+# 装完核对 dsh.profile.bundles 里出现 "dsh-rulekeeper"（带 dsh.bundle.patch 的包通常会被自动登记，
+# 但那是宿主行为、不同构建有差异 —— 核对一次最稳），然后**重启该档 DSH**（插件树在启动时装载）。
+```
+
+### 方式 2：本地挂载（推荐起步）
 
 ```bash
 git clone https://github.com/0embsd/dsh-rulekeeper.git <包目录>
@@ -493,13 +511,13 @@ dsh plugin --profile <你的档> add link:<包目录>
 
 本包**没有构建步骤**（纯 ESM、零 npm 依赖），**不需要** `npm run assemble`、也没有 `dist/` 需要挂——直接挂包目录即可。
 
-### 方式 2：从 npm 安装（发布到 npm 之后）
+### 方式 3：从 npm 安装（**尚未发布到 registry，此路当前不通**）
 
 ```bash
 dsh plugin --profile <你的档> add dsh-rulekeeper
 ```
 
-尚未发布到 npm 时请用方式 1。
+尚未发布到 npm 时请用方式 2（本地挂载）或方式 1（从 GitHub 装）。
 
 ### 装完怎么验证（三条，缺一不算装上）
 

@@ -56,7 +56,7 @@ import {
   CONSUMERS, checkConsumersConsistency, effectiveConfig, isProtected, loadLandingRules, loadRules,
 } from './rules.mjs';
 import { UsageError, resolveNow, stamp } from './platform/clock.mjs';
-import { dshHome, LANDING_DIRNAME, LANDING_REL, pathKey, resolveProjectLanding, toPosix } from './platform/paths.mjs';
+import { dshHome, LANDING_DIRNAME, LANDING_REL, packageVersion, pathKey, resolveProjectLanding, toPosix } from './platform/paths.mjs';
 import { escapeControl, jsonStable, line, resultLine, sortCodePoints, write as stdWrite, writeErr as stdWriteErr } from './platform/out.mjs';
 import { checkSkeleton } from './selfcheck.mjs';
 import { readMode } from './mode.mjs';
@@ -192,7 +192,8 @@ hooks = hook 完整性 preflight（LF-520）：hooksPath + hook 文件存在 + s
     数据有丢失（文件消失/条数减少）或 core.hooksPath 还原失败 → exit≠0
 退出码: 0 全部合规（或本项目没有保护面）/ 1 有未留证的直写、hook 完整性违规或卸载丢数据 / 2 用法错误`;
 
-export const USAGE_RULEKEEPER = `dsh-rulekeeper 0.1.0
+// 版本串**从 package.json 读**（不再写死：两处各写一份必然漂移，发布时就会对不上）
+export const USAGE_RULEKEEPER = `dsh-rulekeeper ${packageVersion() ?? '(version unknown)'}
 用法:
   dsh-rulekeeper init    [--project <dir>]                     建立两处落点 + config.json（默认 mode=observe）
   dsh-rulekeeper check   --landing <dir> [--project <dir>]     自检：账本/落点可信性（doctor）+ 计数

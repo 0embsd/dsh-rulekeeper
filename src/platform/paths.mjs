@@ -6,7 +6,7 @@
 //
 // 归属：core 模块（与 ledger/rules/io 同层）。零依赖：只用 node:*。
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +23,23 @@ import { fileURLToPath } from 'node:url';
  */
 export function packageRoot() {
   return dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+}
+
+/**
+ * **本包版本串**（唯一来源 = `package.json` 的 `version`）。
+ *
+ * 为什么要有它（2026-09-23，为"从 GitHub 装"做准备时发现）：`src/cli.mjs` 的 `--help` 抬头曾经
+ * **写死** `dsh-rulekeeper 0.1.0`，与 `package.json` 是两份 —— 一发布就会对不上（本仓已记过多次
+ * "同一件事实两处各写一份 ⇒ 必然漂移"）。现在读一份，读不到时**如实返回 null**，由调用方决定
+ * 怎么显示（绝不编一个版本号出来）。
+ */
+export function packageVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(join(packageRoot(), 'package.json'), 'utf8'));
+    return typeof pkg?.version === 'string' && pkg.version.trim() !== '' ? pkg.version.trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Windows 长路径前缀 `\\?\`（大小写无关的 `\\?\` 形式） */

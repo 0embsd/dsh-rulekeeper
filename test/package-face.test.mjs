@@ -23,7 +23,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import entry, { resolveDshRoot, TOOL_PREFIX } from '../index.js';
@@ -97,9 +97,49 @@ test('红态: 清单指向不存在的 patch 文件 → 判据必须能发现（
   const bad = { ...manifest, dsh: { bundle: { patch: './nope.patch.yml' } }, files: ['bin/'] };
   const findings = [];
   const patch = bad.dsh?.bundle?.patch;
-  if (typeof patch !== 'string') findings.push('NO_PATCH_FIELD');
+  if (typeof patch !== 'string') findings.push('NO_PATCH_FILE');
   else if (!existsSync(join(PKG, patch))) findings.push('PATCH_FILE_MISSING');
   if (!Array.isArray(bad.files) || !bad.files.includes('index.js')) findings.push('FILES_WHITELIST_MISSING_ENTRY');
   assert.deepEqual(findings, ['PATCH_FILE_MISSING', 'FILES_WHITELIST_MISSING_ENTRY'], '坏清单必须被抓到');
+});
+
+// ── 判据（2026-09-23 新增）：**装上之后判据真能跑** ────────────────────────────────────
+// 现场：`files` 白名单只有 `index.js/src/bin/...`，而 `scripts/checkers/**` 与两个样本目录
+// **都不在里面** ⇒ `npm pack` / 从 GitHub 装上之后：所有 spec 命令指不到脚本、所有红/绿样本不存在
+// ⇒ 判据全部跑不起来。旧判据只核了"入口 + patch 在不在"，**核不到这一层**（"发布面 ≠ 入口面"）。
+// npm 语义：`files` 里的目录条目包含整棵子树；`package.json`/`README`/`LICENSE` 恒含。
+function coveredByFiles(rel, files) {
+  const norm = String(rel).replace(/\\/g, '/').replace(/^\.\//, '');
+  return (Array.isArray(files) ? files : []).some((entry) => {
+    const e = String(entry).replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '');
+    return e !== '' && (norm === e || norm.startsWith(`${e}/`));
+  });
+}
+
+test('green: 发布包里必须带齐"判据运行时真正要读的东西"（spec / 检查器脚本 / 红绿样本）', () => {
+  const specDir = join(PKG, 'scripts', 'checkers');
+  const specs = readdirSync(specDir).filter((f) => f.endsWith('.spec.json'));
+  assert.ok(specs.length >= 9, `spec 数量异常（实得 ${specs.length}）`);
+  const missing = [];
+  // ① 规格文件与它们命令指向的脚本（同一个目录，故核目录覆盖即可）
+  if (!coveredByFiles('scripts/checkers/', manifest.files)) missing.push('scripts/checkers/');
+  // ② 每份规格的红/绿样本目录
+  for (const f of specs) {
+    const spec = JSON.parse(readFileSync(join(specDir, f), 'utf8'));
+    for (const key of ['redSample', 'greenSample']) {
+      const src = spec[key]?.source;
+      if (typeof src !== 'string' || src === '' || src === '.') continue;   // `.` = 被检对象自身，无需打包
+      if (!coveredByFiles(src, manifest.files)) missing.push(`${src}  (${f} 的 ${key})`);
+    }
+  }
+  assert.deepEqual(missing, [], `发布包会丢掉判据运行时必需的文件 ⇒ 装上跑不起来：\n  ${missing.join('\n  ')}`);
+});
+
+test('红态: 上述判据对"白名单缺样本/缺脚本"必须能发现（非恒真）', () => {
+  const badFiles = ['index.js', 'src/', 'bin/'];   // = 修复前的真实形态
+  assert.equal(coveredByFiles('scripts/checkers/', badFiles), false, '缺 scripts/ 必须判不覆盖');
+  assert.equal(coveredByFiles('test-fixtures/red', badFiles), false, '缺样本目录必须判不覆盖');
+  assert.equal(coveredByFiles('scripts/checkers/gate.mjs', ['scripts/']), true, '目录条目要按子树覆盖');
+  assert.equal(coveredByFiles('index.js', badFiles), true);
 });
 
