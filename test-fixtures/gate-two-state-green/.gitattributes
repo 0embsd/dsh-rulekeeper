@@ -1,0 +1,9 @@
+# dsh-rulekeeper · 行尾与文本属性纪律（两态样本 · 绿态）
+#
+# 与仓库根的同名文件同口径：hook 脚本**没有扩展名**，按扩展名钉 LF 的规则管不到它们
+# ⇒ 必须显式钉 `.githooks/*`，否则 `core.autocrlf=true` 的机器一 checkout 就把 `#!/bin/sh`
+# 变成 `#!/bin/sh\r`，POSIX 上闸门直接变哑（L648 的原形）。
+.githooks/*  text eol=lf
+
+# 样本自身的文本文件也钉住（`*.md` 与本 README）
+*.md  text eol=lf

@@ -1,0 +1,5 @@
+#!/bin/sh
+# dsh-rulekeeper git hook (pre-commit) —— 两态样本（绿态）：**变量间接调用**形态
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 1
+runner="$root/.dsh-ai/rulekeeper/hook.mjs"
+exec node "$runner" pre-commit "$@"
