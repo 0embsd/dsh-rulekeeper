@@ -1386,9 +1386,30 @@ export function ciGate(opts = {}) {
   // 而生成器已改成 autoCiBinRel() ⇒ "写的是 A、查的是 B"，CI_BIN_MISSING 假红（2026-09-16 实测）。
   const binRel = toPosix(String(opts.binPath ?? autoCiBinRel(repoRoot)));
   const binAbs = isAbsolute(binRel) ? binRel : join(repoRoot, binRel);
-  const binPresent = existsSync(binAbs);
-  const binSha256 = binPresent ? sha256OfFile(binAbs) : null;
-  if (!binPresent) {
+  // 工具仓形态（`--tool-repo`）：入口**不在被治理仓里**，而在那份独立 checkout 的工具仓里。
+  //   实测（真机验收）：不认这一层就会对"内容完全自洽"的工作流报 `CI_BIN_MISSING`（假红）——
+  //   而本地根本不会有那份 checkout（它是 CI 步骤产物，且被 gitignore）。
+  //   口径：① 被治理仓里真有 ⇒ 照旧核；② 否则若工具仓 checkout 在场 ⇒ 拿它核；
+  //   ③ 两者都不在且是工具仓形态 ⇒ **不报 CI_BIN_MISSING**（本地不该有；改记一条如实的信息行，
+  //      并**核生成物里的路径形态**：必须恰好是 `<TOOL_CHECKOUT_DIR>/<binRel>` 一次前缀）。
+  const toolDirAbs = join(repoRoot, TOOL_CHECKOUT_DIR);
+  const toolBinRel = `${TOOL_CHECKOUT_DIR}/${binRel}`;
+  const toolBinAbs = join(repoRoot, toolBinRel);
+  const toolForm = typeof opts.toolRepo === 'string' && opts.toolRepo.trim() !== '';
+  let checkedBinRel = binRel;
+  let binPresent = existsSync(binAbs);
+  if (!binPresent && existsSync(toolBinAbs)) { binPresent = true; checkedBinRel = toolBinRel; }
+  const binAbsEff = binPresent && checkedBinRel === toolBinRel ? toolBinAbs : binAbs;
+  const binSha256 = binPresent ? sha256OfFile(binAbsEff) : null;
+  if (!binPresent && toolForm) {
+    // 本地没有工具仓 checkout 属**预期**（那是 CI 的 checkout 步骤产物）⇒ 不判红，但把事实说出来。
+    findings.push({
+      code: 'CI_BIN_IN_TOOL_CHECKOUT',
+      message: `入口在被治理仓里不存在（本形态下预期）：${binRel} —— CI 会先把工具仓 checkout 到 `
+        + `${TOOL_CHECKOUT_DIR}/，再跑 ${toPosix(toolBinRel)}。本地缺该目录不算缺陷。`,
+      advisory: true,
+    });
+  } else if (!binPresent) {
     findings.push({
       code: 'CI_BIN_MISSING',
       message: `工作流指向的入口不存在: ${binRel} —— 这是**假 CI**（上机必然报错 = 等于没有门；与 LF-520 的"假安装"同族）`,
@@ -1397,7 +1418,7 @@ export function ciGate(opts = {}) {
     // 内容固定是**可选**的：钉死在生成物里会随每次改代码立即失配（假红），所以只提供显式 `--bin-sha`
     findings.push({
       code: 'CI_BIN_SHA_MISMATCH',
-      message: `入口内容与 --bin-sha 不符: ${binRel} expected=${opts.binSha.trim().slice(0, 12)} actual=${binSha256.slice(0, 12)}`,
+      message: `入口内容与 --bin-sha 不符: ${checkedBinRel} expected=${opts.binSha.trim().slice(0, 12)} actual=${binSha256.slice(0, 12)}`,
     });
   }
   const workflow = verifyCiWorkflow({
@@ -1424,13 +1445,29 @@ export function ciGate(opts = {}) {
     });
   }
 
+  // ④b 工具仓形态下：**入口路径形态**必须恰好一次前缀（真机验收抓到过"两次前缀"的路径重复）
+  if (toolForm && workflow.present === true) {
+    const text = readCiWorkflow(repoRoot, workflow.rel).text ?? '';
+    const expect = toPosix(toolBinRel);
+    const occ = text.split(expect).length - 1;
+    if (occ !== 1) {
+      findings.push({
+        code: 'CI_BIN_PATH_SHAPE',
+        message: `工具仓形态下入口路径应恰好出现 1 次（${expect}），实际 ${occ} 次 —— `
+          + '常见成因是前缀被加了两次（生成侧与调用侧各加一次）',
+      });
+    }
+  }
+
   // ⑤ 不许冒充远端
   if (opts.claimRemote === true) {
     findings.push({ code: 'CI_REMOTE_CLAIM_UNSUPPORTED', message: `不许声称远端 CI 已执行：${CI_CARRIER_REASON}` });
   }
 
   return {
-    ok: findings.length === 0,
+    // advisory 不算失败（同 `verifyHooks` 的口径）：`CI_BIN_IN_TOOL_CHECKOUT` 是**如实告知**
+    //   "入口在 CI 才存在"，不是缺陷 —— 与"钩子名核得过、runner 指纹本机无从核"同族。
+    ok: findings.filter((f) => f.advisory !== true).length === 0,
     isGit: recon.isGit === true,
     scope: range ?? (all ? 'all' : 'range'),
     protection: { present: protection.present, source: protection.source, patterns: protection.patterns.length, matchedFiles },
