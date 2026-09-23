@@ -425,7 +425,9 @@ export function runSelfcheck(argv, io = defaultIo(), env = process.env) {
     io.out(line(`RK_SELFCHECK_LANDING_PROJECT=${report.dirs.project}`));
     io.out(line(`RK_SELFCHECK_LANDING_USER=${report.dirs.user}`));
     for (const f of report.findings) io.out(line(`FINDING ${f.code} ${f.msg}`));
-    io.out(line(`RK_SELFCHECK_FINDINGS=${report.findings.length}`));
+    // **提示面**（不是判据）：如实打印"缺了什么、缺了会怎样"，但**不参与 ok/rc**
+    for (const n of report.notes ?? []) io.out(line(`NOTE ${n}`));
+    io.out(line(`RK_SELFCHECK_FINDINGS=${report.findings.length} NOTES=${(report.notes ?? []).length}`));
   }
   io.out(resultLine('SELFCHECK', report.ok));
   return report.ok ? RC.OK : RC.FAIL;

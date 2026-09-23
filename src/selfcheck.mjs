@@ -298,10 +298,13 @@ export function scanPublicFacePaths(root, relPaths = [], opts = {}) {
 /**
  * @param {string} root dsh-rulekeeper 包根目录（含 package.json）
  * @param {{projectRoot?: string, env?: object}} [opts]
- * @returns {{ok: boolean, findings: {code: string, msg: string}[], dirs: object}}
+ * @returns {{ok: boolean, findings: {code: string, msg: string}[], dirs: object, notes: string[]}}
  */
 export function checkSkeleton(root, opts = {}) {
   const findings = [];
+  // **提示面**（≠ findings）：如实告知"缺了什么、缺了会怎样"，但**不判红**。
+  // 与 findings 分开是为了不削弱判据：提示进 notes，判据只认 findings（`ok` 只看 findings）。
+  const notes = [];
   const add = (code, msg) => findings.push({ code, msg });
 
   // ── S1 package.json ────────────────────────────────────────────────
@@ -335,13 +338,27 @@ export function checkSkeleton(root, opts = {}) {
   }
 
   // ── S3 两处落点 + config.json ──────────────────────────────────────
+  //
+  // ⚠ **用户级落点缺失不是"包坏了"**（2026-09-23 远端 CI 实测，v101 上定位）：
+  //   本检查此前无条件要求**两处**落点都在 ⇒ 在一台**没装过本包、没有 `~/.dsh`** 的干净机器上
+  //   （CI runner / 新装机 / 新用户）恒判 `S3_LANDING_MISSING user ...` ⇒ 任何"在本包上跑 selfcheck
+  //   必须绿"的用例都红（即 CI 上 S9/S10 两条用例）。而我本机一直绿，只因**这台机器上恰好有**
+  //   `~/.dsh/lessonflow`（历史遗留）——「本机绿、干净环境红」这类假绿又一次。
+  //   口径：用户级落点是**全局能力**（跨项目纪律的归集处），不是包的必需件；项目落点已在时，
+  //   它缺失只提示（并说明缺了会怎样），**不判红**。两处都缺才是真问题。
   const dirs = landingDirs({
     projectRoot: opts.projectRoot ?? process.cwd(),
     env: opts.env ?? process.env,
   });
+  const projectLandingPresent = existsSync(dirs.project);
   for (const [scope, dir] of Object.entries(dirs)) {
     if (!existsSync(dir)) {
-      add('S3_LANDING_MISSING', `${scope} 落点不存在: ${dir}`);
+      if (scope === 'user' && projectLandingPresent) {
+        notes.push(`用户级落点不存在（${dir}）⇒ 本包自检仍可过；但"跨项目的全局纪律"没有归集处，`
+          + '装本包作为全局规则源时需先 `rk init`（缺了它不影响项目级门禁）');
+      } else {
+        add('S3_LANDING_MISSING', `${scope} 落点不存在: ${dir}`);
+      }
       continue;
     }
     const cfg = join(dir, CONFIG_FILE);
@@ -561,5 +578,5 @@ export function checkSkeleton(root, opts = {}) {
     }
   }
 
-  return { ok: findings.length === 0, findings, dirs };
+  return { ok: findings.length === 0, findings, dirs, notes };
 }
