@@ -6,10 +6,11 @@
 // 注意：node --test 会把 test/ 下所有 .mjs 当测试文件加载，故本文件（无 test() 调用）会以
 // "0 个用例的文件"出现，属预期；fixtures 一律用非 .mjs 扩展名（见 test/fixtures/README 说明）。
 
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 
 import { resolveUserLanding } from '../../src/platform/paths.mjs';
@@ -45,6 +46,28 @@ export function copyPkg(label) {
 
 export function readFixture(name) {
   return readFileSync(join(FIXTURES_DIR, name), 'utf8');
+}
+
+/**
+ * **可用的 POSIX shell（bash）探测**——单一来源，别在用例里各写一份。
+ *
+ * 为什么需要（2026-09-23 在 Linux 上实测）：三个用例文件此前写成
+ * `process.platform === 'win32' ? 'C:\\Program Files\\Git\\bin\\bash.exe' : 'bash'` 再
+ * `existsSync(GIT_BASH)` 判可用性 —— 在 POSIX 上那是**相对路径**、永远不存在 ⇒ 真 Linux 载体上
+ * 白跳 4 条用例（理由写着"本机没有可用的 bash"），而 `/usr/bin/bash` 明明在。
+ * 「存在性检查必须用**可解析的路径**」是同族坑（本仓已记过多次）。
+ *
+ * @returns {{ok: boolean, shell: string, reason: string|null}}
+ */
+export function posixShell() {
+  const candidates = process.platform === 'win32'
+    ? ['C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files (x86)\\Git\\bin\\bash.exe']
+    : ['/bin/bash', '/usr/bin/bash', '/bin/sh', '/usr/bin/sh'];
+  for (const c of candidates) if (existsSync(c)) return { ok: true, shell: c, reason: null };
+  // 再退一步：交给 PATH 解析（`spawnSync` 自己会找）
+  const probe = spawnSync('bash', ['-c', 'exit 0'], { encoding: 'utf8' });
+  if (probe.status === 0) return { ok: true, shell: 'bash', reason: null };
+  return { ok: false, shell: '', reason: `本机没有可用的 POSIX shell（试过 ${candidates.join(' | ')} 与 PATH 里的 bash）` };
 }
 
 /**

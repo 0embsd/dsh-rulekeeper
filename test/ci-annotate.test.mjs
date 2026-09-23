@@ -15,11 +15,15 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CI_TEST_SCRIPT, ciWorkflowYaml } from '../src/gate.mjs';
+import { posixShell } from './helpers/sandbox.mjs';
 
-// 与 hooks.test.mjs 同一纪律：Windows 走 Git Bash（POSIX sh 语义），没有就显式跳过并说明
-const GIT_BASH = process.platform === 'win32' ? 'C:\\Program Files\\Git\\bin\\bash.exe' : 'bash';
-const HAS_BASH = existsSync(GIT_BASH);
-const skipNoBash = HAS_BASH ? false : `本机没有可用的 bash（${GIT_BASH}）⇒ 跳过`;
+// 与 hooks.test.mjs 同一纪律：Windows 走 Git Bash（POSIX sh 语义），没有就显式跳过并说明。
+// ⚠ 探测走**共享助手**（2026-09-23 Linux 实测）：此前写成 `existsSync('bash')` ⇒ POSIX 上那是
+// 相对路径、永远不存在 ⇒ 真 Linux 载体上白跳 4 条（而 /usr/bin/bash 明明在）。
+const SHELL = posixShell();
+const GIT_BASH = SHELL.shell;
+const HAS_BASH = SHELL.ok;
+const skipNoBash = HAS_BASH ? false : SHELL.reason;
 
 const PKG = join(import.meta.dirname, '..');
 

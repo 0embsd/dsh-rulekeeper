@@ -19,13 +19,16 @@ import { runGate, runRulekeeper } from '../src/cli.mjs';
 import { commitMessageGate, refsGate } from '../src/gate.mjs';
 import { DEFAULT_HOOKS_PATH, HOOK_RUNNER, hookScriptContent, installHooks, verifyHooks } from '../src/hooks.mjs';
 import { RC } from '../src/rc.mjs';
-import { cleanupAll, tempDir } from './helpers/sandbox.mjs';
+import { cleanupAll, posixShell, tempDir } from './helpers/sandbox.mjs';
 
 test.after(cleanupAll);
 
 const PKG = join(import.meta.dirname, '..');
 const GATE_BIN = join(PKG, 'bin', 'rk-gate.mjs');
-const GIT_BASH = process.platform === 'win32' ? 'C:\\Program Files\\Git\\bin\\bash.exe' : 'bash';
+// ⚠ 探测走**共享助手**（2026-09-23 Linux 实测）：此前用 `existsSync('bash')` ⇒ POSIX 上那是相对
+// 路径、永远不存在 ⇒ 真 Linux 载体上白跳 4 条（而 /usr/bin/bash 明明在）。
+const SHELL = posixShell();
+const GIT_BASH = SHELL.shell;
 
 function capture(fn) {
   let out = '';
@@ -218,7 +221,7 @@ test('判据: 生成物是"可携带"的 —— hook 脚本 LF 无 BOM、不含�
   }
 });
 
-test('判据: hook 脚本是合法 POSIX sh（Git Bash `bash -n`）；无 bash 时显式跳过并说明', { skip: !existsSync(GIT_BASH) ? '本机没有 Git Bash（C:\\Program Files\\Git\\bin\\bash.exe）' : false }, () => {
+test('判据: hook 脚本是合法 POSIX sh（Git Bash `bash -n`）；无 bash 时显式跳过并说明', { skip: !SHELL.ok ? SHELL.reason : false }, () => {
   const root = gitRepo('hk-posix');
   installHooks({ repoRoot: root, gateBin: GATE_BIN });
   const r = spawnSync(GIT_BASH, ['-n', join(root, DEFAULT_HOOKS_PATH, 'pre-commit').replace(/\\/g, '/')], { encoding: 'utf8' });
