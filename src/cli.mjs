@@ -3829,7 +3829,25 @@ export function runSnap(argv, io = defaultIo(), env = process.env) {
     io.err(`rk-snap: --landing 不是已存在目录: ${landing}\n`);
     return RC.USAGE;
   }
-  const projectRoot = flags.project === undefined ? projectRootOfLanding(landing) : resolve(flags.project);
+  // 2026-09-23 修（**CI 的 Linux/macOS 作业抓到**，本地 Windows 全绿 ⇒ 平台相关）：
+  //   原口径 `flags.project ?? projectRootOfLanding(landing)`，而 `projectRootOfLanding` 推不出时**退回 cwd**
+  //   ⇒ 在"落点在别处、cwd 不是项目根"的调用形态下（消费方仓 / 夹具仓，都是真实用法）路径换算不出来
+  //   ⇒ `normalizeTarget` 落到"原样**绝对**路径" ⇒ 索引里存绝对路径，而闸门与保护面 glob 都按
+  //   **项目相对**比 ⇒ 受保护文件"永远没留证"（GATE_WRITE_NO_SNAPSHOT）、提交被拒。
+  //   现口径（三条，按可靠性排序）：
+  //     ① 显式 `--project` 优先；
+  //     ② **从落点路径字符串推**：落点形如 `<项目>/.dsh-ai/<名字>` ⇒ 去掉最后两段就是项目根。
+  //        这是**纯字符串**运算，与平台/软链/cwd 全无关（本轮 Linux 上失效的正是"靠 cwd 兜底"那条）；
+  //     ③ 再退回 `projectRootOfLanding`（它本身有 cwd 兜底）。
+  //   ⚠ 仍**不声称**处理了符号链接差异：`normalizeTarget` 不做 realpath 归一，若 `--path` 与
+  //     `--landing` 来自不同软链形态（macOS `/tmp` → `/private/tmp`），索引仍可能落绝对路径 ——
+  //     那是**已知缺口**，本轮不在这里顺手改（它要动 `normalizeTarget`，影响面更大）。
+  const landingParts = String(resolve(flags.landing)).split(/[\\/]/).filter((s) => s !== '');
+  const projectRoot = flags.project !== undefined
+    ? resolve(flags.project)
+    : (landingParts.length >= 2 && landingParts[landingParts.length - 2] === '.dsh-ai'
+      ? (resolve(landingParts.slice(0, -2).join('/')) || projectRootOfLanding(landing))
+      : projectRootOfLanding(landing));
   let now = new Date();
   if (flags.now !== undefined) {
     now = new Date(flags.now);
