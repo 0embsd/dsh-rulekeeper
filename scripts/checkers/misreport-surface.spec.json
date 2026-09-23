@@ -19,7 +19,8 @@
   },
   "greenSample": {
     "kind": "tree",
-    "source": "."
+    "source": "test-fixtures/misreport-green",
+    "note": "入库夹具（2026-09-23 改，原为 \".\"）。原口径是**活体工作区** ⇒ 有在途改动时绿样本身份漂移，实测报过一次 MISREPORT_GREEN_FALSE_POSITIVE（并发写落点期间），复跑即绿 —— 规则 42 同族：样本必须随时可重跑。⚠ 夹具**必须让本检查器真能核出结论**：第一版夹具是个空绑定落点，于是它在本检查器的绿样本上 exit=2（'没有可核对象'）⇒ 误报面判红（rk-effect verify 当场抓到）。现在的夹具自带一条 checker 绑定 + 假检查器（按样本目录里有无 FAIL 决定退出码）+ 红/绿两棵样本树 ⇒ 它在本检查器的绿样本上得出\"0 违规\"。命令相对**夹具根**（本检查器用 cwd=被检根 跑命令，这点是实测出来的）。"
   },
   "checkerVersion": "misreport-surface@1",
   "timeoutMs": 30000,

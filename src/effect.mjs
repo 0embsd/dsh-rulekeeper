@@ -1144,6 +1144,15 @@ export function planActivation(opts = {}) {
     // 而"判据漂移"正是这套机制最不该有的东西。引用形态：`<包名>/<包内路径>`，在本包内直接跑
     // （自举：本仓用自己包里的检查器）时也支持 `@self/<包内路径>`。
     // fail-closed：解析不到就**不落盘**（不许退回"写个不存在的路径"）。
+    // ⚠ **不要把解析结果写进 `command`**（2026-09-23 实测的真缺口，P14/缺口① 的根因）：
+    // 旧实现把 `resolved`（绝对路径）塞回 `command[1]` ⇒ 任何带 `checkerRef` 的绑定**落盘时必然是绝对路径**
+    // ⇒ ① 换机/CI 上那条绝对路径不存在 ⇒ 读侧 `resolveCheckerCommand` 回退 `checkerRef` ⇒ 解析到
+    // **运行环境里装的那份包**（不是本仓这份）⇒ "被验证的载体 ≠ 被批准的载体"（规则 41 同族）；
+    // ② 与本仓既有口径不一致（没写 `checkerRef` 的绑定是相对路径）。
+    // 现在：**fail-closed 检查照做**（解析不到就不落盘），但 `command` **保持规格里的可携带形态**
+    // （项目根相对路径）—— 读侧本来就会在运行时按 `checkerRef` 解析（`src/checker.mjs:227`），
+    // 所以这既不削弱任何检查，又让绑定跨机可用。
+    // 已存在的历史绑定（旧写侧烙的绝对路径）不受影响；读侧的 `existsSync` 分支保证它们在原机照旧工作。
     let command = spec.command;
     let viaCheckerRef = null;
     if (spec.checkerRef !== undefined && spec.checkerRef !== null) {
@@ -1162,7 +1171,6 @@ export function planActivation(opts = {}) {
       if (resolved === null) {
         return { ok: false, findings: [{ code: 'EFFECT_CHECKER_REF_MISSING', message: `${rule}: checkerRef=${refText} 解析不到（试过 ${candidates.map((p) => toPosix(p)).join(' | ')}）⇒ 拒绝落盘（不写"指向不存在对象"的判据）` }], candidate: null, additions: null };
       }
-      command = [command[0], resolved, ...command.slice(2)];
       viaCheckerRef = refText;
     }
     const binding = {

@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "project": "misreport-green",
+  "protected_paths": [],
+  "gates": [],
+  "checks": [
+    {
+      "kind": "checker",
+      "rule": "FIXTURE-RULE",
+      "spec": "fake.spec.json",
+      "command": ["node", "fake-checker.mjs"],
+      "expectRed": { "exitCode": 1 },
+      "expectGreen": { "exitCode": 0 },
+      "redSample": { "kind": "tree", "source": "test-fixtures/misreport-green/test-fixtures/fake/red" },
+      "greenSample": { "kind": "tree", "source": "test-fixtures/misreport-green/test-fixtures/fake/green" }
+    }
+  ],
+  "inject": []
+}

@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "rule": "FIXTURE-RULE",
+  "command": ["node", "fake-checker.mjs"],
+  "expectRed": { "exitCode": 1 },
+  "expectGreen": { "exitCode": 0 },
+  "redSample": { "kind": "tree", "source": "test-fixtures/misreport-green/test-fixtures/fake/red" },
+  "greenSample": { "kind": "tree", "source": "test-fixtures/misreport-green/test-fixtures/fake/green" },
+  "checkerVersion": "fixture@1",
+  "timeoutMs": 20000,
+  "notes": "夹具规格：让 misreport-surface 在自己的绿样本上**真能核出结论**（而不是'没有可核对象' ⇒ exit 2）。红树含 FAIL 文件 ⇒ 假检查器 exit 1；绿树不含 ⇒ exit 0。"
+}

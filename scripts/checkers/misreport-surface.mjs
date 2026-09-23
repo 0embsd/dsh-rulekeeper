@@ -53,6 +53,15 @@ try {
 }
 const bindings = (Array.isArray(parsed?.checks) ? parsed.checks : [])
   .filter((c) => c !== null && typeof c === 'object' && c.kind === 'checker');
+// **没有可核的绑定 ≠ 通过**（2026-09-23 实测，本检查器自己的 fail-open）：
+// 原实现只在"没有 rules.json"时 exit 2；而"有 rules.json、但 `checks` 里没有 checker 绑定"会走完空循环、
+// 打印 `MISREPORT_VIOLATIONS=0` 并 **exit 0** ⇒ 把"我没核任何东西"报告成"误报面通过"。
+// 这是本仓反复记过的同族（规则 41：判据要落在对象自己的事实上；"没检查"绝不能是绿）。
+// 修法：零绑定 ⇒ 如实说清"为什么没核" + exit 2（不适用），与"没有被测对象"同一档。
+if (bindings.length === 0) {
+  console.log(`MISREPORT_BINDINGS=none（${rulesRel} 里没有 kind=checker 的绑定 ⇒ 本检查器无可核对象，不适用）`);
+  process.exit(2);
+}
 
 /**
  * 解析"项目根相对路径"：先按被检根，再按 `cwd`。

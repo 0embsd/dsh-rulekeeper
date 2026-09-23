@@ -57,7 +57,7 @@ function writeSpec(project, rel, overrides = {}) {
   return rel;
 }
 
-test('判据①: checkerRef=@self/<包内路径> ⇒ 落成绝对路径 command（免项目内副本）', () => {
+test('判据①: checkerRef=@self/<包内路径> ⇒ 可携带命令 + 保留 checkerRef（解析交给读侧）', () => {
   const project = tempDir('ref-ok');
   // 样本目录要真的存在（plan 会核样本），故指向包内已入库的红样本
   const specRel = writeSpec(project, 'specs/ok.spec.json', {
@@ -75,8 +75,19 @@ test('判据①: checkerRef=@self/<包内路径> ⇒ 落成绝对路径 command�
   assert.equal(out.kind, 'activate-checker');
   const cmd = out.additions.binding.command;
   assert.equal(cmd[0], 'node');
-  assert.equal(cmd[1], join(PKG_ROOT, 'scripts', 'checkers', 'gate-finality.mjs'), '必须解析成包内检查器的绝对路径');
-  assert.equal(out.additions.binding.checkerRef, '@self/scripts/checkers/gate-finality.mjs');
+  // **2026-09-23 更正**：原断言是"必须解析成包内检查器的绝对路径"（旧写侧把解析结果烙进 `command`）。
+  // 那个口径有两个实测问题：① 换机/CI 上该路径不存在 ⇒ 读侧回退 `checkerRef` ⇒ 解析到**运行环境里
+  // 装的那份包**（"被验证的载体 ≠ 被批准的载体"）；② 与本仓"没写 checkerRef 的绑定用相对路径"不一致。
+  // 现在：`command` 保持**规格里的可携带形态**（就是 `writeSpec` 写进去的占位），解析交给读侧。
+  assert.deepEqual(cmd, ['node', 'scripts/checkers/does-not-matter.mjs'],
+    'command 必须原样保留规格里的**项目根相对**形态（不烙本机绝对路径）');
+  assert.equal(cmd[1].startsWith('/') || /^[A-Za-z]:/.test(cmd[1]), false, '不得含绝对路径');
+  assert.equal(out.additions.binding.checkerRef, '@self/scripts/checkers/gate-finality.mjs',
+    'checkerRef 必须保留（读侧靠它跨机/跨仓解析）');
+  // 反事实：读侧在"项目内指不到"时必须能靠 checkerRef 解析到包内文件（这是可携带性的**依据**）
+  const r = resolveCheckerCommand(out.additions.binding, project);
+  assert.equal(r.resolvedVia !== null, true, '项目内没有该脚本 ⇒ 读侧必须回退 checkerRef');
+  assert.equal(r.command[1], join(PKG_ROOT, 'scripts', 'checkers', 'gate-finality.mjs'));
 });
 
 test('判据②: 引用不存在的包/路径 ⇒ EFFECT_CHECKER_REF_MISSING（fail-closed，不落盘）', () => {

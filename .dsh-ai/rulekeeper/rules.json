@@ -153,42 +153,12 @@
     },
     {
       "kind": "checker",
-      "rule": "CAT-VERIFY",
-      "spec": "scripts/checkers/misreport-surface.spec.json",
-      "checkerRef": "@self/scripts/checkers/misreport-surface.mjs",
-      "command": [
-        "node",
-        "D:\\opt\\dsh-rulekeeper\\scripts\\checkers\\misreport-surface.mjs"
-      ],
-      "expectRed": {
-        "exitCode": 1
-      },
-      "expectGreen": {
-        "exitCode": 0
-      },
-      "redSample": {
-        "kind": "tree",
-        "source": "test-fixtures/misreport-red",
-        "note": "被检对象=该目录（内含 .dsh-ai/rulekeeper/rules.json 与 fake.spec.json）；假检查器恒定非 0 ⇒ A 判据必红"
-      },
-      "greenSample": {
-        "kind": "tree",
-        "source": "."
-      },
-      "checkerVersion": "misreport-surface@1",
-      "timeoutMs": 30000,
-      "notes": "误报面：对 rules.json 里每条 checker 绑定核「绿样本上必须 exit=0 / 红样本上必须非 0 / 必须写明绿样本」。规则 53 的机械面。递归护栏：命令里含本检查器的绑定跳过并计数（不判自己）。",
-      "proposal": "P-20260921-cat-verify-misreport",
-      "activatedAt": "2026-09-21T16:06:45.180Z"
-    },
-    {
-      "kind": "checker",
       "rule": "CAT-CODE",
       "spec": "scripts/checkers/byte-discipline.spec.json",
       "checkerRef": "@self/scripts/checkers/byte-discipline.mjs",
       "command": [
         "node",
-        "D:\\opt\\dsh-rulekeeper\\scripts\\checkers\\byte-discipline.mjs"
+        "scripts/checkers/byte-discipline.mjs"
       ],
       "expectRed": {
         "exitCode": 1
@@ -207,8 +177,39 @@
       "checkerVersion": "byte-discipline@2",
       "timeoutMs": 30000,
       "notes": "字节纪律（L648/L653 的通用化，五项）：①混行尾（同一文件既有 CRLF 又有裸 LF，**按字节计数**判）②.gitattributes 有却零钉规则 ③.githooks 未被显式钉 eol=lf ④UTF-8 BOM ⑤结尾无换行。夹具面 test-fixtures/** 豁免（那里放故意违规的样本）。**扫描面** = `git ls-files`（只判已跟踪文件；未跟踪/被忽略的本地文件只计数，见 `UNTRACKED_FILES`）。",
-      "proposal": "P-20260922-cat-code-byte-scan-face",
-      "activatedAt": "2026-09-22T05:56:41.974Z"
+      "proposal": "P-20260923-cat-code-portable-command",
+      "activatedAt": "2026-09-23T08:41:19.291Z"
+    },
+    {
+      "kind": "checker",
+      "rule": "CAT-VERIFY",
+      "spec": "scripts/checkers/misreport-surface.spec.json",
+      "checkerRef": "@self/scripts/checkers/misreport-surface.mjs",
+      "command": [
+        "node",
+        "scripts/checkers/misreport-surface.mjs"
+      ],
+      "expectRed": {
+        "exitCode": 1
+      },
+      "expectGreen": {
+        "exitCode": 0
+      },
+      "redSample": {
+        "kind": "tree",
+        "source": "test-fixtures/misreport-red",
+        "note": "被检对象=该目录（内含 .dsh-ai/rulekeeper/rules.json 与 fake.spec.json）；假检查器恒定非 0 ⇒ A 判据必红"
+      },
+      "greenSample": {
+        "kind": "tree",
+        "source": "test-fixtures/misreport-green",
+        "note": "入库夹具（2026-09-23 改，原为 \".\"）。原口径是**活体工作区** ⇒ 有在途改动时绿样本身份漂移，实测报过一次 MISREPORT_GREEN_FALSE_POSITIVE（并发写落点期间），复跑即绿 —— 规则 42 同族：样本必须随时可重跑。⚠ 夹具**必须让本检查器真能核出结论**：第一版夹具是个空绑定落点，于是它在本检查器的绿样本上 exit=2（'没有可核对象'）⇒ 误报面判红（rk-effect verify 当场抓到）。现在的夹具自带一条 checker 绑定 + 假检查器（按样本目录里有无 FAIL 决定退出码）+ 红/绿两棵样本树 ⇒ 它在本检查器的绿样本上得出\"0 违规\"。命令相对**夹具根**（本检查器用 cwd=被检根 跑命令，这点是实测出来的）。"
+      },
+      "checkerVersion": "misreport-surface@1",
+      "timeoutMs": 30000,
+      "notes": "误报面：对 rules.json 里每条 checker 绑定核「绿样本上必须 exit=0 / 红样本上必须非 0 / 必须写明绿样本」。规则 53 的机械面。递归护栏：命令里含本检查器的绑定跳过并计数（不判自己）。",
+      "proposal": "P-20260923-cat-verify-green-fixture",
+      "activatedAt": "2026-09-23T08:44:30.694Z"
     }
   ],
   "inject": []
