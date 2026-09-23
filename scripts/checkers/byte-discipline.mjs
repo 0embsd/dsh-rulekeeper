@@ -45,8 +45,19 @@ import { spawnSync } from 'node:child_process';
 const root = process.env.RULEKEEPER_SAMPLE_DIR ?? process.cwd();
 // `test-fixtures/` 是**夹具面**：那里放的是"故意违规的样本"（红态证据），不是被检对象。
 // 与 `rk-selfcheck` 的 S8 对夹具的豁免同一口径；被检对象是仓库自己的文件。
-const SKIP_DIRS = new Set(['.git', 'node_modules', '.dsh-ai', 'test-fixtures', '.eval', '.codewhale', 'dist', 'build', 'coverage']);
-const TEXT_EXT = /\.(?:mjs|cjs|js|ts|md|json|jsonl|ps1|psm1|txt|yml|yaml|sh|go|py)$/i;
+//
+// **夹具面是"口径"，必须可见（P12）**：这条约定既写进 spec/README，也在**每次输出的首行**打印出来
+// —— 否则"样本放错目录"时人只会看到"仓库违规"，查不出是**被跳过的面**没覆盖到它。
+const FIXTURE_DIRS = Object.freeze(['test-fixtures']);
+const SKIP_DIRS = new Set(['.git', 'node_modules', '.dsh-ai', ...FIXTURE_DIRS, '.eval', '.codewhale', 'dist', 'build', 'coverage']);
+// ── **文本面 = 非二进制**（P18，2026-09-23）────────────────────────────────────────
+// 原实现用扩展名白名单（`TEXT_EXT`）判定"要不要看这个文件的字节"，后果实测：**本仓自己的
+// `.gitattributes`（无扩展名）从来没被看过**，而它当时正带着 1 处 CRLF（`bytes=1439 crlf=1 lf=21`）；
+// 被治理项目独立复测也报"真混行尾 4 处、判据只报 1"。根因：**判据面被一个与事实无关的清单决定**。
+// 现口径：**非二进制即文本** —— 二进制仍按 NUL / 替换字符跳过并**计数**（`SKIPPED_BINARY`）。
+// 误报面（规则 53 第①步，先量后写）：本仓 279 文件新纳入 11 个，其中混行尾**恰 1 个**（就是上面那个
+// `.gitattributes`）；被治理仓 1292 文件新纳入 84 个，混行尾 **0**（其 `test-fixtures/` 属夹具面，
+// 按上面口径跳过）。⇒ 新口径只多报了**真实违规**，没有制造噪声。
 /** D/E（BOM / 结尾换行）的默认扫描面 —— 只扫"仓库自己手写的面"，生成态不在内（见文件头 D/E 说明） */
 const DEFAULT_STRICT_DIRS = Object.freeze(['src', 'scripts', 'bin', 'test', 'docs']);
 const strictDirs = (() => {
@@ -87,6 +98,8 @@ const noEol = [];
 let scanned = 0;
 let skippedBinary = 0;
 let skippedUntracked = 0;
+/** 被当夹具面跳过的目录（P12：跳过了什么、跳了多少文件，必须看得见） */
+const skippedFixtureDirs = [];
 // **扫描面**（2026-09-22，P10 第二段：他们实测检查器会扫到被 `.gitignore` 忽略的本地文件，
 // 于是"用它报的 list 当全集去迭代"一直在**比预期更大**的群体上打转）。
 // 默认 `tracked`（**只扫 git 跟踪的文件**）：字节纪律判的是"**入库内容**在各种检出上是否一致"，
@@ -112,7 +125,20 @@ const walk = (dir) => {
     return;
   }
   for (const name of names) {
-    if (SKIP_DIRS.has(name)) continue;
+    // **夹具面**：跳过，但**逐目录计数**（P12：跳过面必须可见，否则"样本放错目录"查不出来）
+    if (SKIP_DIRS.has(name)) {
+      if (FIXTURE_DIRS.includes(name)) {
+        const full = join(dir, name);
+        let n = 0;
+        const count = (d) => {
+          let ents; try { ents = readdirSync(d, { withFileTypes: true }); } catch { return; }
+          for (const e of ents) { if (e.isDirectory()) count(join(d, e.name)); else n += 1; }
+        };
+        count(full);
+        skippedFixtureDirs.push({ rel: full.slice(root.length).replace(/^[\\/]/, '').split('\\').join('/'), files: n });
+      }
+      continue;
+    }
     const full = join(dir, name);
     // 嵌套仓/子模块不是本仓内容（`git ls-files` 也不会列它）
     if (existsSync(join(full, '.git'))) continue;
@@ -132,9 +158,9 @@ const walk = (dir) => {
     // 这样"检查器报的清单"就等于"仓库承诺面"，不再包含本地私有文件。
     // ⚠ 计数在**扩展名过滤之前**：`UNTRACKED_FILES` 才是"我到底少看了多少"的如实读数。
     if (trackedSet !== null && !trackedSet.has(rel)) { skippedUntracked += 1; continue; }
-    if (!TEXT_EXT.test(name)) continue;
     // 二进制判定（P10 实测的真实风险：`git ls-files` 没跟踪的 `.7z` 备份被当"文本"数行尾，
     // 若按文本"归一"会**损坏压缩包**）。判定 = NUL 字节或 UTF-8 解码出现替换字符。
+    // P18：**不再有扩展名白名单** —— 非二进制即文本（白名单实测漏掉了无扩展名的 `.gitattributes`）。
     const buf = readFileSync(full);
     if (buf.includes(0) || buf.toString('utf8').includes('\uFFFD')) { skippedBinary += 1; continue; }
     scanned += 1;
@@ -203,50 +229,72 @@ const eolPinnedInGit = (rel) => {
 /** 分诊结果：{ ref, hint }。ref 是**机器可判**的稳定 token（用例断言它，不断言散文字句） */
 const eolFixFor = (rel) => {
   const pinned = eolPinnedInGit(rel);
+  // ⚠ **两种"取回"分支都必须写"先删后取"**（独立复核 blocker，2026-09-23 实测）：
+  //   当 git 认为该文件**干净**（`git status --porcelain` 为空 —— 混行尾是随提交一起进来的那种），
+  //   单跑 `git restore -- <路径>` 会因"内容与索引一致"而**跳过重写** ⇒ 字节逐字不变、下一轮照报。
+  //   实测：`len=30 crlf=1 lf=3` → `git restore` → **仍是** `len=30 crlf=1 lf=3`（rc 判据仍 fail）；
+  //   删掉工作区文件再取回 ⇒ `len=29 crlf=0 lf=3`（转绿）。
+  //   本仓自己的用例原先只在"commit 之后才写混行尾"（那时 git 认为脏 ⇒ restore 真会重写）上测，
+  //   所以永远测不到这一形态 —— 现在两种形态都有用例。
+  const twoStep = (why) => `${why}⚠ **不要只跑 \`git restore\`**：当 git 认为该文件干净（\`git status --porcelain\` 对它是空的）时，`
+    + '\`git restore\` 会**跳过重写**、字节逐字不变（实测）。可靠做法是**先删后取**：'
+    + '① 删掉工作区文件（`Remove-Item` / `rm`）；② `git restore -- <路径>` 从索引重新物化。'
+    + '修完**逐字节回读**确认（数 CRLF 必须为 0），别只看退出码。';
+  /** **机器可判的步骤**（用例照它执行，不必解析中文散文）：汇总行会打 `EOL_FIX_STEPS=…` */
+  const STEP_GIZ = 'delete-then-restore';
+  const STEP_PIN = 'renormalize+delete-then-restore';
   if (pinned === true) {
     return {
       ref: 'git-restore',
-      hint: '该文件在 git 里已显式钉住行尾（`check-attr` 得到 `eol=lf` 或 `-text`）⇒ 混行尾只是**工作区**现象，'
-        + '`git restore -- <路径>` 即可回到纯 LF（零内容改动、无需提交）；修完**逐字节回读**确认（数 CRLF 必须为 0），别只看退出码。',
+      steps: STEP_GIZ,
+      hint: twoStep('该文件在 git 里已显式钉住行尾（`check-attr` 得到 `eol=lf` 或 `-text`）⇒ 混行尾是**工作区**现象，'
+        + '从索引重新物化即可回到纯 LF（零内容改动、无需提交）。'),
     };
   }
   if (pinned === false) {
     const ac = autocrlfOf();
     // 实测口径（本轮四轮受控实验，逐字节回读）：
-    //   `autocrlf=input` ⇒ `git restore` 得到**纯 LF**（29B/0 CRLF）⇒ 真修（不要凭"input 只在提交侧转换"推理，实测过才写）。
+    //   `autocrlf=input` ⇒ 取回得到**纯 LF**（29B/0 CRLF）⇒ 真修（不要凭"input 只在提交侧转换"推理，实测过才写）。
     //   `autocrlf=false`/未设 ⇒ 取回即 blob 字节（纯 LF）⇒ 真修。
     //   `autocrlf=true`（含系统级配置带来的 true）⇒ 取回被 smudge 成整份 CRLF ⇒ **治不了**。
     const converting = ac === 'true';
     if (!converting) {
       return {
         ref: 'git-restore',
-        hint: '该文件在 git 里**没有被显式钉住行尾**，但本仓取回工作区不做 CRLF 转换'
-          + `（\`core.autocrlf\` = ${ac === '' ? '未设' : ac}，实测其取回结果是纯 LF）`
-          + '⇒ `git restore -- <路径>` 能把工作区刷回 blob 里的纯 LF；修完**逐字节回读**确认（CRLF 必须为 0）。'
+        steps: STEP_GIZ,
+        hint: twoStep('该文件在 git 里**没有被显式钉住行尾**，但本仓取回工作区不做 CRLF 转换'
+          + `（\`core.autocrlf\` = ${ac === '' ? '未设' : ac}，实测其取回结果是纯 LF）⇒ 从索引重新物化即可。`)
           + '⚠ 这条修法**依赖机器配置**：换一台 `core.autocrlf=true` 的机器（或 CI/对端 checkout）同一文件会再混一次 ——'
           + '要断根，仍应在 `.gitattributes` 里显式钉住它。',
       };
     }
     return {
       ref: 'pin-then-renormalize',
+      steps: STEP_PIN,
       hint: `该文件在 git 里**没有被显式钉住行尾**（\`check-attr\` 得到 text/eol 都是 unspecified），且本仓 \`core.autocrlf=${ac}\` `
-        + '⇒ 此时取回工作区会被转成 CRLF，`git restore -- <路径>` **不解决问题**（实测刷成整份 CRLF；先删后取也一样）——'
-        + '按序做三步：① `.gitattributes` 补一行钉住它（如 `* text eol=lf` 或该路径的专属规则）；'
+        + '⇒ 此时取回工作区会被转成 CRLF，`git restore -- <路径>` **不解决问题**（实测刷成整份 CRLF）——'
+        + '按序做三步：① `.gitattributes` 补一行钉住它（如 `* text eol=lf` 或该路径的专属规则；'
+        + '⚠ 若要钉 `.gitattributes` **自己**，模式必须写带前导点的全名 `.gitattributes`，'
+        + '`gitattributes`/`*.gitattributes` 实测**静默不生效**）；'
         + '② `git add --renormalize -- <路径>`（按新属性重写索引）；③ 删掉工作区文件再 `git restore -- <路径>`。'
         + '最后**逐字节回读**：CRLF 必须为 0（`BYTE_EOL_INCONSISTENT` 的根因是"没声明"，只刷工作区治不了复发）。',
     };
   }
   return {
     ref: 'probe-unavailable',
+    steps: 'unknown(probe-unavailable)',
     hint: '本仓 git 属性探测不可用（不在 git 仓内或 git 不可执行）⇒ 这里给不出分诊结论：'
-      + '先确认该文件在 `.gitattributes` 里有没有显式钉住行尾，再选 `git restore` 或"先补声明再 renormalize"。'
+      + '先确认该文件在 `.gitattributes` 里有没有显式钉住行尾，再选"先删后取"或"先补声明再 renormalize"。'
       + '无论走哪条，修完都要**逐字节回读**。',
   };
 };
 
 // **全量收集**（不再 slice）：逐条推入 hits；截断交给末行的 PRINTED/TOTAL 显式交代。
+/** 本批混行尾文件所需的**修复步骤集合**（机器可判；用例照它执行，不必解析中文散文） */
+const fixSteps = new Set();
 for (const rel of mixed) {
   const fix = eolFixFor(rel);
+  fixSteps.add(fix.steps ?? 'unknown');
   hits.push(`BYTE_EOL_INCONSISTENT: ${rel} 同一文件里既有 CRLF 又有裸 LF（混行尾：肉眼看不见，逐字比对会假红）。`
     + `修复 [EOL_FIX=${fix.ref}] ${fix.hint}`
     + '确实要改内容时才动字节，**别对二进制做行尾手术**。');
@@ -261,6 +309,26 @@ for (const rel of noEol) {
 // ── B. 有 .gitattributes 却一行钉规则都没有 ─────────────────────────────────────
 if (existsSync(gaPath) && pins.length === 0) {
   hits.push('BYTE_NOT_DECLARED: .gitattributes 存在但**没有任何**钉行尾形态的行（text / -text / eol=lf）⇒ 行尾完全交给机器默认配置');
+}
+
+// ── B2. **属性表自己**必须被钉住（P18 实测新增）────────────────────────────────────
+// 为什么单列一条：`git check-attr` 的回读证明，若 `.gitattributes` 自己没被钉住，`core.autocrlf=true`
+// 的机器 checkout 会把它**整份转成 CRLF** ⇒ 每一行变成 `*.mjs text eol=lf\r` ⇒ 那些规则**全部失效**
+// （属性值带 `\r` 不再是 `eol=lf`）⇒ 全仓行尾又回到"靠机器配置"，而**没有任何信号**。
+// 本轮受控实验（6 组）另有一条硬事实：模式必须写**带前导点的全名**（或 `*`）才生效，
+// `gitattributes` / `*.gitattributes` / `/gitattributes` 三种写法**静默不生效**（与 .gitignore 直觉相反）。
+if (existsSync(gaPath)) {
+  const r = spawnSync('git', ['-c', 'core.quotePath=false', '-C', root, 'check-attr', 'text', 'eol', '--', '.gitattributes'], { encoding: 'utf8' });
+  if (r.status === 0 && typeof r.stdout === 'string' && r.stdout.trim() !== '') {
+    const vals = r.stdout.trim().split(/\r?\n/).map((l) => l.slice(l.lastIndexOf(':') + 1).trim().toLowerCase());
+    const pinnedAttr = vals[vals.length - 1] === 'lf' || vals[vals.length - 2] === 'unset' || vals[vals.length - 2] === 'false';
+    if (!pinnedAttr) {
+      hits.push('BYTE_GITATTRIBUTES_UNPINNED: `.gitattributes` **自己**没有被钉住行尾 ⇒ `core.autocrlf=true` 的机器上'
+        + '它会被整份转成 CRLF，而属性值带 `\\r` 会让**所有规则失效**（全仓又回到靠机器配置）。'
+        + '修法：在文件里加一行 `.gitattributes  text eol=lf` —— ⚠ 模式必须是**带前导点的全名**（或 `*`），'
+        + '写成 `gitattributes` / `*.gitattributes` / `/gitattributes` 实测**静默不生效**。');
+    }
+  }
 }
 
 // ── C. .githooks 存在但没显式钉（L648 的原形：无扩展名文件落进按扩展名钉的盲区）──
@@ -280,7 +348,12 @@ if (existsSync(hooksDir)) {
 // 二进制按 NUL/替换字符跳过并计数（不让行尾手术伤到压缩包）。
 console.log(`BYTE_DISCIPLINE_ROOT=${root.split('\\').join('/')} GITATTRIBUTES=${existsSync(gaPath) ? 'present' : 'absent'} PINS=${pins.length} HOOKS=${existsSync(hooksDir) ? 'present' : 'absent'} STRICT_DIRS=${strictDirs.join(',') || '(all)'}`);
 console.log(`BYTE_DISCIPLINE_SCOPE MODE=${scanModeEffective} INCLUDES_UNTRACKED=${scanModeEffective === 'tracked' ? 'no' : 'yes'} INCLUDES_GITIGNORED=${scanModeEffective === 'tracked' ? 'no' : 'yes'} UNTRACKED_FILES=${skippedUntracked} SKIPPED_BINARY=${skippedBinary} SCANNED=${scanned}`);
+// **夹具面口径打在输出里**（P12）：样本放错目录时，人能立刻看到"我把哪个目录当样本跳过了"。
+console.log(`BYTE_DISCIPLINE_FIXTURE_FACE dirs=${FIXTURE_DIRS.join(',')} skipped=${skippedFixtureDirs.map((d) => `${d.rel}(${d.files})`).join(',') || '(none)'}`);
 console.log(`BYTE_DISCIPLINE_COUNTS mixed=${mixed.length} bom=${boms.length} noeol=${noEol.length}`);
+// **修复步骤**（机器可判）：`none` = 没有混行尾要修；否则是**照做就能修好**的动作集合
+// （`delete-then-restore` / `renormalize+delete-then-restore`）—— 用例照它执行，不解析散文。
+console.log(`BYTE_DISCIPLINE_FIX_STEPS=${fixSteps.size === 0 ? 'none' : [...fixSteps].sort().join(';')}`);
 if (hits.length > 0) {
   console.log(`BYTE_DISCIPLINE_VIOLATIONS=${hits.length}`);
   // **全量打印**（P10：原先 slice 截断且顺序不稳 ⇒ "看到的 ≠ 全部"不可见，他们据此迭代改错 57 个文件）

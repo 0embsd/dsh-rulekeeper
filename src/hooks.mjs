@@ -243,6 +243,8 @@ export function installHooks(opts = {}) {
 
   const written = [];
   const skipped = [];
+  /** `--adopt-existing` 采纳的条目（登记现状、**不写内容**；与"本工具模板装出来的"区分开） */
+  const adopted = [];
   for (const name of names) {
     if (!KNOWN_HOOK_NAMES.includes(name)) return { ok: false, reasons: [`未知 hook 名 "${name}"（只支持 ${KNOWN_HOOK_NAMES.join(' / ')}）`], hooksPath, names: [...names] };
     const file = join(hooksDir, name);
@@ -255,7 +257,16 @@ export function installHooks(opts = {}) {
       // 于是"只想装另外几件"的人拿不到任何东西；改成跳过并记账后，`--names` 才能表达
       // "只装我要的那几件、别动我手写的那件"。要覆盖仍是显式 `--force`。
       if (current !== sha) {
-        skipped.push({ name, reason: `${hooksPath}/${name} 已存在且内容不同（跳过，未覆盖；要覆盖用 --force）`, sha256: current });
+        // `--adopt-existing`：**登记现状但不写内容**（P13 复核 blocker 的修法）。
+        // 为什么必须有这条路：手写钩子被 verify 判 `HOOK_MANIFEST_INCOMPLETE`（"不会被核"）时，
+        // 唯一被推荐的 `--force` 会把它覆盖成模板 —— 合法路径不存在，只剩违规路径（手改 hooks.json）。
+        // 采纳即把**当前字节**登记为新基线（`adopted: true` 标明来源），文件一个字节都不动。
+        if (opts.adoptExisting === true) {
+          written.push({ name, sha256: current, bytes: statSync(file).size, adopted: true });
+          adopted.push({ name, sha256: current });
+          continue;
+        }
+        skipped.push({ name, reason: `${hooksPath}/${name} 已存在且内容不同（跳过，未覆盖；要覆盖用 --force，要登记现状用 --adopt-existing）`, sha256: current });
         continue;
       }
     }
@@ -293,11 +304,27 @@ export function installHooks(opts = {}) {
     configValue = hooksPath;
     if (!r.ok) reasons.push(`git config core.hooksPath 设置失败: ${r.stderr || r.error || '(未知)'}`);
   }
+  // ── 清单**合并**（P13 复核 blocker，2026-09-23）─────────────────────────────────
+  // 现场：`install --names pre-commit` 之后再来一次 `install --names post-commit`，
+  // 原实现把清单直接写成"本批写的"，于是 pre-commit **从清单里消失**（磁盘上还在）⇒
+  // `hooks verify` 报 `HOOK_MANIFEST_INCOMPLETE`，而它给的修法 `install --force`
+  // **正好会把用户手写的钩子覆盖成模板**（"别覆盖我的手写件"换来一条会毁掉它的建议）。
+  // 现口径：`--names` 是**增量**语义 —— 本次没点名的、清单里已登记的条目**原样保留**。
+  const previousHooks = (() => {
+    try {
+      const old = JSON.parse(readFileSync(manifestPathOf(repoRoot), 'utf8'));
+      return old !== null && typeof old === 'object' && Array.isArray(old.hooks) ? old.hooks : [];
+    } catch { return []; }
+  })();
+  const writtenNames = new Set(written.map((h) => h.name));
+  const retained = previousHooks.filter((h) => h !== null && typeof h === 'object'
+    && typeof h.name === 'string' && !writtenNames.has(h.name));
+  const manifestHooks = [...written, ...retained];
   const manifest = {
     schema: 1,
     createdAt: now.toISOString(),
     hooksPath,
-    hooks: written,
+    hooks: manifestHooks,
     runner: { path: HOOK_RUNNER, sha256: runnerSha, bytes: Buffer.byteLength(runner, 'utf8') },
     // LF-810：卸载所需的**安装前状态**（"原值 + 本来有没有" + 我们到底改没改过 config）
     previous: { hooksPath: previous.hooksPath, existed: previous.existed === true },
@@ -312,6 +339,8 @@ export function installHooks(opts = {}) {
     hooksDir: toPosix(hooksDir),
     installed: written,
     skipped,
+    retained,
+    adopted,
     runnerSha,
     configSet,
     configValue,
@@ -380,7 +409,14 @@ export function verifyHooks(opts = {}) {
     findings.push({
       code: 'HOOK_MANIFEST_INCOMPLETE',
       message: `清单漏了磁盘上已有的钩子: ${unlisted.join(' / ')}（清单里只有 ${names.join(' / ') || '（空）'}）`
-        + ' ⇒ 这些钩子**不会被 verify 核**（被改坏也看不见）。修法：`rk-gate hooks install --force` 重写清单',
+        + ' ⇒ 这些钩子**不会被 verify 核**（被改坏也看不见）。'
+        + `修法：把这些名字**补进清单**：\`rk-gate hooks install --names ${[...names, ...unlisted].join(',')}\``
+        + '（`--names` 是**增量**语义，已登记条目会保留）。'
+        + '若其中某件是**你手写的**（内容 ≠ 本工具模板），它会因"不覆盖"而被跳过 —— '
+        + `那就用 \`rk-gate hooks install --names ${[...names, ...unlisted].join(',')} --adopt-existing\` `
+        + '**采纳现状**（只登记当前字节、**一个字节都不改**），这样它才会被 verify 核。'
+        + '⚠ **不要用 `--force`**：它会把磁盘上**内容不同**的钩子（含你手写的）覆盖成模板 —— '
+        + '那是以"清掉一条 finding"为代价毁掉项目自有门禁。',
     });
   }
   details.push({ key: 'HOOKS_ON_DISK', value: onDisk.length });

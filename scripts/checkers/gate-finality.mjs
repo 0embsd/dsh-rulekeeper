@@ -114,12 +114,21 @@ const WORD_BOUNDARY = '[\\s;&|"\'$}{()]';
  */
 function dispatchOf(text, name) {
   if (!HOOK_RUNNER_RE.test(text)) return { ok: false, kind: 'runner-missing' };
+  // **行级排除**（独立复核的 nit，实测可复现）：本名只出现在 `#` 注释行、或 `echo …` 提示串里
+  // ⇒ 那是说明文字，不是派发。复核给的复现：真把子命令装错成 `commit-msg`，再补一行
+  // `# this file is the pre-push wrapper` ⇒ 旧实现判绿（判别力被一行注释冲掉）。
+  const code = text.split(/\r?\n/).filter((line) => {
+    const l = line.trim();
+    if (l.startsWith('#')) return false;
+    if (/^echo\b/.test(l)) return false;
+    return true;
+  }).join('\n');
   const asWord = (t, n) => new RegExp(`(^|${WORD_BOUNDARY})${n}(?=$|${WORD_BOUNDARY})`, 'm').test(t);
-  if (asWord(text, name)) return { ok: true, kind: 'ok' };
+  if (asWord(code, name)) return { ok: true, kind: 'ok' };
   // ②b：名字经**简单变量**传递 —— 只在词边界上取值（不匹配 `probe.mjs` 里的片段）
   const VAR = '[A-Za-z_][A-Za-z0-9_]*';
   const literals = new Map();
-  for (const m of text.matchAll(new RegExp(`(?:^|\\n)[ \\t]*(?:export[ \\t]+)?(${VAR})=(?:"([^"\\n$]+)"|'([^'\\n]*)'|([^\\s;|&"'\\n]+))`, 'g'))) {
+  for (const m of code.matchAll(new RegExp(`(?:^|\\n)[ \\t]*(?:export[ \\t]+)?(${VAR})=(?:"([^"\\n$]+)"|'([^'\\n]*)'|([^\\s;|&"'\\n]+))`, 'g'))) {
     literals.set(m[1], m[2] ?? m[3] ?? m[4] ?? '');
   }
   const resolves = new Map();
@@ -135,8 +144,12 @@ function dispatchOf(text, name) {
     return out;
   };
   for (const key of literals.keys()) {
-    if (resolve(key) === name && asWord(text, `\\$${key}|\\$\\{${key}\\}`)) return { ok: true, kind: 'ok' };
+    if (resolve(key) === name && asWord(code, `\\$${key}|\\$\\{${key}\\}`)) return { ok: true, kind: 'ok' };
   }
+  // ②c：`"$(basename "$0")"` —— **教科书式的自命名**（hook 用文件名当子命令）。语义与真仓形态等价，
+  // 独立复核把它列为"未登记的合法写法"（旧实现 4/4 判红）。这里按"文件里确实出现该表达式"判绿；
+  // 它是否解析出**正确**名字由运行时保证 —— 本检查器只读文本，这一条是**近似**，如是标注。
+  if (/\$\(\s*basename\s+["']?\$0["']?\s*\)/.test(code)) return { ok: true, kind: 'ok-basename-self' };
   return { ok: false, kind: 'dispatch-missing' };
 }
 

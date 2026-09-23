@@ -182,7 +182,7 @@ test('判据⑨（P10）: 范围必须明示（非 git 仓 ⇒ 如实降级为�
 test('判据⑩: 默认只扫已跟踪文件；未跟踪/被忽略的违规文件不计入，但被计数（filesystem 模式才报）', () => {
   const dir = tempDir('byte-tracked-only');
   mkdirSync(join(dir, 'src'), { recursive: true });
-  writeFileSync(join(dir, '.gitattributes'), '*.txt text eol=lf\n', 'utf8');
+  writeFileSync(join(dir, '.gitattributes'), '*.txt text eol=lf\n.gitattributes text eol=lf\n', 'utf8');
   writeFileSync(join(dir, 'src', 'tracked.txt'), 'a\nb\n', 'utf8');
   gitInit(dir);
   // 入库之后才出现的本地草稿：被 `.gitignore` 吃掉 ⇒ **不在承诺面内**（模拟真实仓的 `docs/archive/**`）

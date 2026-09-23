@@ -1,5 +1,13 @@
 # dsh-rulekeeper · 行尾与文本属性纪律（LF-250/260 实测换来的）
 #
+# **本文件自己**也必须钉住（P18 实测：`gitattributes` 没有扩展名，按扩展名的规则管不到它；
+# 当时它自己就带着 1 处 CRLF，而旧的扩展名白名单让检查器**从来没看过它**）。
+# 模式写文件自己的名字即可：# 这一行会先被读到，再作用于本文件。
+# **本文件自己**也必须钉住。P18 实测：`.gitattributes` 没有扩展名，按扩展名的规则管不到它；当时它自己就带着 1 处 CRLF，而旧的扩展名白名单让检查器**从来没看过它**。
+# ⚠ 模式必须写**带前导点的全名**（或 `*`）：本仓的属性表按 basename 匹配，`gitattributes` / `*.gitattributes`
+# / `/gitattributes` 三种写法实测**静默不生效**（与 .gitignore 的直觉相反，6 组受控实验验证）。
+.gitattributes  text eol=lf
+#
 # 为什么必须有这个文件：`test/fixtures/expected/*.json` 是**逐字基准**，
 # 6 份基准与 7 个夹具都依赖"必须纯 LF"。在 autocrlf=true 的 Windows 机器上 checkout
 # 会把它们变成 CRLF → 逐字比对全红，而 TextDiff 肉眼看不出来（LF-250 真实踩过：

@@ -43,6 +43,21 @@ const PROSE_KEYWORD_RE = /(?:password|passwd|pwd|api[_-]?key|secret[_-]?key|acce
  * 这里只用它做"本条是否与它重叠"的判定（重叠 ⇒ 不重复报），口径漂移会导致漏报或重复报。
  */
 const STRICT_CRED_RE = /\b(?:ali[_-]?key|ali[_-]?secret|cf[_-]?token|aws_secret_access_key|api[_-]?key|password|passwd)\b\s*[:=]\s*['"][^'"]{8,}/i;
+/**
+ * 该值是不是**算法/编码/协议名**（而不是口令本值）。
+ * 独立复核实测：`密码是 sha256 哈希后的值` / `密码为 aes256 加密存储` 这种**正常技术文档句**
+ * 被散文判据判成硬编码口令（那批语料 50% 假阳）—— 它们恰好都"带数字"，骗过了"裸值必须含数字"那条线。
+ * 判据：形如 `<字母><数字>[位]` 的常见算法/编码名（sha1/sha256/base64/utf8/aes128/md5/argon2id…），
+ * 或**紧跟**「哈希/摘要/编码/加密/派生/算法/位数」等词的值（`sha256 哈希` 里的 `sha256` 已由前半覆盖）。
+ */
+function looksLikeAlgorithmName(value) {
+  const v = String(value).trim().toLowerCase();
+  if (v === '') return false;
+  // 常见算法/编码/字符集名（含版本数字），显式清单 —— 不做"看起来像"的启发式（本轮实测假阳教训）
+  if (/^(?:sha|md|aes|des|rsa|dsa|ecdsa|ed25519|hmac|crc|blake|argon|scrypt|pbkdf|bcrypt|chacha|base|utf|iso|tls|ssl|x509|jwt|totp|hotp)\d*[a-z0-9]*$/.test(v)) return true;
+  if (/^(?:base64url|utf8mb4|aes128|aes192|aes256|sha512|sha384|sha256|sha224|sha1|md5|argon2id|argon2i|argon2d)$/.test(v)) return true;
+  return false;
+}
 
 /**
  * **identity 类**：只在**公开仓**里才算泄漏 —— 它们的泄漏语义来自"这个仓的名字/编号不该对外出现"。
@@ -121,6 +136,11 @@ export const INFRA_PATTERNS = Object.freeze([
       if (/=\s*$/.test(tail.slice(0, Math.max(0, tail.lastIndexOf(value))))) return true;
       // ③ 值是**全大写标识符**（环境变量名，如 `apiKey = OPENAI_API_KEY`）⇒ 不是口令
       if (/^[A-Z][A-Z0-9_]*$/.test(value)) return true;
+      // ③b 值是**算法/编码/协议名**（`密码是 sha256 哈希后的值` / `密码为 aes256 加密存储`）⇒ 是散文
+      //     在讲"怎么存的"，不是口令本值。**独立复核（blocker）实测抓出来的 50% 量级假阳**：
+      //     官方 15 条负样本里没有一条是"算法名带数字"，而 `sha256`/`aes256`/`argon2id`/`base64`
+      //     恰好都满足第④条"裸值必须含数字"的写法 ⇒ 整类漏网，且会拦下讲口令哈希的正常文档提交。
+      if (looksLikeAlgorithmName(value)) return true;
       // ④ 散文里"关键词 + 是/为 + 单个普通小写词"（`密码是 restore` / `password 是 msmtp`）：
       //    裸值**必须含数字**（真口令通常带数字，普通词几乎不带）—— 本轮实测收窄出来的那条线。
       const quoted = /["'「『]/.test(s) && /["'」』]/.test(s);

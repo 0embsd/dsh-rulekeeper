@@ -144,6 +144,32 @@ test('P20⑤: 对照 —— 旧口径在"子命令本身是变量"的形态上�
   // 而新口径两种形态都判绿：这才是"容忍变量 ≠ 放弃判别力"
 });
 
+test('P20⑦: 判别力不得被注释/echo 里的整词冲掉（独立复核实测的绕过形态）', () => {
+  // 现场：真把子命令装错成 `commit-msg`，再补一行"说明性"文本提到本名 ⇒ 旧实现判绿。
+  const dir = makeTree('p20-comment-bypass', { 'pre-push': { sub: 'commit-msg' } });
+  // 在装错的那件里加注释与 echo 提示串（都是"提到本名"的合法装饰）
+  const file = join(dir, '.githooks', 'pre-push');
+  writeFileSync(file, `${readFileSync(file, 'utf8')}# this file is the pre-push wrapper\necho "usage: hook.mjs pre-push"\n`, 'utf8');
+  const res = exportTree(dir);
+  assert.equal(res.rc, 1, `装错就是装错，注释里的名字不算派发；out=${res.out}`);
+  assert.equal(dispatchOf(res.out)['pre-push'], 'dispatch-missing');
+  // 反向：**只有**注释/echo 提本名、真正派发也对的树必须仍判绿（不能把装饰当违规）
+  const okDir = makeTree('p20-comment-ok');
+  const okFile = join(okDir, '.githooks', 'pre-push');
+  writeFileSync(okFile, `${readFileSync(okFile, 'utf8')}# pre-push wrapper\necho "usage: hook.mjs pre-push"\n`, 'utf8');
+  const okRes = exportTree(okDir);
+  assert.equal(okRes.rc, 0, `装饰不得让正当写法判红；out=${okRes.out}`);
+});
+
+test('P20⑧: `"$(basename "$0")"` 自命名写法（教科书式）必须判绿', () => {
+  const dir = makeTree('p20-basename-self', Object.fromEntries(EXPECTED.map((n) => [n, {
+    sub: '"$(basename "$0")"',
+  }])));
+  const res = exportTree(dir);
+  assert.equal(res.rc, 0, `合法自命名写法不得判红（旧实现 4/4 判 red）；out=${res.out}`);
+  assert.equal(dispatchOf(res.out)['pre-commit'], 'ok-basename-self', '分诊要如实标明是哪一种等价形态');
+});
+
 test('P20⑥: 真仓四件 hook 判绿，且分诊读数逐件如实打印', () => {
   const res = spawnSync(process.execPath, [CHECKER], { cwd: PKG_ROOT, encoding: 'utf8' });
   assert.equal(res.status, 0, `真仓必须绿；out=${res.stdout}`);

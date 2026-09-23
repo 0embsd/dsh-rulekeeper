@@ -105,6 +105,73 @@ test('P13④: 不给 `--names` ⇒ 默认四件（老形态不破）', () => {
   assert.match(r.out, /RK_GATE_HOOKS_INSTALLED=4/);
 });
 
+// ── P13 复核 blocker（2026-09-23）：**`--names` 是增量**，不许把已登记条目从清单里挤掉 ────────────
+// 现场：`install --names pre-commit` 之后再来一次 `install --names post-commit`，原实现把清单直接
+// 写成"本批写的" ⇒ pre-commit 从清单消失（磁盘还在）⇒ verify 报 `HOOK_MANIFEST_INCOMPLETE`，
+// 而它给的修法 `install --force` **正好会覆盖用户手写的钩子**。
+test('P13⑥: `--names` 增量安装：第二次不许把第一次的清单条目挤掉', () => {
+  const root = gitRepo('p13-incremental');
+  const first = capture((io) => runRulekeeper(['gate', 'hooks', 'install', '--repo', root, '--no-config',
+    '--names', 'pre-commit'], io, {}));
+  assert.equal(first.rc, RC.OK, first.err);
+  const second = capture((io) => runRulekeeper(['gate', 'hooks', 'install', '--repo', root, '--no-config',
+    '--names', 'post-commit'], io, {}));
+  assert.equal(second.rc, RC.OK, second.err);
+  assert.match(second.out, /RK_GATE_HOOKS_RETAINED=1/, `必须如实报告"保留了 1 条已登记条目"；out=${second.out}`);
+  assert.match(second.out, /HOOK retained pre-commit/);
+  const manifest = JSON.parse(readFileSync(join(root, '.dsh-ai', 'rulekeeper', 'hooks.json'), 'utf8'));
+  assert.deepEqual(manifest.hooks.map((h) => h.name).sort(), ['post-commit', 'pre-commit'],
+    '清单必须是两次安装的并集（增量语义）');
+  // 清单完整 ⇒ verify 不该再报 HOOK_MANIFEST_INCOMPLETE
+  const v = verifyHooks({ repoRoot: root, hooksPath: DEFAULT_HOOKS_PATH });
+  assert.equal(v.findings.some((f) => f.code === 'HOOK_MANIFEST_INCOMPLETE'), false,
+    `增量安装后清单应完整；findings=${JSON.stringify(v.findings.map((f) => f.code))}`);
+});
+
+test('P13⑦: 手写钩子有合法重录通路 `--adopt-existing`（登记现状、字节不变）', () => {
+  const root = gitRepo('p13-adopt');
+  mkdirSync(join(root, DEFAULT_HOOKS_PATH), { recursive: true });
+  const handWritten = '#!/bin/sh\n# 项目自有 pre-push\necho mine\n';
+  writeFileSync(join(root, DEFAULT_HOOKS_PATH, 'pre-push'), handWritten, 'utf8');
+  const before = readFileSync(join(root, DEFAULT_HOOKS_PATH, 'pre-push'), 'utf8');
+
+  // 不带 --adopt-existing：跳过，清单里没有它 ⇒ verify 报"不会被核"
+  const plain = capture((io) => runRulekeeper(['gate', 'hooks', 'install', '--repo', root, '--no-config',
+    '--names', 'pre-commit,pre-push'], io, {}));
+  assert.equal(plain.rc, RC.OK);
+  assert.match(plain.out, /RK_GATE_HOOKS_SKIPPED=1/);
+  assert.equal(verifyHooks({ repoRoot: root }).findings.some((f) => f.code === 'HOOK_MANIFEST_INCOMPLETE'), true,
+    '未被登记的手写钩子必须被指出"不会被核"（这是要治的 finding）');
+
+  // 带 --adopt-existing：登记现状、**字节不变**、finding 消失
+  const adopted = capture((io) => runRulekeeper(['gate', 'hooks', 'install', '--repo', root, '--no-config',
+    '--names', 'pre-commit,pre-push', '--adopt-existing'], io, {}));
+  assert.equal(adopted.rc, RC.OK, adopted.err);
+  assert.match(adopted.out, /RK_GATE_HOOKS_ADOPTED=1/);
+  assert.match(adopted.out, /HOOK adopted pre-push/);
+  assert.equal(readFileSync(join(root, DEFAULT_HOOKS_PATH, 'pre-push'), 'utf8'), before,
+    '采纳**不得**改一个字节（它只登记现状）');
+  const manifest = JSON.parse(readFileSync(join(root, '.dsh-ai', 'rulekeeper', 'hooks.json'), 'utf8'));
+  const entry = manifest.hooks.find((h) => h.name === 'pre-push');
+  assert.equal(entry.adopted, true, '清单里必须标明这条是"采纳现状"而不是"模板装出来的"');
+  assert.equal(verifyHooks({ repoRoot: root }).findings.some((f) => f.code === 'HOOK_MANIFEST_INCOMPLETE'), false,
+    '采纳之后清单完整 ⇒ finding 必须消失');
+});
+
+test('P13⑧: `HOOK_MANIFEST_INCOMPLETE` 的修法建议**不得推荐**用 `--force`（它会覆盖手写件）', () => {
+  const root = gitRepo('p13-guidance');
+  mkdirSync(join(root, DEFAULT_HOOKS_PATH), { recursive: true });
+  writeFileSync(join(root, DEFAULT_HOOKS_PATH, 'pre-push'), '#!/bin/sh\nexit 0\n', 'utf8');
+  installHooks({ repoRoot: root, gateBin: GATE_BIN, setConfig: false, names: ['pre-commit'] });
+  const f = verifyHooks({ repoRoot: root }).findings.find((x) => x.code === 'HOOK_MANIFEST_INCOMPLETE');
+  assert.ok(f !== undefined, '应当报清单不完整');
+  // 断言形态：修法段里不许出现"install --force"（推荐语），但**允许**"不要用 --force"这类反向自曝。
+  assert.doesNotMatch(f.message, /install --force/, '修法不许推荐 `install --force`（它会把用户手写的钩子覆盖成模板）');
+  assert.match(f.message, /不要用 `--force`/, '必须明说为什么不能用它（否则读者仍会去用）');
+  assert.match(f.message, /--names/, '应当给出增量补录的合法路径');
+  assert.match(f.message, /--adopt-existing|采纳/, '手写件另有合法路径（登记现状而不写内容）');
+});
+
 test('P13⑤: 跳过之后 verify 不把"我没装的那件"报成被改坏，但漏登记仍要如实指出', () => {
   const root = gitRepo('p13-verify');
   mkdirSync(join(root, DEFAULT_HOOKS_PATH), { recursive: true });

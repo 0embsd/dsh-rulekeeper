@@ -139,7 +139,7 @@ export const USAGE_GATE = `用法: rk-gate write [--project <项目根>] [--land
        rk-gate close [--project <项目根>] [--landing <落点>] [--hit "<纪律>=<拦住它的机制>"]... [--none] [--batch <名>]
                      [--evidence <路径>]... [--declaration <实证.json>] [--now <ISO>] [--json]
        rk-gate hooks verify  [--repo <仓库根>] [--hooks-path <.githooks>] [--json]
-       rk-gate hooks install [--repo <仓库根>] [--hooks-path <.githooks>] [--names <a,b>] [--force] [--no-config] [--json]
+       rk-gate hooks install [--repo <仓库根>] [--hooks-path <.githooks>] [--names <a,b>] [--force] [--adopt-existing] [--no-config] [--json]
        rk-gate hooks uninstall [--repo <仓库根>] [--json]
 
 write = 写入侧对账（LF-530，**不依赖 git**）：受保护文件的「当前 sha256」必须等于「最新留证基线」
@@ -2006,7 +2006,7 @@ export function runGateHooks(argv, io = defaultIo(), env = process.env) {
   try {
     flags = scanFlags(rest, {
       '--repo': 'string', '--hooks-path': 'string', '--force': 'boolean', '--no-config': 'boolean',
-      '--names': 'string', '--json': 'boolean', '--help': 'boolean',
+      '--names': 'string', '--adopt-existing': 'boolean', '--json': 'boolean', '--help': 'boolean',
     });
   } catch (err) {
     if (err instanceof UsageError) {
@@ -2049,6 +2049,7 @@ export function runGateHooks(argv, io = defaultIo(), env = process.env) {
       gateBin: join(PKG_ROOT, 'bin', 'rk-gate.mjs'),
       names,
       force: flags.force === true,
+      adoptExisting: flags['adopt-existing'] === true,
       setConfig: flags['no-config'] !== true,
     });
     if (flags.json === true) {
@@ -2068,10 +2069,13 @@ export function runGateHooks(argv, io = defaultIo(), env = process.env) {
     io.out(line(`RK_GATE_HOOKS_NAMES=${(r.names ?? []).join(',')}`));
     io.out(line(`RK_GATE_HOOKS_INSTALLED=${(r.installed ?? []).length}`));
     io.out(line(`RK_GATE_HOOKS_SKIPPED=${(r.skipped ?? []).length}`));
+    io.out(line(`RK_GATE_HOOKS_ADOPTED=${(r.adopted ?? []).length}`));
+    io.out(line(`RK_GATE_HOOKS_RETAINED=${(r.retained ?? []).length}`));
     io.out(line(`RK_GATE_HOOKS_CONFIG_SET=${r.configSet === true}`));
     io.out(line(`RK_GATE_HOOKS_RUNNER_SHA256=${short(r.runnerSha)}`));
-    for (const h of r.installed ?? []) io.out(line(`HOOK installed ${h.name} sha256=${short(h.sha256)} bytes=${h.bytes}`));
+    for (const h of r.installed ?? []) io.out(line(`HOOK ${h.adopted === true ? 'adopted' : 'installed'} ${h.name} sha256=${short(h.sha256)} bytes=${h.bytes}`));
     for (const s of r.skipped ?? []) io.out(line(`HOOK skipped ${s.name} sha256=${short(s.sha256)}: ${s.reason}`));
+    for (const h of r.retained ?? []) io.out(line(`HOOK retained ${h.name} sha256=${short(h.sha256)}（本次没点名，清单里保留）`));
     for (const reason of r.reasons ?? []) io.out(line(`FINDING GATE_HOOKS_INSTALL ${reason}`));
     io.out(resultLine('GATE_HOOKS', r.ok));
     return r.ok ? RC.OK : RC.FAIL;

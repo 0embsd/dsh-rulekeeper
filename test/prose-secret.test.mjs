@@ -50,6 +50,15 @@ const NEGATIVE = Object.freeze([
   ['真值在别处', ['secret_key ', 'is', ' set via env'].join('')],
   ['字段赋值', 'resolver.password = env.PASSWORD'],
   ['尖括号占位', 'password: <YOUR_TOKEN_HERE>'],
+  // ⚠ 这一组是**独立复核的 blocker 抓出来的**（2026-09-23）：讲"口令怎么存"的正常技术文档句。
+  // 它们全都"带数字"，恰好满足"裸值必须含数字"那条线 ⇒ 曾被判成硬编码口令（那批语料 50% 假阳），
+  // 而且会穿透到 pre-commit 拦下正常提交。**必须留在负样本里**，否则下一次收紧还会漏掉这一整类。
+  ['算法名 sha256', ['数据库存储：', KW_ZH, SEP_IS, ' ', 'sha256 哈希后的值'].join('')],
+  ['算法名 aes256', ['', KW_ZH, '为', ' ', 'aes256 加密存储'].join('')],
+  ['编码名 base64', [KW_KOU, '是', ' ', 'base64 编码后传输'].join('')],
+  ['派生算法 argon2id', ['口令经 ', 'argon2id 派生'].join('')],
+  ['摘要 md5', ['', KW_ZH, SEP_IS, ' ', 'md5 摘要'].join('')],
+  ['字符集 utf8', [KW_ZH, SEP_IS, ' ', 'utf8 编码'].join('')],
 ]);
 
 test('P15①: 散文形态的硬编码口令**必红**（中文/英文/赋值三种写法）', () => {
@@ -75,6 +84,19 @@ test('P15②: 正常散文/代码**不得红**，且打印误报面读数（规�
   // **误报面读数**（不是断言句，是证据行）：负样本总数与误报数都必须打出来
   console.log(`PROSE_FP_MEASURED negatives=${NEGATIVE.length} false_positives=${falsePositives.length}`);
   assert.deepEqual(falsePositives, [], `正常散文不得触发散文判据：${JSON.stringify(falsePositives)}`);
+});
+
+test('P15②b: "口令怎么存的"整类不得红（算法/编码名），而"口令是什么"必须红', () => {
+  // 这一条是独立复核 blocker 的回归钉：算法名带数字 ⇒ 曾被误判（那批语料 50% 假阳）。
+  const algorithms = ['sha256 哈希后的值', 'aes256 加密存储', 'base64 编码后传输', 'argon2id 派生', 'md5 摘要'];
+  for (const tail of algorithms) {
+    const text = [KW_ZH, SEP_IS, ' ', tail].join('');
+    const hits = findPublicFaceLeaks('AUTH.md', text, PATTERNS).filter((h) => h.why.includes('散文'));
+    assert.equal(hits.length, 0, `"怎么存的"不得判红：${JSON.stringify(text)} -> ${JSON.stringify(hits)}`);
+  }
+  // 同一条判据在"口令是什么"上必须仍然开火（收紧不得把判别力一起收掉）
+  const real = [KW_ZH, SEP_IS, ' ', 'P@ssw0rd!2026'].join('');
+  assert.equal(findPublicFaceLeaks('AUTH.md', real, PATTERNS).some((h) => h.why.includes('散文')), true);
 });
 
 test('P15③: 真仓自扫的**误报面读数**必须为 0（判据先在真仓量过才写）', () => {
