@@ -35,7 +35,9 @@ test('rk-snap take：cwd 不是项目根时，索引里也必须落**项目相�
   const rows = readFileSync(join(landing, 'snapshots', 'index.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   assert.equal(rows.length, 1);
   const stored = posix(rows[0].path);
-  assert.equal(stored, 'readme.md', `索引里必须落项目相对路径（实得 ${stored}；本仓口径经 pathKey 归一为小写，既有索引行同形）`);
+  // 失败信息里带上 CLI 的诊断读数（**不当断言**，只进失败信息）：CI 上一眼就能看出是哪一步错
+  const diag = ['RK_SNAP_PROJECT', 'RK_SNAP_TARGET'].map((k) => `${k}=${(r.stdout.split('\n').find((l) => l.startsWith(`${k}=`)) ?? '(缺)').slice(k.length + 1)}`).join(' ');
+  assert.equal(stored, 'readme.md', `索引里必须落项目相对路径（实得 ${stored}；${diag}）`);
   assert.equal(/^[A-Za-z]:\//.test(stored), false, '索引里不得出现盘符绝对路径');
   assert.equal(rows[0].backup.includes('/backups/'), true, '备份路径仍要登记（相对或绝对都要在落点下）');
   assert.doesNotMatch(posix(rows[0].backup), /^[A-Za-z]:\//, `备份也必须相对化：${rows[0].backup}`);

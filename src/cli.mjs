@@ -694,6 +694,25 @@ function snapTargetPath(rawPath, projectRoot) {
   return isAbsolute(rawPath) ? resolve(rawPath) : resolve(projectRoot, rawPath);
 }
 
+/**
+ * `rk-snap --path` 的**项目相对段**（2026-09-23 补，用于直接喂给快照层的 `relPath`）。
+ * 为什么单独一条：`takeSnapshot` 内部用 `normalizeTarget` 推相对段，而在 CI 的 Ubuntu/macOS 上
+ * 那一步会返回**绝对路径**（落点在别处、cwd 不是项目根时）⇒ 索引落绝对路径 ⇒ 闸门判"从未留证"。
+ * 这里不再依赖归一，而是**按结构算**：落点 `<项目>/.dsh-ai/<名字>` 上溯两级即项目根，
+ * 目标文件相对项目根的那一段用 `relativeToRoot` 求；求不出就返回 `undefined`（调用方不传 relPath）。
+ */
+function snapRelTargetPath(rawPath, projectRoot, landing) {
+  const target = snapTargetPath(rawPath, projectRoot);
+  let under = relativeToRoot(target, projectRoot);
+  if (under === null || under === '.') {
+    // 兜底：某些平台上 `projectRoot` 与 `target` 的拼写不同源（软链）⇒ 用落点反推
+    const viaLanding = relativeToRoot(target, landing);
+    const landingRel = relativeToRoot(landing, projectRoot);
+    under = (viaLanding !== null && viaLanding !== '.' && landingRel !== null) ? `${landingRel}/${viaLanding}` : null;
+  }
+  return under === null || under === '.' ? undefined : under;
+}
+
 /** `rk-shell-revert snapshot|verify|restore|drop`（LF-830） */
 export function runShellRevert(argv, io = defaultIo(), env = process.env) {
   const command = argv[0] ?? null;
@@ -3829,26 +3848,22 @@ export function runSnap(argv, io = defaultIo(), env = process.env) {
     io.err(`rk-snap: --landing 不是已存在目录: ${landing}\n`);
     return RC.USAGE;
   }
-  // 2026-09-23 修（**CI 的 Linux/macOS 作业抓到**，本地 Windows 全绿 ⇒ 平台相关）：
-  //   原口径 `flags.project ?? projectRootOfLanding(landing)`，推不出时**退回 cwd** ⇒ 在"落点在别处、
-  //   cwd 不是项目根"的调用形态下（消费方仓 / 夹具仓，都是真实用法）路径换算不出来 ⇒
-  //   `normalizeTarget` 落到"原样**绝对**路径" ⇒ 索引里存绝对路径，而闸门与保护面 glob 都按
+  // 2026-09-23 修（**CI 的 Ubuntu/macOS 作业抓到**，本地 Windows 全绿 ⇒ 平台相关）：
+  //   原口径 `flags.project ?? projectRootOfLanding(landing)`（推不出退回 cwd）在"落点在别处、
+  //   cwd 不是项目根"的调用形态下（消费方仓 / 夹具仓，都是真实用法）取不到正确的根
+  //   ⇒ `normalizeTarget` 落到"原样**绝对**路径" ⇒ 索引里存绝对路径，而闸门与保护面 glob 都按
   //   **项目相对**比 ⇒ 受保护文件"永远没留证"（GATE_WRITE_NO_SNAPSHOT）、提交被拒。
-  //   现口径（按可靠性排序，**全部是纯字符串运算**，不依赖 cwd/平台/文件系统解析）：
-  //     ① 显式 `--project` 优先；
-  //     ② `relativeToRoot(landing, cwd)` —— 落点在 cwd 之内时直接拿到相对段（不重新拼绝对路径，
-  //        避免"拼出来的根"与"解析出来的文件"在大小写/软链/分隔符上出现差异）；
-  //     ③ 从落点路径字符串推：落点形如 `<项目>/.dsh-ai/<名字>` ⇒ 去掉最后两段；
-  //     ④ 再退回 `projectRootOfLanding`（它本身有 cwd 兜底）。
+  //   三轮试错后的结论：**别推**——落点的**结构**就是 `<项目>/.dsh-ai/<名字>`，
+  //   项目根 = 落点上溯**两级**（这是"单一权威源"，不是启发式；推不出时退回旧行为并说明）。
   const landingParts = String(resolve(flags.landing)).split(/[\\/]/).filter((s) => s !== '');
-  const landingUnderCwd = relativeToRoot(landing, process.cwd());
+  const structuralRoot = landingParts.length >= 2 && landingParts[landingParts.length - 2] === '.dsh-ai'
+    ? resolve(landingParts.slice(0, -2).join('/'))
+    : null;
   const projectRoot = flags.project !== undefined
     ? resolve(flags.project)
-    : (landingUnderCwd !== null && landingUnderCwd !== '.'
-      ? resolve(process.cwd(), ...landingUnderCwd.split('/').map(() => '..'))
-      : (landingParts.length >= 2 && landingParts[landingParts.length - 2] === '.dsh-ai'
-        ? (resolve(landingParts.slice(0, -2).join('/')) || projectRootOfLanding(landing))
-        : projectRootOfLanding(landing)));
+    : (structuralRoot !== null && pathKey(structuralRoot) !== pathKey(landing)
+      ? structuralRoot
+      : projectRootOfLanding(landing));
   let now = new Date();
   if (flags.now !== undefined) {
     now = new Date(flags.now);
@@ -3866,6 +3881,10 @@ export function runSnap(argv, io = defaultIo(), env = process.env) {
   if (sub === 'take') {
     const report = takeSnapshot({
       projectRoot, landingDir: landing, file: snapTargetPath(flags.path, projectRoot), now,
+      // 2026-09-23：把**落点相对段**直接算给快照层（落点一定是 `<项目>/.dsh-ai/<名字>` 形态，
+      //   故"项目根 = 落点上溯两级"是结构事实，相对段可算不可猜）。这样索引里的 `path` 不再依赖
+      //   `normalizeTarget` 的推断 —— CI 的 Linux/macOS 上正是那一步返回了绝对路径。
+      ...(relativeToRoot(landing, projectRoot) === null ? {} : { relPath: snapRelTargetPath(flags.path, projectRoot, landing) }),
       ...(flags.why === undefined ? {} : { why: flags.why }),
       ...(flags['corrupt-backup-after-copy'] === true ? { _inject: { corruptBackupAfterCopy: true } } : {}),
     });

@@ -69,7 +69,18 @@ export function takeSnapshot(opts = {}) {
   const reasons = [];
   const normalized = normalizeTarget(file, projectRoot);
   if (normalized === null) return { ok: false, path: null, reasons: ['路径非法或不在项目根下（无法归一）'], indexLines: 0 };
-  const key = pathKey(normalized);
+  // 2026-09-23：允许调用方**直接给已算好的相对段**（`relPath`），此时不再依赖 `normalizeTarget` 的推断。
+  //   为什么：CI 的 Ubuntu/macOS 作业上 `normalizeTarget` 在"落点在别处、cwd 不是项目根"的形态下
+  //   返回了**绝对路径** ⇒ 索引里存绝对路径 ⇒ 闸门与保护面 glob（按项目相对比）判"从未留证"
+  //   （GATE_WRITE_NO_SNAPSHOT）、提交被拒。修法取"构造"而非"推断"：项目根 = 落点上溯两级（结构事实），
+  //   故相对段可以**算出来**而不是猜出来。`relPath` 传入时仍做合法性检查（不得绝对、不得含 `..`）。
+  const explicitRel = typeof opts.relPath === 'string' && opts.relPath.trim() !== ''
+    ? toPosix(opts.relPath.trim()).replace(/^\.\//, '')
+    : null;
+  if (explicitRel !== null && (explicitRel.startsWith('/') || /^[A-Za-z]:/.test(explicitRel) || explicitRel.split('/').includes('..'))) {
+    return { ok: false, path: null, reasons: [`relPath 非法（不得为绝对路径或含 ..）: ${opts.relPath}`], indexLines: 0 };
+  }
+  const key = pathKey(explicitRel ?? normalized);
   const abs = existsSync(file) ? file : join(projectRoot, normalized);
   if (!existsSync(abs) || !statSync(abs).isFile()) {
     return { ok: false, path: key, reasons: [`目标不是已存在文件: ${normalized}`], indexLines: 0 };
