@@ -59,6 +59,15 @@ export const EFFECT_RETIRE_CATEGORY = '生效退役';
  * ⇒ 与生效登记/退役同族：不进复发计数（`effectPlan` 的派生段跳过它）。
  */
 export const REGISTERED_GAP_CATEGORY = '登记缺口';
+/**
+ * **计划工件**行的事务名（账本里的 `category`，由 `bin/rk-plan.mjs declare` 写）。
+ *
+ * 语义：**动手前**把"为什么做/判据/回滚/反向红"落成一行，供 `scripts/checkers/plan-artifact.mjs`
+ * 按"行 ↔ 改动"对账（"先设计后动手"的机械切片）。它与"生效登记/退役/登记缺口"同族：
+ * 是**元数据**，不是一条纪律教训 ⇒ 不进复发计数、也不该被当成"入账了却没绑定机械判据"的纪律
+ * （否则计划行会凭空造出一个叫 `PLAN` 的假纪律，让注入面往每个会话塞提醒 —— 2026-09-23 实测）。
+ */
+export const PLAN_CATEGORY = '计划';
 /** 退役提案的机器标记（写在 `redCriteria` 前缀）：`planActivation` 据此走"摘绑定"而不是"加绑定" */
 export const RETIRE_MARK = 'EFFECT_RETIRE_CANDIDATE';
 /**
@@ -439,6 +448,12 @@ export function ledgerGroups(landingDir) {
     // **状态事件行**同理：它是"这条历史行被取代了"的**迁移记录**，不是一条新教训
     // （否则一条 `STATUS_SUPERSEDE` 事件就会让那个 rule 重新出现在体检里、并报 TEXT_ONLY）。
     if (row.category === STATUS_EVENT_CATEGORY) continue;
+    // **计划行**（`rk-plan declare` 写的"动手前的计划工件"）**也不是"又踩了一次"**（2026-09-23 实测）：
+    // 它与上面几条同属**对象错位** —— 拿"复发/体检"去数"计划声明"，会把计划行的 `rule=PLAN` 变成一个
+    // "入账了却没绑定机械判据"的假纪律 ⇒ 注入面开始往每个会话塞提醒（实测：本仓 own 用例
+    // `plugin.test.mjs` 的干净上下文被塞进一条 untrusted 块而判红）。
+    // 口径与上面完全一致：**计划是元数据，不是纪律条目**。
+    if (row.category === PLAN_CATEGORY) continue;
     // **归档行**（`rk mutate` 的改写行）在这里**保留**（2026-09-21 修正，交接：给 mutate 补 fold）：
     //   · 它承载**改后的内容**——若排掉它，等于"改了但没人读"（实测确认过这个缺口，用例：mutate-fold）；
     //   · 被它取代的旧行已由 `supersededIds` 排除 ⇒ 不会同一条教训数两遍；

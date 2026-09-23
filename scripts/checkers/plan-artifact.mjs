@@ -130,9 +130,25 @@ const headTs = (() => {
 })();
 const when = headTs ?? Date.now();
 
-const globToRe = (g) => new RegExp(`^${String(g).trim()
-  .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-  .replace(/\*\*/g, '\u0000').replace(/\*/g, '[^/]*').replace(/\u0000/g, '.*')}$`);
+/**
+ * glob → 正则：把 glob 里"双星号夹在斜杠之间"的形态翻成"**零层或多层目录**"（glob 语义），而不是"至少一层"。
+ * 来历（2026-09-23 实测）：本仓声明 `planScope.codeGlobs` 为 `src` 下的 `*.mjs` 递归 glob 之后，
+ * 真实改动 `src/cli.mjs` 被判成"代码类 0 个" ⇒ 检查器整条走"不适用"。根因就是把那个形态翻成了"至少一层目录"。
+ * 目前处理四种形态：中间/行首的那个形态 → 可空目录段；结尾的"斜杠+双星" → 本目录及以下；其余单个星号 → 非斜杠串。
+ * ⚠ 注释里刻意**不写**"星号紧邻斜杠"的字面量：它会提前闭合块注释（本轮为此返工两次，实测记录）。
+ */
+const globToRe = (g) => {
+  const body = String(g).trim()
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\/\*\*\//g, '\u0001')
+    .replace(/\*\*\//g, '\u0002')
+    .replace(/\/\*\*$/, '\u0003')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\u0001/g, '(?:.*/)?')
+    .replace(/\u0002/g, '(?:.*/)?')
+    .replace(/\u0003/g, '(?:/.*)?');
+  return new RegExp(`^${body}$`);
+};
 const codeRe = planScope.codeGlobs.map(globToRe);
 const codeFiles = changed.filter((f) => codeRe.some((re) => re.test(f)));
 

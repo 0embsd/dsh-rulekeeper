@@ -20,9 +20,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { effectInjectPlan, effectPlan } from '../src/effect.mjs';
 import { cleanupAll, PKG_ROOT, runCheckerVerdict, tempDir } from './helpers/sandbox.mjs';
 
 test.after(cleanupAll);
@@ -173,6 +174,52 @@ test('计划⑨（护栏）: 样本宣告的时间线必须**自曝**，且真�
   // 生产路径（真仓）不得出现 fixture 字样
   const real = runCheckerVerdict(CHECKER, { sampleDir: null, label: '真仓', expect: 'not-applicable' });
   assert.doesNotMatch(real.stdout, /fixture/, '真仓上不得出现样本宣告的痕迹（生产不读那个文件）');
+});
+
+test('计划⑪（回归）: glob 语义 —— `src/**/*.mjs` 必须匹配 `src/cli.mjs`（零层或多层）', () => {
+  // 现场（2026-09-23 实测，真 bug）：本仓声明 `planScope.codeGlobs` 为 `src` 下的递归 `*.mjs` 之后，
+  // 真实改动 `src/cli.mjs` 被判成"代码类 0 个" ⇒ 检查器整条走"不适用"。根因：把 glob 的
+  // "双星夹在斜杠之间"翻成了"**至少一层**目录"的正则。这条用例把那层语义钉死。
+  const dir = tempDir('plan-glob');
+  mkdirSync(join(dir, '.dsh-ai', 'rulekeeper'), { recursive: true });
+  writeFileSync(join(dir, '.dsh-ai', 'rulekeeper', 'config.json'), `${JSON.stringify({
+    schema: 1, mode: 'observe', repoKind: 'private',
+    planScope: { codeGlobs: ['src/**/*.mjs', 'scripts/checkers/**/*.mjs'], windowHours: 24 },
+  }, null, 2)}\n`, 'utf8');
+  // 样本宣告两个**代码类**改动（层次不同）+ 一个非代码类
+  writeFileSync(join(dir, '.plan-sample.json'), `${JSON.stringify({
+    files: ['src/cli.mjs', 'src/a/b.mjs', 'scripts/checkers/x.mjs', 'README.md'],
+    now: '2026-09-23T10:00:00.000Z',
+    plan: { id: 'FX-GLOB', ts: '2026-09-23T09:00:00.000Z' },
+  }, null, 2)}\n`, 'utf8');
+  const r = runCheckerVerdict(CHECKER, { sampleDir: dir, label: 'plan-glob' });
+  assert.equal(r.status, 0, r.stdout);
+  // 关键读数：`src/cli.mjs`（浅层）与 `src/a/b.mjs`（深层）**都必须**算代码类 ⇒ code=3
+  assert.match(r.stdout, /PLAN_CHECK_SCOPE changed=4 code=3/, `浅层与深层都要算代码类（README.md 不算）；out=${r.stdout}`);
+  assert.match(r.stdout, /PLAN_FINDINGS=0/, '有计划行覆盖 ⇒ 不得命中');
+});
+
+test('计划⑫（回归）: 计划行**不得**被当成"入账却未绑定的纪律"（否则注入面会骚扰每个会话）', () => {
+  // 现场（2026-09-23 实测）：`rk-plan declare` 写的行 `rule=PLAN`、`category=计划`；
+  // 而 `ledgerGroups()` 只跳过"生效登记/生效退役/登记缺口/状态事件"几类 ⇒ 计划行被当**纪律条目**
+  // ⇒ `effectPlan` 认为"PLAN 入账了却没绑定机械判据" ⇒ 注入面开始往每个会话塞提醒
+  // （本仓 own 用例 `plugin.test.mjs` 的"干净上下文"被塞进一条 untrusted 块而判红）。
+  const dir = tempDir('plan-not-discipline');
+  mkdirSync(join(dir, '.dsh-ai', 'rulekeeper'), { recursive: true });
+  writeFileSync(join(dir, '.dsh-ai', 'rulekeeper', 'config.json'),
+    `${JSON.stringify({ schema: 1, mode: 'observe', repoKind: 'private' }, null, 2)}\n`, 'utf8');
+  writeFileSync(join(dir, '.dsh-ai', 'rulekeeper', 'ledger.jsonl'), [
+    JSON.stringify({ schema: 1, id: 'LF-P1', ts: '2026-09-23T10:00:00.000Z', rule: 'PLAN', category: '计划', problem: 'PLAN_DECLARED why=示例' }),
+    JSON.stringify({ schema: 1, id: 'LF-P2', ts: '2026-09-23T10:01:00.000Z', rule: 'PLAN', category: '计划', problem: 'PLAN_DECLARED why=再来一条' }),
+  ].join('\n') + '\n', 'utf8');
+  const plan = effectPlan({ landingDir: join(dir, '.dsh-ai', 'rulekeeper'), now: new Date('2026-09-23T11:00:00.000Z') });
+  assert.equal(plan.items.some((i) => i.rule === 'PLAN'), false,
+    `计划行不得出现在纪律体检里；items=${JSON.stringify(plan.items.map((i) => i.rule))}`);
+  assert.equal(plan.findings.some((f) => f.rule === 'PLAN'), false,
+    `不得为 PLAN 报任何"未绑定/只写下来了"类发现；findings=${JSON.stringify(plan.findings.map((f) => f.code))}`);
+  // 注入面同样不得把 PLAN 当候选
+  const inject = effectInjectPlan({ landingDir: join(dir, '.dsh-ai', 'rulekeeper'), now: new Date('2026-09-23T11:00:00.000Z') });
+  assert.equal(inject.candidates, 0, `PLAN 不该成为注入候选；candidates=${inject.candidates}`);
 });
 
 test('计划⑩（护栏）: 样本的 `armed` 声明优先于环境变量，且只影响被检根内的判定', () => {

@@ -1,5 +1,9 @@
 {
   "schema": 1,
   "mode": "observe",
-  "repoKind": "public"
+  "repoKind": "public",
+  "planScope": {
+    "codeGlobs": ["src/**/*.mjs", "scripts/checkers/**/*.mjs"],
+    "windowHours": 24
+  }
 }
