@@ -3862,8 +3862,15 @@ export function runSnap(argv, io = defaultIo(), env = process.env) {
   io.out(line(`RK_RECON_BACKUPS=${report.backups}`));
   io.out(line(`RK_RECON_MISSING_BACKUPS=${report.missingBackups.length}`));
   io.out(line(`RK_RECON_UNRECORDED_BACKUPS=${report.unrecordedBackups.length}`));
+  // **分级读数**（P23，2026-09-23）：这几类**不计入判定** —— 但必须看得见，否则"这次为什么没红"就成了黑箱。
+  io.out(line(`RK_RECON_RELOCATED_BACKUPS=${(report.relocatedBackups ?? []).length}`));
+  io.out(line(`RK_RECON_SUPERSEDED_UNRECORDED=${(report.supersededUnrecordedBackups ?? []).length}`));
+  io.out(line(`RK_RECON_NON_SNAPSHOT_BACKUPS=${(report.nonSnapshotBackups ?? []).length}`));
   for (const m of report.missingBackups) io.out(line(`MISSING_BACKUP ${m.path} backup=${m.backup}`));
   for (const u of report.unrecordedBackups) io.out(line(`UNRECORDED_BACKUP ${u.backup}`));
+  for (const r of report.relocatedBackups ?? []) io.out(line(`RELOCATED_BACKUP ${r.backup}（备份在落点 backups/ 里同名存在 ⇒ 不是丢失）`));
+  for (const s of report.supersededUnrecordedBackups ?? []) io.out(line(`SUPERSEDED_BACKUP ${s.backup}（${s.reason}）`));
+  for (const n of report.nonSnapshotBackups ?? []) io.out(line(`NON_SNAPSHOT_BACKUP ${n.backup}（${n.reason}）`));
   if (report.missingBackups.length > 0) io.out(line(`FINDING SNAP_RECON_MISSING_BACKUP 有记录无备份 ${report.missingBackups.length} 条`));
   if (report.unrecordedBackups.length > 0) io.out(line(`FINDING SNAP_RECON_UNRECORDED_BACKUP 有备份无记录 ${report.unrecordedBackups.length} 条`));
   io.out(resultLine('RECON', report.ok));

@@ -13,7 +13,7 @@
 // 归属：core 模块。零依赖：只用 node:*。
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, join, relative, resolve } from 'node:path';
 
 import { appendLine, readLines } from './append.mjs';
 import { sha256LfOfBuffer } from './lineend.mjs';
@@ -162,28 +162,87 @@ export function restoreSnapshot(opts = {}) {
 }
 
 /**
- * LF-320：快照↔账本对账（两类都要报）。
- * @returns {{ok, records, backups, missingBackups: object[], unrecordedBackups: object[]}}
+ * LF-320：快照↔账本对账（**P23 起分级**，2026-09-23）。
+ *
+ * 现场（治理项目独立复核 + 本仓实测）：旧实现用 `resolve(projectRoot, row.backup)` 找备份，而备份实际在
+ * **落点**的 `backups/`（`backupDir(landingDir)`），索引里写的是**落点相对**路径。落点一搬家（迁移），
+ * 索引仍指旧位置 ⇒ 报 `MISSING_BACKUP`（对方 12 条），而备份**一条没丢**。同族的第二处：未记录备份的
+ * 比对口径（盘上文件按项目根相对 vs 索引值）不同源 ⇒ 同一文件两串不同 ⇒ `UNRECORDED_BACKUP`（我们 10 条），
+ * 而旧口径 `ok = 两者都为 0` ⇒ "迁移遗留"与"真删了备份"被**同一个红**表达。
+ *
+ * 现口径（**只在真有备份被删时判红**）：
+ *   · `missingBackups`：按落点相对 → 项目根相对**依次**解析；都指不到时，再看落点 `backups/` 里有没有**同名**文件
+ *     —— 有 ⇒ 计 `relocatedBackups`（迁移形态，**不算丢失**，只审计）；确实没有同名 ⇒ 才进 `missingBackups`（真丢失）。
+ *   · `unrecordedBackups`：盘上有、索引没引用。**按 basename 集合**与索引里出现过的 basename 比对：
+ *     命中 ⇒ 归 `supersededUnrecordedBackups`（同一个源文件的历史备份，**不计入 ok**，只计数）；
+ *     否则才是 `unrecordedBackups`（计入 ok —— 这可能是"快照失败留下的孤儿"，值得人看一眼）。
+ *   · `ok` 只用真丢失 + 真未记录判定；两类"遗留"进独立字段供审计。
+ * @returns {{ok, records, backups, missingBackups: object[], unrecordedBackups: object[], relocatedBackups: object[], supersededUnrecordedBackups: object[]}}
  */
-export function reconSnapshots(opts = {}) {
-  const { projectRoot, landingDir } = opts;
+/**
+ * **快照从不备份的落点管理文件**（源文件名）：`backups/` 是共用目录，绑定写通路也往里放备份；
+ * 拿"快照对账"去数它们 = 对象错位（规则 41 同族）。
+ */
+const SNAPSHOT_NEVER_BACKED_UP = Object.freeze(new Set(['rules.json', 'config.json', 'hooks.json', 'index.jsonl']));
+
+export function reconSnapshots(opts = {}) {  const { projectRoot, landingDir } = opts;
   const index = readIndex(landingDir);
   const records = index.values;
-  const referenced = new Set();
-  const missingBackups = [];
-  for (const row of records) {
-    if (typeof row.backup !== 'string' || row.backup.trim() === '') continue;
-    const abs = resolve(projectRoot, row.backup);
-    referenced.add(pathKey(row.backup));
-    if (!existsSync(abs)) missingBackups.push({ path: row.path ?? '(no-path)', backup: toPosix(row.backup), ts: row.ts ?? null });
-  }
   const dir = backupDir(landingDir);
   const onDisk = existsSync(dir) ? readdirSync(dir).filter((n) => n.endsWith('.bak')).sort() : [];
+  const onDiskSet = new Set(onDisk);
+
+  // 索引里出现过的备份：① 原样值（供"盘上路径 ↔ 索引值"同源比对）② basename 集合（供迁移/换名后的归属判定）
+  const referenced = new Set();
+  const recordedBasenames = new Set();
+  for (const row of records) {
+    if (typeof row.backup !== 'string' || row.backup.trim() === '') continue;
+    referenced.add(pathKey(row.backup));
+    recordedBasenames.add(pathKey(basename(toPosix(row.backup))));
+  }
+
+  const missingBackups = [];
+  const relocatedBackups = [];
+  for (const row of records) {
+    if (typeof row.backup !== 'string' || row.backup.trim() === '') continue;
+    const rel = toPosix(row.backup);
+    const candidates = [resolve(landingDir, rel), resolve(projectRoot, rel)];
+    if (candidates.some((p) => existsSync(p))) continue;                 // 指得到 ⇒ 没丢
+    const name = basename(rel);
+    if (onDiskSet.has(name)) {
+      // **迁移形态**：备份被搬到落点的 backups/ 且仍用原名 ⇒ 不是丢失
+      relocatedBackups.push({ path: row.path ?? '(no-path)', backup: rel, ts: row.ts ?? null });
+      continue;
+    }
+    missingBackups.push({ path: row.path ?? '(no-path)', backup: rel, ts: row.ts ?? null });
+  }
+
   const unrecordedBackups = [];
+  const supersededUnrecordedBackups = [];
+  const nonSnapshotBackups = [];
   for (const name of onDisk) {
-    const rel = relativeToRoot(join(dir, name), projectRoot);
-    const display = rel ?? toPosix(join(dir, name));
-    if (!referenced.has(pathKey(display))) unrecordedBackups.push({ backup: toPosix(display) });
+    // **同源比对**：用"落点相对的备份名"与索引值比（旧实现用项目根相对路径，同一文件两串不同 ⇒ 恒不等）
+    const display = toPosix(join(relative(projectRoot, dir) ?? '', name)).replace(/^\.\//, '');
+    const byPath = referenced.has(pathKey(display)) || referenced.has(pathKey(join(toPosix(relative(projectRoot, dir) ?? ''), name)));
+    if (byPath) continue;
+    // 索引里引用过**同名**文件（同一个源文件在别的时刻的快照备份）⇒ 归"遗留"，不计入 ok
+    if (recordedBasenames.has(pathKey(name))) {
+      supersededUnrecordedBackups.push({ backup: display, reason: '同一源文件的历史快照备份（索引里引用过同名文件）⇒ 遗留，不计入判定' });
+      continue;
+    }
+    // **另一类"不是快照的备份"**（实测口径，2026-09-23）：落点 `backups/` 是**共用目录** —— 除了快照的前像，
+    // 里面还有**绑定写通路自己的备份**（`rules.json.<ts>.bak`）与**快照索引自身**的历史（`index.jsonl.<ts>.bak`）。
+    // 它们与快照索引**本来就无关**（快照从不备份管理文件）⇒ 旧口径把这 9 个报成"有备份无记录"并让整条 recon 判红，
+    // 等于拿"快照对账"去数"别的机制的备份"。判据落在**该文件自己的事实**上（两条，任一命中即归类）：
+    //   ① 命名不是快照形态（快照备份名 = `<源文件>.<YYYYMMDD-HHMMSS>.bak`，见 backup.mjs 的命名）；
+    //   ② 源文件是**落点管理文件**（`rules.json` / `config.json` / `hooks.json` / `index.jsonl`）—— 快照不备份它们。
+    const sourceName = name.replace(/\.\d{8}-?\d{6}\.bak$/, '');
+    const isSnapshotNaming = /\.\d{8}-\d{6}\.bak$/.test(name);
+    if (!isSnapshotNaming || SNAPSHOT_NEVER_BACKED_UP.has(sourceName)) {
+      nonSnapshotBackups.push({ backup: display, reason: `不是快照前像（${!isSnapshotNaming ? '命名不是快照形态' : `源文件 ${sourceName} 属落点管理文件，快照不备份它`}）⇒ 来自绑定写通路/索引自身，与快照索引无关，不计入判定` });
+      continue;
+    }
+    unrecordedBackups.push({ backup: display, reason: '盘上有、索引从未引用过 ⇒ 可能是快照失败留下的孤儿（值得看一眼）' });
   }
   return {
     ok: missingBackups.length === 0 && unrecordedBackups.length === 0,
@@ -195,5 +254,8 @@ export function reconSnapshots(opts = {}) {
     backups: onDisk.length,
     missingBackups,
     unrecordedBackups,
+    relocatedBackups,
+    supersededUnrecordedBackups,
+    nonSnapshotBackups,
   };
 }

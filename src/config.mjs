@@ -57,6 +57,17 @@ export function validateConfig(obj) {
   if (Object.hasOwn(obj, 'repoKind') && !REPO_KINDS.includes(obj.repoKind)) {
     out.push(`repoKind 必须是 ${REPO_KINDS.join('|')} 之一（实际 ${JSON.stringify(obj.repoKind)}）`);
   }
+  // `prePush.noCi`（P22，2026-09-23，契约扩展位）：pre-push 的三件**可拆** ——
+  // `true` ⇒ 跳过"与远端 workflow 同一条 CI 等价门禁"那一段（没有服务端工作流的仓上它必红）。
+  //   ⚠ 它是**声明型开关**（能改 config 的人也能打开），故默认 false，且载荷跳过时会**大声说明**。
+  if (Object.hasOwn(obj, 'prePush')) {
+    const pp = obj.prePush;
+    if (pp === null || typeof pp !== 'object' || Array.isArray(pp)) {
+      out.push(`prePush 必须是对象（如 { "noCi": true }），实际 ${JSON.stringify(pp)}`);
+    } else if (pp.noCi !== undefined && typeof pp.noCi !== 'boolean') {
+      out.push(`prePush.noCi 必须是布尔（实际 ${JSON.stringify(pp.noCi)}）`);
+    }
+  }
   return out;
 }
 
