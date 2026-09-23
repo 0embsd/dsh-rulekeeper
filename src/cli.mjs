@@ -2659,6 +2659,16 @@ function runCliEffect(argv, io, env) {
     io.out(line(`RK_DRAFT_ALREADY=${rows.length - result.stats.rows}`));
     io.out(line(`RK_DRAFT_ANNOTATED=${[...byId.keys()].length}`));
     io.out(line(`RK_DRAFT_PENDING=${todo.length}`));
+    // ── **P8：两个"草稿数"不是一回事，输出必须替它们说清**（2026-09-23）────────────────────────
+    // 现场：`RK_DRAFT_ANNOTATED`（**注解层**已覆盖的条目数）与 `adopt` 段的 `DRAFTS`
+    // （**由规格派生出的绑定草稿数**）并排出现在同一屏，语义完全不同 ⇒ 实测被读成
+    // "注解了 34 条却一个字没草拟？自相矛盾"（连 lowQuality 的结论也跟着被误读）。
+    // 改法：① 给两个数各加**自解释**的名字（旧名保留，兼容既有消费方）；② 打印一行明确的关系说明。
+    io.out(line(`RK_ACTIVATION_ANNOTATED=${[...byId.keys()].length}（**注解层**：条目级"何时适用"已被注解覆盖的行数）`));
+    io.out(line(`RK_ACTIVATION_PENDING=${todo.length}（**待起草**：本次能起草但还没进注解层的条目数）`));
+    io.out(line(`RK_ACTIVATION_DIMENSION_NOTE=本条命令只产"**条目级激活条件注解**"（何时适用）；`
+      + '它**不产绑定草稿**——绑定草稿由 `rk-effect adopt` 的 `DRAFTS` 给出（**规格派生**，回答"哪条纪律该挂哪个检查器"）。'
+      + '两个数**不同维度、不可比**：本行的 ANNOTATED/PENDING 与 adopt 的 DRAFTS/ALREADY_BOUND 不要并排读成同一件事。'));
     io.out(line(`RK_DRAFT_HIGH=${todo.filter((d) => d.confidence === 'high').length}`));
     io.out(line(`RK_DRAFT_MEDIUM=${todo.filter((d) => d.confidence === 'medium').length}`));
     io.out(line(`RK_DRAFT_NO_ANCHOR=${result.stats.noAnchor}`));
@@ -2695,6 +2705,10 @@ function runCliEffect(argv, io, env) {
     io.out(line(`RK_ADOPT_ENTRIES=${s.entries} EVENT_ROWS=${s.eventRows} RULES=${s.rules}`));
     io.out(line(`RK_ADOPT_FACE text=${s.faceCount.text} mechanized=${s.faceCount.mechanized} guard=${s.faceCount.guard} question=${s.faceCount.question} unregistered=${s.faceCount.unregistered}`));
     io.out(line(`RK_ADOPT_SPECS=${s.specs} SPECS_SKIPPED=${s.specsSkipped ?? 0} DRAFTS=${s.drafts} ALREADY_BOUND=${s.alreadyBound} OPEN_PROPOSAL=${s.openProposal}`));
+    // **P8**：`DRAFTS` 是"**规格派生**的绑定草稿数"（该挂哪个检查器），与 `draft-activation` 的
+    // `RK_ACTIVATION_ANNOTATED/PENDING`（条目级"何时适用"注解）**不同维度**。自解释名 + 关系说明。
+    io.out(line(`RK_ADOPT_BINDING_DRAFTS=${s.drafts}（**规格派生**的绑定草稿：规格在、尚未绑定的纪律数）`
+      + `；与 draft-activation 的注解层计数不是同一件事（见该命令的 RK_ACTIVATION_DIMENSION_NOTE）`));
     // **账本自称 vs 实际已绑**（P21）：两个数分开命名、各自标明来源，禁止被读成同一件事。
     io.out(line(`RK_ADOPT_BINDINGS source=rules.json rules=${s.boundRules} checker_rules=${s.boundCheckerRules} checks=${s.boundChecks}`));
     io.out(line(`RK_ADOPT_LEDGER_SELFCLAIM source=ledger.jsonl mechanized=${s.faceCount.mechanized}（账本自称的"已机械化"条数；与上面检查器绑定数**不是同一件事**）`));
