@@ -290,14 +290,18 @@ export const USAGE_EFFECT = `用法:
                      （机器起草"条目级可判激活条件"；默认只出草稿，--write 才写注解层
                        activations.jsonl（**不碰账本**，账本 append-only 逐字节不变））
   （亦可用 dsh-rulekeeper effect <子命令>，两者同实现）
-说明: **入账 ≠ 生效**（LF-A*，2026-09-19）。五个动作：
+说明: **入账 ≠ 生效**（LF-A*，2026-09-19）。七个动作：
       plan   = 只读体检：每条纪律的生效状态（none/injected/mechanized/verified/recurred）+ findings；
                有 error 级 finding（如只写下来了 EFFECT_TEXT_ONLY、绑定空转 EFFECT_BINDING_UNENFORCED）=> exit 1
       verify = 生效验证三项（①命中红 ②**反事实唯一性** ③误报面绿）；缺载体一律判"凭证不足"（EFFECT_VERIFY_UNCARRIED）
       apply  = **唯一**能写 rules.json 的通路：默认 dry-run，--apply 才落盘；**必须 --by human**
                （--by auto 一律拒绝——闸门不可被 AI 直接改）；写前备份 + 写后回读 + 失败逐字节回滚
+               提案带 EFFECT_SUPERSEDE + supersedes{spec,reason} ⇒ **换绑**（摘旧加新，不中断保护）
       inject = 把"只写下来了"的纪律经注入面变成会话提醒（纯计算，零落点写入）
       usage  = 读**用量遥测**（<落点>/usage.json）：哪几条纪律真被投递过、投递多少次（只读；没投递过就是 0，不造假命中）
+      adopt  = 自动收养记账：把账本里"声明了机制面/可绑判据"的纪律**如实分类**（text/mechanized/guard/question），
+               并提出可绑草案（默认只出读数与草稿，零落点写入；看 RK_ADOPT_* 读数）
+      draft-activation = 机器起草**条目级**可判激活条件（见上方用法行；默认只出草稿）
 退出码: 0 通过 / 1 判定不合格（或被闸门拒绝/回滚） / 2 用法错误`;
 
 export const USAGE_RULES = `用法:
