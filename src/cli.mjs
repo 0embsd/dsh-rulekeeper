@@ -3829,7 +3829,7 @@ export function runSnap(argv, io = defaultIo(), env = process.env) {
     io.err(`rk-snap: --landing 不是已存在目录: ${landing}\n`);
     return RC.USAGE;
   }
-  const projectRoot = resolve(flags.project ?? process.cwd());
+  const projectRoot = flags.project === undefined ? projectRootOfLanding(landing) : resolve(flags.project);
   let now = new Date();
   if (flags.now !== undefined) {
     now = new Date(flags.now);
