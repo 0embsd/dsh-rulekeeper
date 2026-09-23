@@ -242,6 +242,7 @@ export function installHooks(opts = {}) {
   mkdirSync(landing, { recursive: true });
 
   const written = [];
+  const skipped = [];
   for (const name of names) {
     if (!KNOWN_HOOK_NAMES.includes(name)) return { ok: false, reasons: [`未知 hook 名 "${name}"（只支持 ${KNOWN_HOOK_NAMES.join(' / ')}）`], hooksPath, names: [...names] };
     const file = join(hooksDir, name);
@@ -249,7 +250,14 @@ export function installHooks(opts = {}) {
     const sha = sha256Text(content);
     if (existsSync(file) && opts.force !== true) {
       const current = sha256File(file);
-      if (current !== sha) return { ok: false, reasons: [`${hooksPath}/${name} 已存在且内容不同（用 --force 覆盖）`], hooksPath, names: [...names] };
+      // 内容不同 = 这位置已经有**别人写的** hook（项目自有手写门禁/别的工具装的）。
+      // **不覆盖**，并**如实回报"我跳过了它"**（P13）：这里原先直接 `return ok:false` 整单失败，
+      // 于是"只想装另外几件"的人拿不到任何东西；改成跳过并记账后，`--names` 才能表达
+      // "只装我要的那几件、别动我手写的那件"。要覆盖仍是显式 `--force`。
+      if (current !== sha) {
+        skipped.push({ name, reason: `${hooksPath}/${name} 已存在且内容不同（跳过，未覆盖；要覆盖用 --force）`, sha256: current });
+        continue;
+      }
     }
     writeLfNoBom(file, content);
     // POSIX 上给可执行位（Windows 上是 no-op）；权威口径仍是索引 mode（见 verifyHooks）
@@ -303,6 +311,7 @@ export function installHooks(opts = {}) {
     hooksPath,
     hooksDir: toPosix(hooksDir),
     installed: written,
+    skipped,
     runnerSha,
     configSet,
     configValue,

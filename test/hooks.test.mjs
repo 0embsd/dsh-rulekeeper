@@ -186,16 +186,27 @@ test('red: --no-config 只写文件不改 config -> core.hooksPath 仍空 -> ver
   assert.ok(v.findings.some((f) => f.code === 'HOOK_PATH_NOT_SET'));
 });
 
-test('green: install 幂等；内容不同时拒覆盖、--force 才覆盖', () => {
+test('green: install 幂等；内容不同时**跳过并如实报告**（不覆盖），--force 才覆盖', () => {
   const root = gitRepo('hk-idem');
   assert.equal(installHooks({ repoRoot: root, gateBin: GATE_BIN }).ok, true);
   assert.equal(installHooks({ repoRoot: root, gateBin: GATE_BIN }).ok, true, '同内容重复 install 应成功（幂等）');
-  writeFileSync(join(root, DEFAULT_HOOKS_PATH, 'pre-commit'), '#!/bin/sh\nexit 0\n', 'utf8');
-  const blocked = installHooks({ repoRoot: root, gateBin: GATE_BIN });
-  assert.equal(blocked.ok, false, '被手改过的 hook 不许静默覆盖');
-  assert.match(blocked.reasons.join(' '), /--force/);
+  const handWritten = '#!/bin/sh\nexit 0\n';
+  writeFileSync(join(root, DEFAULT_HOOKS_PATH, 'pre-commit'), handWritten, 'utf8');
+  // P13（2026-09-23）之前这里是**整单失败**（`ok:false` + `--force` 提示）：那样"只想装另外几件"的人
+  // 一件都拿不到，`--names` 也就没意义。现在改成**跳过该件 + 如实记账**，但保住更强的性质：
+  // **手写文件的字节一个都不能变**（这比"返回 ok:false"更接近要防的事故）。
+  const skipped = installHooks({ repoRoot: root, gateBin: GATE_BIN });
+  assert.equal(readFileSync(join(root, DEFAULT_HOOKS_PATH, 'pre-commit'), 'utf8'), handWritten,
+    '被手改过的 hook 不许被覆盖（字节必须逐字不变）');
+  assert.equal(skipped.ok, true, '其余几件该装成功（跳过不是失败）');
+  assert.equal(skipped.skipped.length, 1, `必须如实报告跳过了哪一件；skipped=${JSON.stringify(skipped.skipped)}`);
+  assert.equal(skipped.skipped[0].name, 'pre-commit');
+  assert.match(skipped.skipped[0].reason, /--force/);
+  assert.equal(skipped.installed.some((h) => h.name === 'pre-commit'), false, '跳过的那件不得被算作已安装');
   const forced = installHooks({ repoRoot: root, gateBin: GATE_BIN, force: true });
   assert.equal(forced.ok, true);
+  assert.equal(forced.skipped.length, 0, '--force 下不该再有跳过项');
+  assert.equal(readFileSync(join(root, DEFAULT_HOOKS_PATH, 'pre-commit'), 'utf8'), hookScriptContent());
   assert.deepEqual(verifyHooks({ repoRoot: root }).findings.filter((f) => f.code !== 'HOOK_NOT_EXECUTABLE'), []);
 });
 

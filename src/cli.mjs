@@ -20,7 +20,7 @@ import { recordBaseline, verifyBaseline } from './baseline.mjs';
 import { applyGc, planGc, shardLedger } from './shard.mjs';
 import { reconSnapshots, restoreSnapshot, takeSnapshot } from './snap.mjs';
 import { bypassRecon, ciGate, closeGate, commitMessageGate, parseHit, postCommitRecon, precommitGate, reconWrite, refsGate, writeCiWorkflow, CI_WORKFLOW_REL } from './gate.mjs';
-import { DEFAULT_HOOKS_PATH, defaultRunGitRaw, installHooks, verifyHooks } from './hooks.mjs';
+import { DEFAULT_HOOKS_PATH, KNOWN_HOOK_NAMES, defaultRunGitRaw, installHooks, verifyHooks } from './hooks.mjs';
 import { uninstallHooks } from './uninstall.mjs';
 import { exportLanding, isInside, rebuildLanding, writeBundle } from './portable.mjs';
 import {
@@ -139,7 +139,7 @@ export const USAGE_GATE = `用法: rk-gate write [--project <项目根>] [--land
        rk-gate close [--project <项目根>] [--landing <落点>] [--hit "<纪律>=<拦住它的机制>"]... [--none] [--batch <名>]
                      [--evidence <路径>]... [--declaration <实证.json>] [--now <ISO>] [--json]
        rk-gate hooks verify  [--repo <仓库根>] [--hooks-path <.githooks>] [--json]
-       rk-gate hooks install [--repo <仓库根>] [--hooks-path <.githooks>] [--force] [--no-config] [--json]
+       rk-gate hooks install [--repo <仓库根>] [--hooks-path <.githooks>] [--names <a,b>] [--force] [--no-config] [--json]
        rk-gate hooks uninstall [--repo <仓库根>] [--json]
 
 write = 写入侧对账（LF-530，**不依赖 git**）：受保护文件的「当前 sha256」必须等于「最新留证基线」
@@ -2006,7 +2006,7 @@ export function runGateHooks(argv, io = defaultIo(), env = process.env) {
   try {
     flags = scanFlags(rest, {
       '--repo': 'string', '--hooks-path': 'string', '--force': 'boolean', '--no-config': 'boolean',
-      '--json': 'boolean', '--help': 'boolean',
+      '--names': 'string', '--json': 'boolean', '--help': 'boolean',
     });
   } catch (err) {
     if (err instanceof UsageError) {
@@ -2027,10 +2027,27 @@ export function runGateHooks(argv, io = defaultIo(), env = process.env) {
   const short = (h) => (typeof h === 'string' && h !== '' ? h.slice(0, 12) : '(none)');
 
   if (action === 'install') {
+    // `--names`（P13）：逗号/空白分隔的 hook 名单（`pre-commit,post-commit`）。库层一直支持 `opts.names`，
+    // 只是 CLI 没暴露 ⇒ "只想装/校验其中几件"这件事在命令行上做不到。空值/空项按**用法错误**处置
+    // （静默当成"全装"会让人以为指定生效了）。
+    let names;
+    if (flags.names !== undefined) {
+      names = String(flags.names).split(/[,;\s]+/).map((s) => s.trim()).filter((s) => s !== '');
+      if (names.length === 0) {
+        io.err(`rk-gate hooks install: --names 为空（应形如 --names pre-commit,post-commit）\n${USAGE_GATE}\n`);
+        return RC.USAGE;
+      }
+      const unknown = names.filter((n) => !KNOWN_HOOK_NAMES.includes(n));
+      if (unknown.length > 0) {
+        io.err(`rk-gate hooks install: --names 含未知 hook 名 ${unknown.join(', ')}（只支持 ${KNOWN_HOOK_NAMES.join(' / ')}）\n${USAGE_GATE}\n`);
+        return RC.USAGE;
+      }
+    }
     const r = installHooks({
       repoRoot,
       hooksPath: flags['hooks-path'] ?? DEFAULT_HOOKS_PATH,
       gateBin: join(PKG_ROOT, 'bin', 'rk-gate.mjs'),
+      names,
       force: flags.force === true,
       setConfig: flags['no-config'] !== true,
     });
@@ -2039,6 +2056,7 @@ export function runGateHooks(argv, io = defaultIo(), env = process.env) {
         ok: r.ok,
         hooksPath: r.hooksPath,
         installed: r.installed ?? [],
+        skipped: r.skipped ?? [],
         runnerSha256: r.runnerSha ?? null,
         configSet: r.configSet ?? false,
         reasons: r.reasons ?? [],
@@ -2047,10 +2065,13 @@ export function runGateHooks(argv, io = defaultIo(), env = process.env) {
     }
     io.out(line(`RK_GATE_HOOKS_ACTION=install`));
     io.out(line(`RK_GATE_HOOKS_PATH=${r.hooksPath}`));
+    io.out(line(`RK_GATE_HOOKS_NAMES=${(r.names ?? []).join(',')}`));
     io.out(line(`RK_GATE_HOOKS_INSTALLED=${(r.installed ?? []).length}`));
+    io.out(line(`RK_GATE_HOOKS_SKIPPED=${(r.skipped ?? []).length}`));
     io.out(line(`RK_GATE_HOOKS_CONFIG_SET=${r.configSet === true}`));
     io.out(line(`RK_GATE_HOOKS_RUNNER_SHA256=${short(r.runnerSha)}`));
     for (const h of r.installed ?? []) io.out(line(`HOOK installed ${h.name} sha256=${short(h.sha256)} bytes=${h.bytes}`));
+    for (const s of r.skipped ?? []) io.out(line(`HOOK skipped ${s.name} sha256=${short(s.sha256)}: ${s.reason}`));
     for (const reason of r.reasons ?? []) io.out(line(`FINDING GATE_HOOKS_INSTALL ${reason}`));
     io.out(resultLine('GATE_HOOKS', r.ok));
     return r.ok ? RC.OK : RC.FAIL;
