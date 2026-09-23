@@ -54,12 +54,19 @@ test('判据①: public = identity + infra；private = 只 infra', () => {
 test('判据②: 解析顺序 config > remote > 兜底 private', () => {
   const conf = landing('rk-kind-conf', { schema: 1, mode: 'observe', repoKind: 'private' });
   assert.equal(declaredRepoKind(conf), 'private');
-  const r1 = resolveRepoPatterns({ root: 'D:/opt/dsh-rulekeeper', landingDir: conf });
+  const r1 = resolveRepoPatterns({ root: tempDir('rk-kind-conf-root'), landingDir: conf });
   assert.equal(r1.kind, 'private');
-  assert.equal(r1.source, 'config', 'config 优先于远端探测（本仓远端是 github ⇒ 探测会给 public）');
+  assert.equal(r1.source, 'config', 'config 优先于远端探测（哪怕远端是公开托管商）');
 
   const noConf = landing('rk-kind-noconf');
-  const r2 = resolveRepoPatterns({ root: 'D:/opt/dsh-rulekeeper', landingDir: noConf });
+  // ⚠ **必须注入 git 探测**（2026-09-23 Linux 上实测踩到）：此前这条用例拿**真实仓**去探测
+  //   （`root: 'D:/opt/dsh-rulekeeper'`，即开发机的绝对路径）⇒ 本机绿、别的机器上那个路径不存在
+  //   ⇒ `detectRepoKind` 探不到 remote ⇒ source 变 `default`，用例红。
+  //   规则 42 的同族：**样本要构造，不靠现场**（现场包括"开发机的路径与 git 状态"）。
+  const fakeRemote = () => ({ status: 0, stdout: 'git@github.com:0embsd/dsh-rulekeeper.git\n' });
+  const remoteRoot = tempDir('rk-kind-noconf-root');
+  mkdirSync(join(remoteRoot, '.git'), { recursive: true });   // detectRepoKind 要求 root 下存在 .git 才去探测
+  const r2 = resolveRepoPatterns({ root: remoteRoot, landingDir: noConf, runGitRaw: fakeRemote });
   assert.equal(r2.source, 'remote');
   assert.equal(r2.kind, 'public');
 
