@@ -1182,13 +1182,41 @@ export function ciWorkflowYaml(opts = {}) {
   //   于是"生成一个工作流"在那些仓上等于**生成一个恒红的 CI**（实测：共享预设库仓就是这种形状）。
   //   ⇒ `withTestJob:false` 只出 gate 作业；默认仍为 true（本仓行为逐字不变）。
   const withTestJob = opts.withTestJob !== false;
+  // ── 消费方仓的「双 checkout」形态（2026-09-23，P17 跨仓缺口的下半段）─────────────────────────
+  //   问题：生成的 gate 作业是 `node <**仓内** bin> ci …`，而**消费方仓里没有本包**
+  //   （实测：共享预设库仓无 bin/、无用例运行器）⇒ 要么把包 vendoring 进去（60 模块 / 1.09MB，且会过期），
+  //   要么这道门只能关掉。两条都不是好答案。
+  //   做法：给了 `toolRepo` 就**多 checkout 一份钉版本的的工具仓**到 `.dsh-rulekeeper-tool`，
+  //   然后从那里跑 gate；本包**零依赖**（实测无 node_modules 也能跑）⇒ CI 里不需要 npm install。
+  //   `toolRef` **必须是 40 位 sha**：钉 `main`/`v1` 这类浮动 ref 会让消费方 CI 的结论随工具仓漂移
+  //   （消费方一行没改，判定却从绿变红）——那是"判据恒错"的同族，必须拒绝而不是警告。
+  const toolRepo = typeof opts.toolRepo === 'string' && opts.toolRepo.trim() !== '' ? opts.toolRepo.trim() : null;
+  const toolRef = typeof opts.toolRef === 'string' && opts.toolRef.trim() !== '' ? opts.toolRef.trim() : null;
+  const TOOL_DIR = '.dsh-rulekeeper-tool';
+  if (toolRepo !== null && (toolRef === null || !/^[0-9a-f]{40}$/.test(toolRef))) {
+    throw new Error(
+      'ciWorkflowYaml: 给了 toolRepo 就必须给**40 位小写 hex 的 toolRef**（收到 '
+      + JSON.stringify(opts.toolRef ?? null) + '）—— 钉浮动 ref（main/v1）会让消费方 CI 的结论'
+      + '随工具仓漂移。修法：--tool-ref $(git -C <工具仓> rev-parse HEAD)',
+    );
+  }
+  if (toolRepo !== null && toolRepo.split('/').length !== 2) {
+    throw new Error(`ciWorkflowYaml: toolRepo 必须是 owner/repo 形态（收到 ${JSON.stringify(toolRepo)}）`);
+  }
+  const effBin = toolRepo === null ? binPath : `${TOOL_DIR}/${binPath}`;
+  const repoArg = toolRepo === null ? '' : ' --repo "$GITHUB_WORKSPACE"';
   const runLine = range !== null
-    ? `        run: node ${binPath} ci ${range}`
-    : `        run: node ${binPath} ci --base "\${{ github.event.before }}" --head "\${{ github.sha }}"`;
+    ? `        run: node ${effBin} ci${repoArg} ${range}`
+    : `        run: node ${effBin} ci${repoArg} --base "\${{ github.event.before }}" --head "\${{ github.sha }}"`;
   return [
     '# 本文件由 dsh-rulekeeper 生成，请勿手改：`node <bin> ci --write-workflow`',
     '# 源：dsh-rulekeeper/src/gate.mjs 的 ciWorkflowYaml()（手改会被 `rk-gate ci` 的完整性校验判红）',
     '# 范围口径：push 用 github.event.before..github.sha；拿不到 before（首次 push / pull_request）退回 --all（fail-closed）',
+    ...(toolRepo === null ? [] : [
+      `# 本工作流从**独立 checkout 的钉版本工具仓**跑 gate：${toolRepo} @ ${toolRef}`,
+      `# 为什么不是仓内 bin：消费方仓里没有 dsh-rulekeeper 这个包（搬进来要 ~60 个模块且会过期）。`,
+      '# 升级工具版本：改下面 checkout 那一步的 ref（必须仍是 40 位 sha）。',
+    ]),
     'name: dsh-rulekeeper-gate',
     'on:',
     '  push:',
@@ -1200,6 +1228,13 @@ export function ciWorkflowYaml(opts = {}) {
     '      - uses: actions/checkout@v5',
     '        with:',
     '          fetch-depth: 0',
+    ...(toolRepo === null ? [] : [
+      `      - uses: actions/checkout@v5`,
+      `        with:`,
+      `          repository: ${toolRepo}`,
+      `          ref: ${toolRef}`,
+      `          path: ${TOOL_DIR}`,
+    ]),
     '      - uses: actions/setup-node@v5',
     '        with:',
     `          node-version: '${nodeVersion}'`,
@@ -1362,6 +1397,9 @@ export function ciGate(opts = {}) {
     range: opts.workflowRange,
     // 生成与校验必须**同一组开关**：否则"关掉 test 作业生成的工作流"会被本函数按默认（带 test）判不一致 ⇒ 假红
     withTestJob: opts.withTestJob,
+    // 同理：按"独立工具仓"生成的工作流，校验侧也必须知道这两个值
+    toolRepo: opts.toolRepo,
+    toolRef: opts.toolRef,
   });
   if (workflow.present !== true) {
     findings.push({

@@ -135,7 +135,7 @@ export const USAGE_GATE = `用法: rk-gate write [--project <项目根>] [--land
        rk-gate bypass [--repo <仓库根>] [--landing <落点>] [--limit <n>] [--all] [--json]
        rk-gate ci [--repo <仓库根>] [--landing <落点>] [--base <sha>] [--head <sha>] [--all]
                   [--write-workflow] [--workflow <相对路径>] [--workflow-range '<ci 参数>'] [--bin <相对入口>]
-                  [--no-test-job] [--bin-sha <sha256>] [--claim-remote] [--limit <n>] [--json]
+                  [--no-test-job] [--tool-repo <owner/repo> --tool-ref <40hex>] [--bin-sha <sha256>] [--claim-remote] [--limit <n>] [--json]
        rk-gate close [--project <项目根>] [--landing <落点>] [--hit "<纪律>=<拦住它的机制>"]... [--none] [--batch <名>]
                      [--evidence <路径>]... [--declaration <实证.json>] [--now <ISO>] [--json]
        rk-gate hooks verify  [--repo <仓库根>] [--hooks-path <.githooks>] [--json]
@@ -1812,6 +1812,7 @@ export function runGateCi(argv, io = defaultIo(), env = process.env) {
     flags = scanFlags(argv, {
       '--repo': 'string', '--landing': 'string', '--base': 'string', '--head': 'string', '--all': 'boolean',
       '--write-workflow': 'boolean', '--workflow': 'string', '--workflow-range': 'string', '--no-test-job': 'boolean',
+      '--tool-repo': 'string', '--tool-ref': 'string',
       '--bin': 'string', '--bin-sha': 'string', '--node-version': 'string',
       '--claim-remote': 'boolean', '--limit': 'string', '--json': 'boolean', '--help': 'boolean',
     });
@@ -1842,15 +1843,27 @@ export function runGateCi(argv, io = defaultIo(), env = process.env) {
 
   // 生成动作**显式**（不给默认开）：只写工作流文件，不跑对账 —— 生成与校验是两件事，别混成一个绿灯
   if (flags['write-workflow'] === true) {
-    const w = writeCiWorkflow({
-      projectRoot: repoRoot,
-      rel: flags.workflow ?? CI_WORKFLOW_REL,
-      binPath: flags.bin,
-      nodeVersion: flags['node-version'],
-      range: flags['workflow-range'],
-      // 消费方仓开关：本仓没有本包的全量用例时，带上 test 作业会让 CI **恒红**（实测）
-      withTestJob: flags['no-test-job'] !== true,
-    });
+    const w = (() => {
+      try {
+        return writeCiWorkflow({
+          projectRoot: repoRoot,
+          rel: flags.workflow ?? CI_WORKFLOW_REL,
+          binPath: flags.bin,
+          nodeVersion: flags['node-version'],
+          range: flags['workflow-range'],
+          // 消费方仓开关：本仓没有本包的全量用例时，带上 test 作业会让 CI **恒红**（实测）
+          withTestJob: flags['no-test-job'] !== true,
+          // 消费方仓开关：从**独立 checkout 的钉版本工具仓**跑 gate（本包零依赖，CI 里无需 npm install）
+          toolRepo: flags['tool-repo'],
+          toolRef: flags['tool-ref'],
+        });
+      } catch (err) {
+        // 生成期就拒绝（而不是写出一份"看起来能跑、其实钉错 ref"的工作流）
+        io.err(`rk-gate ci --write-workflow: ${err?.message ?? err}\n`);
+        return { ok: false, reason: 'usage', usage: true };
+      }
+    })();
+    if (w.usage === true) return RC.USAGE;
     if (flags.json === true) {
       io.out(jsonStable({ ok: w.ok, rel: w.rel, bytes: w.bytes, findings: w.ok ? [] : [{ code: 'CI_WORKFLOW_WRITE_FAILED', message: String(w.reason) }] }));
       return w.ok ? RC.OK : RC.FAIL;
@@ -1874,6 +1887,8 @@ export function runGateCi(argv, io = defaultIo(), env = process.env) {
     workflowRel: flags.workflow,
     workflowRange: flags['workflow-range'],
     withTestJob: flags['no-test-job'] === true ? false : undefined,
+    toolRepo: flags['tool-repo'],
+    toolRef: flags['tool-ref'],
     binPath: flags.bin,
     binSha: flags['bin-sha'],
     nodeVersion: flags['node-version'],
