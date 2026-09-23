@@ -527,7 +527,7 @@ node <包目录>/bin/rk-selfcheck.mjs --root <包目录>            # 期望 FIN
 node <包目录>/bin/rk-gate.mjs hooks verify --repo <某个仓库根> # 真调一次工具面
 ```
 
-### ⚠ 装上之后，`rulekeeper_*` 工具默认是**空壳**（诚实边界，2026-09-16 实测）
+### 装上之后，`rulekeeper_*` 工具是**真的**（2026-09-23 更正过期说明）
 
 - 插件装载后注册的三个工具（`rulekeeper_gate` / `rulekeeper_record` / `rulekeeper_snap`）**默认不判定、不写任何东西**：
   调用返回 `{ok:false, configured:false, reason:'本工具未注入 handler（默认零副作用）'}`（`src/plugin.mjs` 的 `toolDefinition()`）。
@@ -536,6 +536,14 @@ node <包目录>/bin/rk-gate.mjs hooks verify --repo <某个仓库根> # 真调�
 - 因此装机后立刻可用的形态是 **CLI**：`node <包目录>/bin/dsh-rulekeeper.mjs <子命令>`（以及 `rk-gate` / `rk-snap` / `rk-migrate` 等入口）。
 - 想要"会话里点一下就跑真判定"，需要消费者侧注入 handler；若要用**硬阻断**，消费者应走 `ctx.tools.guard(name, handler)`
   而非 `register`（见 `src/guard.mjs`）——那会真的拒绝宿主动作，属部署决策，不在默认安装面内。
+
+> **⚠ 本节上方三行是 2026-09-16 的实现状态，已被更正（2026-09-23 实测）**：
+> `index.js` 的 `apply()` 现在调用 `applyPlugin(ctx, { handlers: defaultHandlers() })`
+> （见 `src/handlers.mjs` 的 `defaultHandlers`）⇒ **装机即可用**，`rulekeeper_gate` / `record` /
+> `snap` / `effect` / `apply` 都是真实实现，不再是"未注入 handler 的空壳"。
+> 消费者仍可覆盖：`applyPlugin(ctx, { handlers: 你自己的 })` 会替换默认实现。
+> 之所以把更正**追加**在这里而不是删掉旧文案：这是公开仓的历史说明，
+> 删掉会让人以为"从来没这么写过"；留着并注明哪句已过期，更诚实。
 
 > **已修（2026-09-16，同日）**：上面这段"默认是空壳"是**当时的实现缺陷**，不是应有行为 ——
 > 老板当场指出"插件装上了不能用，装它干嘛"。现在默认装载**注入包内真实实现**（`src/handlers.mjs`）：
