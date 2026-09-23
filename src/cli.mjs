@@ -3874,6 +3874,11 @@ export function runSnap(argv, io = defaultIo(), env = process.env) {
     }
     io.out(line(`RK_SNAP_LANDING=${toPosix(landing)}`));
     io.out(line(`RK_SNAP_MODE=take`));
+    // 2026-09-23：补两条**诊断读数**（判据面本来就没有"它到底把哪个根、哪个文件当目标"的可见性）。
+    //   来历：CI 的 Linux/macOS 作业上，索引落了**绝对路径**，而本机 Windows 不复现
+    //   ⇒ 只凭"结果是绝对路径"这一条反推根因，猜了两轮都没中。把这两个值打出来，一次就能定位。
+    io.out(line(`RK_SNAP_PROJECT=${toPosix(projectRoot)}`));
+    io.out(line(`RK_SNAP_TARGET=${toPosix(snapTargetPath(flags.path, projectRoot))}`));
     io.out(line(`RK_SNAP_PATH=${report.path ?? '(n/a)'}`));
     if (report.ok) {
       io.out(line(`RK_SNAP_SHA256_BEFORE=${report.sha256}`));

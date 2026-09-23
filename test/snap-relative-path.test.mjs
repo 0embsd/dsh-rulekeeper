@@ -29,6 +29,10 @@ test('rk-snap take：cwd 不是项目根时，索引里也必须落**项目相�
     cwd: PKG_ROOT, encoding: 'utf8',
   });
   assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+  // 诊断读数：把"它解析到的项目根 / 目标文件"一并核对 —— CI 上只报"结果是绝对路径"时无法定位根因
+  const outLine = (k) => (r.stdout.split('\n').find((l) => l.startsWith(`${k}=`)) ?? '').slice(k.length + 1);
+  assert.equal(posix(outLine('RK_SNAP_PROJECT')).toLowerCase(), posix(repo).toLowerCase(), `解析到的项目根必须是 ${repo}（实得 ${outLine('RK_SNAP_PROJECT')}）`);
+  assert.equal(posix(outLine('RK_SNAP_TARGET')).toLowerCase(), posix(join(repo, 'README.md')).toLowerCase(), `目标文件必须是仓内那个（实得 ${outLine('RK_SNAP_TARGET')}）`);
   const rows = readFileSync(join(landing, 'snapshots', 'index.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   assert.equal(rows.length, 1);
   const stored = posix(rows[0].path);
