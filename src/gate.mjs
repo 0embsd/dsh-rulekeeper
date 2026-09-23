@@ -1177,6 +1177,11 @@ export function ciWorkflowYaml(opts = {}) {
   const nodeVersion = String(opts.nodeVersion ?? ENGINE_NODE);
   const binPath = toPosix(String(opts.binPath ?? (opts.projectRoot ? autoCiBinRel(opts.projectRoot) : CI_BIN_REL)));
   const range = typeof opts.range === 'string' && opts.range.trim() !== '' ? opts.range.trim() : null;
+  // 消费方仓开关（2026-09-23，P17 跨仓实测缺口）：**不是每个消费方仓都有本包的用例**
+  //   —— 生成物里的 test 作业跑的是 `bin/rk-test.mjs`（本包自带），别人的仓里没有那个文件，
+  //   于是"生成一个工作流"在那些仓上等于**生成一个恒红的 CI**（实测：共享预设库仓就是这种形状）。
+  //   ⇒ `withTestJob:false` 只出 gate 作业；默认仍为 true（本仓行为逐字不变）。
+  const withTestJob = opts.withTestJob !== false;
   const runLine = range !== null
     ? `        run: node ${binPath} ci ${range}`
     : `        run: node ${binPath} ci --base "\${{ github.event.before }}" --head "\${{ github.sha }}"`;
@@ -1200,24 +1205,29 @@ export function ciWorkflowYaml(opts = {}) {
     `          node-version: '${nodeVersion}'`,
     '      - name: dsh-rulekeeper 服务端防线（不依赖本机 hook：新 clone 也拦得住）',
     runLine,
-    // 2026-09-16 新增：**跨平台测试任务**（此前 CI 只跑门禁、不跑用例）。
-    // 为什么：本仓只在 Windows/Linux 上人工跑过用例；macOS 从未真跑过（README 曾如实标"未实测"）。
-    //   把它放进 CI 矩阵，既补 macOS 实测，又让"CI 真的跑过用例"成为可引用的凭证。
-    '  test:',
-    '    strategy:',
-    '      fail-fast: false',
-    '      matrix:',
-    '        os: [ubuntu-latest, macos-latest]',
-    '    runs-on: ${{ matrix.os }}',
-    '    steps:',
-    '      - uses: actions/checkout@v5',
-    '      - uses: actions/setup-node@v5',
-    '        with:',
-    `          node-version: '${nodeVersion}'`,
-    '      - name: 全量用例（Windows 之外的两平台同源复核）',
-    // 脚本正文来自 CI_TEST_SCRIPT（**同一份**东西既写盘也被用例真跑，防"生成物 ≠ 实测的东西"）
-    '        run: |',
-    ...CI_TEST_SCRIPT.map((l) => `          ${l}`),
+    ...(withTestJob ? [
+      // 2026-09-16 新增：**跨平台测试任务**（此前 CI 只跑门禁、不跑用例）。
+      // 为什么：本仓只在 Windows/Linux 上人工跑过用例；macOS 从未真跑过（README 曾如实标"未实测"）。
+      //   把它放进 CI 矩阵，既补 macOS 实测，又让"CI 真的跑过用例"成为可引用的凭证。
+      '  test:',
+      '    strategy:',
+      '      fail-fast: false',
+      '      matrix:',
+      '        os: [ubuntu-latest, macos-latest]',
+      '    runs-on: ${{ matrix.os }}',
+      '    steps:',
+      '      - uses: actions/checkout@v5',
+      '      - uses: actions/setup-node@v5',
+      '        with:',
+      `          node-version: '${nodeVersion}'`,
+      '      - name: 全量用例（Windows 之外的两平台同源复核）',
+      // 脚本正文来自 CI_TEST_SCRIPT（**同一份**东西既写盘也被用例真跑，防"生成物 ≠ 实测的东西"）
+      '        run: |',
+      ...CI_TEST_SCRIPT.map((l) => `          ${l}`),
+    ] : [
+      '# 本工作流**只有 gate 作业**（生成时传了 withTestJob:false）：该仓没有本包的全量用例入口',
+      '# （本包的用例运行器不在这个仓里），带上 test 作业它会**恒红**（实测）。要恢复：在有本包用例的仓里重新生成。',
+    ]),
     '',
   ].join('\n');
 }
@@ -1350,6 +1360,8 @@ export function ciGate(opts = {}) {
     binPath: opts.binPath,
     nodeVersion: opts.nodeVersion,
     range: opts.workflowRange,
+    // 生成与校验必须**同一组开关**：否则"关掉 test 作业生成的工作流"会被本函数按默认（带 test）判不一致 ⇒ 假红
+    withTestJob: opts.withTestJob,
   });
   if (workflow.present !== true) {
     findings.push({
