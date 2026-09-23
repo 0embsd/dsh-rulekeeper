@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "rule": "CAT-PROC",
+  "checkerRef": "@self/scripts/checkers/plan-artifact.mjs",
+  "command": [
+    "node",
+    "scripts/checkers/plan-artifact.mjs"
+  ],
+  "expectRed": {
+    "exitCode": 1
+  },
+  "expectGreen": {
+    "exitCode": 0
+  },
+  "redSample": {
+    "kind": "tree",
+    "source": "test-fixtures/plan-fx-stale",
+    "note": "静态红样本：**有计划行但已过窗** ⇒ `PLAN_FINDINGS=1` 且 exit 1。红/绿由样本目录里的 `.plan-sample.json` 宣告的时间线驱动（不依赖现场 git 历史）⇒ 可静态复核。**红样本自己宣告 `armed: true`**：生产默认档是 observe（只记审计），若没有这个声明，红样本也只能 exit 0 —— 而那正是校验器拒绝的形态（`expectRed=0` 等于『没开火』）。样本自带档位让『红样本必须真非 0』在静态样本里成立，同时**不改变生产默认档**。"
+  },
+  "greenSample": {
+    "kind": "tree",
+    "source": "test-fixtures/plan-fx-green",
+    "note": "静态绿样本：有计划行且覆盖本次改动 ⇒ `PLAN_FINDINGS=0` 且 exit 0（样本**不**宣告 armed ⇒ 走生产默认 observe）。"
+  },
+  "checkerVersion": "plan-artifact@1",
+  "timeoutMs": 20000,
+  "notes": "计划工件对账（V1 observe）：对每个**代码类**改动核『有无覆盖它的计划行』。三态：0=覆盖 / 1=命中（仅 armed）/ 2=不适用（未声明 planScope / 无代码类改动 / 0 条计划行）。口径由被治理仓 config.json 的 planScope 声明，不硬编扩展名。另有三个静态红样本：`plan-fx-stale`（过窗）/ `plan-fx-scoped`（计划晚于改动 ⇒ 先做后补）/ `plan-fx-noplan`（没有覆盖它的计划行）。诚实边界：判不了『是否真先想过』；why/criteria/rollback 是**声明**不是签名；钩子只在提交时跑 ⇒ 抓不到『已经动手了』。",
+  "applicability": {
+    "scope": "any-with-plan-scope",
+    "requires": [
+      "落点 config.json 声明 planScope.codeGlobs",
+      "台账里有 category=计划 且 problem 以 PLAN_DECLARED 开头的行（用 bin/rk-plan.mjs declare 写）"
+    ],
+    "note": "样本形态：`<样本目录>/.plan-sample.json` 宣告 `{files, now, plan:{id,ts}}` ⇒ 让『结论依赖 git 历史』的检查器也能被静态样本核（这是 V1 挂上绑定的前提）。生产运行没有该文件 ⇒ 走真 git + 真台账，行为不受影响。"
+  }
+}

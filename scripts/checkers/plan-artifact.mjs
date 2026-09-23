@@ -31,7 +31,7 @@ import { spawnSync } from 'node:child_process';
 const root = process.env.RULEKEEPER_SAMPLE_DIR ?? process.cwd();
 const landings = ['.dsh-ai/rulekeeper', '.dsh-ai/lessonflow'].map((d) => join(root, d));
 const landing = landings.find((d) => existsSync(join(d, 'ledger.jsonl'))) ?? landings[0];
-const mode = process.env.RULEKEEPER_PLAN_MODE === 'armed' ? 'armed' : 'observe';
+const modeFromEnv = process.env.RULEKEEPER_PLAN_MODE === 'armed' ? 'armed' : 'observe';
 
 /** `config.json` 里由**被治理仓**声明的"哪些算代码类 + 窗口多长"（不硬编扩展名） */
 const configPath = join(landing, 'config.json');
@@ -55,7 +55,40 @@ const parseTs = (v) => {
   const t = Date.parse(String(v ?? ''));
   return Number.isNaN(t) ? null : t;
 };
+
+/** **样本时间线宣告**（`<被检根>/.plan-sample.json`）：让"结论依赖历史"的检查器能被**静态样本**核。
+ *
+ * 为什么需要（设计单 §9 的边界）：`misreport-surface` 要求每条绑定红/绿两态成对，而本检查器的结论由
+ * **落点配置 + git 历史**决定 ⇒ 静态样本目录表达不出来 ⇒ 硬造 spec 只能产出"看起来有判别力、实际没核过"的假绑定。
+ * 这个文件把那条时间线**写进样本**：`{ "files": ["src/a.mjs"], "now": "<ISO>", "plan": { "id":"…", "ts":"<ISO>" } }`。
+ *
+ * **它不是后门**（三条约束，全部可见）：
+ *   ① 只在**被检根**里生效（生产运行没有这个文件 ⇒ 走真 git + 真台账，行为逐字不变）；
+ *   ② 用了它就**自曝**（输出里 `PLAN_CHECK_TIMELINE=fixture(...)`）；
+ *   ③ 用了它时 `plan_rows` 一律记 **0**（不把真台账的行算进来），免得读数看着像在生产上下文里核过。
+ */
+const fixturePath = join(root, '.plan-sample.json');
+const fixtureTimeline = (() => {
+  if (!existsSync(fixturePath)) return null;
+  let f;
+  try { f = JSON.parse(readFileSync(fixturePath, 'utf8')); } catch { return null; }
+  if (f === null || typeof f !== 'object' || !Array.isArray(f.files)) return null;
+  const now = parseTs(f.now);
+  if (now === null) return null;
+  const planTs = f.plan !== null && typeof f.plan === 'object' ? parseTs(f.plan.ts) : null;
+  return {
+    files: f.files.map(String),
+    when: now,
+    plan: planTs === null ? null : { ts: planTs, id: String(f.plan?.id ?? '(fixture)') },
+    // 样本可以**自己声明档位**（`armed: true`）⇒ 让"红样本必须真非 0"这件事在**静态样本**里成立，
+    // 而不必把生产默认档从 observe 改成阻断（那是个战略选择，V1 明确不做）。
+    armed: f.armed === true,
+  };
+})();
+/** 档位：样本宣告优先（`armed:true`），否则环境变量，否则 observe（V1 默认只记审计） */
+const mode = fixtureTimeline?.armed === true ? 'armed' : modeFromEnv;
 const planRows = (() => {
+  if (fixtureTimeline !== null) return [];   // 约束③：样本模式一律记 0 行真台账
   const file = join(landing, 'ledger.jsonl');
   if (!existsSync(file)) return [];
   return readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => l.trim() !== '').map((l) => {
@@ -67,24 +100,31 @@ const planRows = (() => {
     .filter((r) => r.ts !== null);
 })();
 
-if (planRows.length === 0) {
+if (fixtureTimeline === null && planRows.length === 0) {
   console.log(`PLAN_CHECK=not-applicable（台账里 0 条计划行 ⇒ 无从对账；先 \`rk-plan declare\` 落一条，别把"没判"当"通过"）`);
   process.exit(2);
 }
 
-/** 改动面：`RULEKEEPER_PLAN_BASE..RULEKEEPER_PLAN_HEAD`（缺省 = 暂存区；都不是 git 仓 ⇒ 不适用） */
+/** 改动面：**样本模式**用宣告的 `files`；否则 `RULEKEEPER_PLAN_BASE..RULEKEEPER_PLAN_HEAD`（缺省 = 暂存区） */
 const gitLines = (args) => {
   const r = spawnSync('git', ['-c', 'core.quotePath=false', '-C', root, ...args], { encoding: 'utf8' });
   return r.status === 0 && typeof r.stdout === 'string' ? r.stdout.split(/\r?\n/).filter((l) => l.trim() !== '') : null;
 };
-const base = process.env.RULEKEEPER_PLAN_BASE ?? null;
-const head = process.env.RULEKEEPER_PLAN_HEAD ?? 'HEAD';
-const changed = base === null ? gitLines(['diff', '--name-only', '--cached']) : gitLines(['diff', '--name-only', `${base}..${head}`]);
+let changed;
+if (fixtureTimeline !== null) {
+  changed = fixtureTimeline.files;
+} else {
+  const base = process.env.RULEKEEPER_PLAN_BASE ?? null;
+  const head = process.env.RULEKEEPER_PLAN_HEAD ?? 'HEAD';
+  changed = base === null ? gitLines(['diff', '--name-only', '--cached']) : gitLines(['diff', '--name-only', `${base}..${head}`]);
+}
 if (changed === null) {
   console.log('PLAN_CHECK=not-applicable（不是 git 仓 / git 不可执行 ⇒ 拿不到改动面）');
   process.exit(2);
 }
 const headTs = (() => {
+  if (fixtureTimeline !== null) return fixtureTimeline.when;
+  const head = process.env.RULEKEEPER_PLAN_HEAD ?? 'HEAD';
   const r = spawnSync('git', ['-C', root, 'log', '-1', '--format=%cI', head], { encoding: 'utf8' });
   return r.status === 0 ? parseTs(String(r.stdout).trim()) : null;
 })();
@@ -102,17 +142,24 @@ if (codeFiles.length === 0) {
 }
 
 const windowMs = planScope.windowHours * 3600 * 1000;
-const newest = [...planRows].sort((a, b) => b.ts - a.ts)[0];
-const within = when - newest.ts <= windowMs;
-const ordered = newest.ts <= when;
+/** 判定用的计划行：**样本模式**用宣告的那条（可能为 null = 没宣告计划）；否则用台账里最新的一条 */
+const planned = fixtureTimeline !== null ? fixtureTimeline.plan : [...planRows].sort((a, b) => b.ts - a.ts)[0];
 const findings = [];
-if (!within || !ordered) {
-  findings.push(`最近一条计划行（${newest.id} @ ${new Date(newest.ts).toISOString()}）不满足 "≤ 改动时刻 且 窗口 ≤ ${planScope.windowHours}h"`
-    + `（改动时刻 ${new Date(when).toISOString()}）`);
+if (planned === null) {
+  findings.push('没有任何计划行覆盖这次改动（样本宣告里没有 plan）');
+} else if (planned.ts > when) {
+  findings.push(`计划行（${planned.id} @ ${new Date(planned.ts).toISOString()}）**晚于**改动时刻（${new Date(when).toISOString()}）⇒ 先做后补，不算事前设计`);
+} else if (when - planned.ts > windowMs) {
+  findings.push(`最近一条计划行（${planned.id} @ ${new Date(planned.ts).toISOString()}）已过窗（窗口 ${planScope.windowHours}h，改动时刻 ${new Date(when).toISOString()}）`);
 }
 
 console.log(`PLAN_CHECK_MODE=${mode} DECLARED_BY=${planScope.declaredBy} WINDOW_HOURS=${planScope.windowHours} CODE_GLOBS=${planScope.codeGlobs.join(',')}`);
-console.log(`PLAN_CHECK_SCOPE changed=${changed.length} code=${codeFiles.length} plan_rows=${planRows.length} newest_plan=${newest.id}`);
+console.log(`PLAN_CHECK_SCOPE changed=${changed.length} code=${codeFiles.length} plan_rows=${planRows.length} planned=${planned === null ? '(none)' : planned.id}`);
+if (fixtureTimeline !== null) {
+  // 约束②：用了样本宣告就**自曝**（含"真台账未参与"这一点，免得被读成生产上下文里的结论）
+  console.log(`PLAN_CHECK_TIMELINE=fixture（**样本宣告的时间线**，不是真 git 历史：now=${new Date(fixtureTimeline.when).toISOString()}`
+    + ` files=${fixtureTimeline.files.length} plan=${fixtureTimeline.plan === null ? '(none)' : new Date(fixtureTimeline.plan.ts).toISOString()}；真台账行数按 0 计）`);
+}
 console.log(`PLAN_CHECK_SELF_DISCLOSURE 本检查只核"计划工件是否存在且时点成立"，**判不了"是否真先想过"**；`
   + '`why/criteria/rollback` 是**声明**不是签名（能写台账的人也能把话说得漂亮）；且钩子只在提交时跑 ⇒ **抓不到"已经动手了"**。');
 if (findings.length === 0) {

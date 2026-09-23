@@ -1,0 +1,11 @@
+{
+  "files": [
+    "src/a.mjs"
+  ],
+  "now": "2026-09-23T10:00:00.000Z",
+  "plan": {
+    "id": "FX-PLAN-STALE",
+    "ts": "2026-09-21T10:00:00.000Z"
+  },
+  "armed": true
+}

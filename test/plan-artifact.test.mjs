@@ -137,3 +137,50 @@ test('计划⑥: 真仓（本仓未声明 planScope）⇒ exit 2，如实报"我
   assert.match(r.stdout, /PLAN_CHECK=not-applicable/);
   assert.doesNotMatch(r.stdout, /PLAN_CHECK_RESULT=pass/);
 });
+
+// ── 计划⑦~⑩：**静态样本**（`.plan-sample.json` 宣告时间线）—— 这是"能挂 spec/绑定"的前提 ─────────
+// 背景（设计单 §9）：本检查器的结论依赖 **git 历史 + 落点配置** ⇒ 静态样本目录原本表达不出来
+// ⇒ 硬造 spec 只能产出"看起来有判别力、实际没核过"的假绑定。现在样本可以**自己宣告时间线**：
+// `{ files, now, plan:{id,ts}, armed?:true }`。
+
+const FX = (name) => join(PKG_ROOT, 'test-fixtures', name);
+
+test('计划⑦: 静态绿样本 ⇒ exit 0 / PLAN_FINDINGS=0 / pass', () => {
+  const r = runCheckerVerdict(CHECKER, { sampleDir: FX('plan-fx-green'), label: 'plan-fx-green' });
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /PLAN_FINDINGS=0/);
+  assert.match(r.stdout, /PLAN_CHECK_RESULT=pass/);
+});
+
+test('计划⑧: 三个静态红样本 ⇒ exit 1 / PLAN_FINDINGS=1（各自的命中理由不同）', () => {
+  const cases = [
+    ['plan-fx-stale', /已过窗/],
+    ['plan-fx-scoped', /晚于.*改动时刻|先做后补/],
+    ['plan-fx-noplan', /没有任何计划行覆盖/],
+  ];
+  for (const [name, reason] of cases) {
+    const r = runCheckerVerdict(CHECKER, { sampleDir: FX(name), label: name });
+    assert.equal(r.status, 1, `${name} 必须红；out=${r.stdout}`);
+    assert.match(r.stdout, /PLAN_FINDINGS=1/);
+    assert.match(r.stdout, reason, `${name} 的命中理由必须点名`);
+  }
+});
+
+test('计划⑨（护栏）: 样本宣告的时间线必须**自曝**，且真仓上不得出现该自曝', () => {
+  const fx = runCheckerVerdict(CHECKER, { sampleDir: FX('plan-fx-green'), label: 'plan-fx-green' });
+  assert.match(fx.stdout, /PLAN_CHECK_TIMELINE=fixture/, '用了样本宣告就必须自曝（否则它就是个后门）');
+  assert.match(fx.stdout, /真台账行数按 0 计/, '必须说清"真台账没参与本次判定"');
+  // 生产路径（真仓）不得出现 fixture 字样
+  const real = runCheckerVerdict(CHECKER, { sampleDir: null, label: '真仓', expect: 'not-applicable' });
+  assert.doesNotMatch(real.stdout, /fixture/, '真仓上不得出现样本宣告的痕迹（生产不读那个文件）');
+});
+
+test('计划⑩（护栏）: 样本的 `armed` 声明优先于环境变量，且只影响被检根内的判定', () => {
+  // 红样本自带 armed:true ⇒ 即便显式把环境变量设成 observe，也必须 exit 1
+  const r = spawnSync(process.execPath, [CHECKER], {
+    cwd: PKG_ROOT, encoding: 'utf8',
+    env: { ...process.env, RULEKEEPER_SAMPLE_DIR: FX('plan-fx-stale'), RULEKEEPER_PLAN_MODE: 'observe' },
+  });
+  assert.equal(r.status, 1, `样本宣告 armed 必须压过环境变量；out=${r.stdout}`);
+  assert.match(r.stdout ?? '', /PLAN_CHECK_MODE=armed/);
+});

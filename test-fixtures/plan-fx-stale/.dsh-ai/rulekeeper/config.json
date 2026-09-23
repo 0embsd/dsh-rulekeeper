@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "mode": "observe",
+  "repoKind": "private",
+  "planScope": {
+    "codeGlobs": [
+      "**/*.mjs",
+      "**/*.go"
+    ],
+    "windowHours": 24
+  }
+}
