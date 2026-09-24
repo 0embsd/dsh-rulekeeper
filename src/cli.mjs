@@ -2615,8 +2615,12 @@ function runCliCheck(argv, io, env) {
 
 /** 落点父目录里推断项目根（`<项目>/.dsh-ai/rulekeeper` 形态）；推不出则退回 cwd */
 function projectRootOfLanding(landing) {
-  const parts = String(landing).split(/[\\/]/).filter((s) => s !== '');
-  if (parts.length >= 2 && parts[parts.length - 2] === '.dsh-ai') {
+  // 2026-09-23：**保留开头的空段** —— POSIX 绝对路径以 `/` 开头，`split()` 后首段是空串，
+  //   滤掉它就等于把前导 `/` 丢了（`join('/')` 再也拼不回来）⇒ `resolve()` 会按 cwd 拼出
+  //   一个不存在的路径。同族病害见 `runSnap` 里那处长注释（Windows 上有盘符托底故不复现）。
+  const raw = String(landing).split(/[\\/]/);
+  const parts = raw[0] === '' ? ['', ...raw.slice(1).filter((s) => s !== '')] : raw.filter((s) => s !== '');
+  if (parts.length >= 3 && parts[parts.length - 2] === '.dsh-ai') {
     const guess = resolve(parts.slice(0, -2).join('/'));
     if (existsSync(guess)) return guess;
   }
@@ -3848,15 +3852,19 @@ export function runSnap(argv, io = defaultIo(), env = process.env) {
     io.err(`rk-snap: --landing 不是已存在目录: ${landing}\n`);
     return RC.USAGE;
   }
-  // 2026-09-23 修（**CI 的 Ubuntu/macOS 作业抓到**，本地 Windows 全绿 ⇒ 平台相关）：
-  //   原口径 `flags.project ?? projectRootOfLanding(landing)`（推不出退回 cwd）在"落点在别处、
-  //   cwd 不是项目根"的调用形态下（消费方仓 / 夹具仓，都是真实用法）取不到正确的根
-  //   ⇒ `normalizeTarget` 落到"原样**绝对**路径" ⇒ 索引里存绝对路径，而闸门与保护面 glob 都按
-  //   **项目相对**比 ⇒ 受保护文件"永远没留证"（GATE_WRITE_NO_SNAPSHOT）、提交被拒。
-  //   三轮试错后的结论：**别推**——落点的**结构**就是 `<项目>/.dsh-ai/<名字>`，
-  //   项目根 = 落点上溯**两级**（这是"单一权威源"，不是启发式；推不出时退回旧行为并说明）。
-  const landingParts = String(resolve(flags.landing)).split(/[\\/]/).filter((s) => s !== '');
-  const structuralRoot = landingParts.length >= 2 && landingParts[landingParts.length - 2] === '.dsh-ai'
+  // 2026-09-23 修（**CI + 真机 Linux 逐步探针定位**；Windows 永不复现）：
+  //   根因：**绝对路径开头的那个 `/` 被吃掉了**。原写法 `split(/[\\/]/).filter(s => s !== '')` 把
+  //   POSIX 绝对路径 `/tmp/a/proj/.dsh-ai/rulekeeper` 拆成 `['tmp','a','proj','.dsh-ai','rulekeeper']`
+  //   —— 开头的空串（就是那个前导 `/`）被滤掉；再 `join('/')` 拼回 `tmp/a/proj` 便**成了相对路径**，
+  //   `resolve()` 于是按 cwd 拼出 `<cwd>/tmp/a/proj`（一个不存在的根）⇒ 最终退回"落点当项目根"
+  //   ⇒ 索引里落**绝对路径** ⇒ 闸门与保护面 glob（按项目相对比）判"从未留证"（GATE_WRITE_NO_SNAPSHOT）。
+  //   Windows 上首段是盘符（`C:` 非空）⇒ 天然托底 ⇒ 本机永远绿。**这就是"只在 Linux/macOS 出现"的原因。**
+  //   修法：**保留开头的空段**（`join('/')` 会把它还原成前导 `/`），只滤掉其余空段（重复斜杠）。
+  const rawParts = String(resolve(flags.landing)).split(/[\\/]/);
+  const landingParts = rawParts[0] === ''
+    ? ['', ...rawParts.slice(1).filter((s) => s !== '')]
+    : rawParts.filter((s) => s !== '');
+  const structuralRoot = landingParts.length >= 3 && landingParts[landingParts.length - 2] === '.dsh-ai'
     ? resolve(landingParts.slice(0, -2).join('/'))
     : null;
   const projectRoot = flags.project !== undefined
