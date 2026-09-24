@@ -1,0 +1,1 @@
+dsh plugin --profile web add "github:0embsd/dsh-rulekeeper#cfb4076"
