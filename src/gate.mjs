@@ -132,6 +132,34 @@ function existsCaseInsensitive(root, rel) {
 }
 
 /**
+ * 索引记录里的 `path` 是否为**合法的项目根相对形态**（P26，2026-09-24）。
+ *
+ * 为什么需要这条：删除面原来把"记录形态越界"（含**绝对形态**，例如旧写侧烙下的
+ * `d:/opt/<项目>/.claude/rules/x.md`）与"文件真的被删除"报成**同一个 finding**
+ * （`GATE_WRITE_PROTECTED_MISSING`），而那个记录**永远修不好**——索引是 append-only，
+ * 被治理方不得手改 ⇒ 落点**永久卡死**（实测：文件明明在磁盘上、sha 也对得上，却判"已删除"）。
+ *
+ * 判据（"合法形态"= 归一后仍落在项目根下、且归一结果是个相对路径）：
+ *   · `d:/opt/proj/.claude/rules/x.md` ⇒ 归一成 `.claude/rules/x.md`（**在根下**）⇒ 合法**形态**；
+ *     注意：形态合法 ≠ 该记录指向的文件一定还在，后续仍按归一结果查磁盘。
+ *   · `../../etc/passwd`、`C:/Windows/system32/x`（在根外）⇒ 不合法 ⇒ 归入"形态越界"。
+ * 返回 `{ rel, form }`：`rel` = 归一后的相对路径（形态越界时为 null）。
+ */
+function classifyIndexPath(recPath, root) {
+  const raw = typeof recPath === 'string' ? recPath : '';
+  if (raw.trim() === '') return { rel: null, form: 'empty', raw };
+  const norm = normalizeTarget(raw, root);
+  if (norm === null || norm === '.') return { rel: null, form: 'unresolvable', raw };
+  const segs = norm.split('/');
+  const escapes = segs.includes('..');
+  // 归一结果**仍是绝对形态** ⇒ 它不在项目根下（normalizeTarget 对"根下"的输入会给出相对段）
+  const stillAbsolute = /^([A-Za-z]:[\\/]|[\\/])/.test(norm);
+  if (escapes || stillAbsolute) return { rel: null, form: 'out-of-root', raw };
+  const absolutish = /^([A-Za-z]:[\\/]|[\\/])/.test(raw.trim());
+  return { rel: norm, form: absolutish ? 'absolute-in-root' : 'relative', raw };
+}
+
+/**
  * 写入侧对账。
  * @param {object} opts
  * @param {string} opts.projectRoot 项目根（受保护路径相对它归一）
@@ -207,17 +235,47 @@ export function reconWrite(opts = {}) {
   // **删除面**（LF-540 独立评审 阻断①：删除受保护文件 = 对受保护路径的改动，此前两处都没兜）：
   //   `discoverFiles` 走的是"磁盘上存在的文件"，所以**被删掉的受保护文件根本不在候选集**，
   //   只能从**快照索引**（谁曾经留过证）反查："索引里有基线、磁盘上却没了" ⇒ 判红。
+  //
+  // **P26（2026-09-24，被治理方卡死提交后修的）**：原来这里两处**形态口径不一致** ——
+  //   `isProtected()` 内部会把绝对形态归一后匹配（判 protected=true），而紧接着的
+  //   `existsCaseInsensitive(root, rel)` 用的是**未归一的原值** ⇒ 从项目根下找 `<root>/d:/opt/…`
+  //   必然不存在 ⇒ 旧写侧烙下的**绝对形态记录**被报成"文件已被删除"。
+  //   而该记录**永远修不好**（索引 append-only，被治理方不得手改）⇒ 落点**永久卡死**提交，
+  //   只剩 `--no-verify` 或摘保护面两条违规路 —— 这正是本仓记过的"门禁不可满足 ⇒ 逼人违规"死锁。
+  //   现口径：**先用归一结果分类**（合法相对形态 / 绝对但在根内 / 越界或不可归一），
+  //   只有"合法形态 + 磁盘上确实没有"才算**真删除**；越界形态**改报** `GATE_WRITE_INDEX_PATH_FORM`
+  //   （**advisory**：被治理方无法合规修复历史记录 ⇒ 判红它等于把它永远钉死；但必须**可见**）。
   const recordedMissing = [];
+  const indexPathForm = [];
   if (protection.patterns.length > 0) {
     const seen = new Set(checked.map((c) => c.path));
     for (const rec of index.values) {
-      const rel = typeof rec.path === 'string' && rec.path !== '' ? rec.path : null;
-      if (rel === null || seen.has(rel)) continue;
+      const cls = classifyIndexPath(rec.path, root);
+      if (cls.rel === null) {
+        // 形态越界 / 不可归一：**不是**"文件被删"，如实分级（带原值与时间戳，便于追来源）
+        if (typeof rec.path === 'string' && rec.path !== '') {
+          indexPathForm.push({ path: String(rec.path), form: cls.form, recordTs: typeof rec.ts === 'string' ? rec.ts : null });
+        }
+        continue;
+      }
+      const rel = cls.rel;
+      if (seen.has(rel)) continue;
       if (isProtected(rel, rules, { projectRoot: root }).protected !== true) continue;
+      // ⚠ 存在性检查必须用**归一后的相对路径**（P26 的病根就是用原值）
       if (existsCaseInsensitive(root, rel)) continue;
       seen.add(rel);
       recordedMissing.push({ path: rel, baseline: baselineOf(rec), recordTs: typeof rec.ts === 'string' ? rec.ts : null });
     }
+  }
+  for (const c of indexPathForm) {
+    findings.push({
+      code: 'GATE_WRITE_INDEX_PATH_FORM',
+      // advisory：见上（历史记录 append-only、被治理方不得手改）。**不判红**，但必须逐条可见。
+      advisory: true,
+      message: `快照索引里有一条**形态越界**的记录（${c.form}）: ${c.path} record_ts=${c.recordTs ?? '(none)'}`
+        + ' -> 该记录**不是**项目根相对形态（多为旧写侧烙下的绝对路径），**不代表文件被删除**；'
+        + '不要手改索引（append-only），本条只作如实登记。',
+    });
   }
   for (const c of recordedMissing) {
     findings.push({
@@ -240,7 +298,9 @@ export function reconWrite(opts = {}) {
   }
   const mtimeAux = checked.filter((c) => c.mtimeNewer === true).length;
   return {
-    ok: findings.length === 0,
+    // advisory **不判红**（P26：`GATE_WRITE_INDEX_PATH_FORM` 是"如实登记历史越界记录"，
+    //   被治理方无法合规修复 append-only 的旧行 ⇒ 判红它等于把落点永久钉死）。口径同 `verifyHooks`/`ciGate`。
+    ok: findings.filter((f) => f.advisory !== true).length === 0,
     phase,
     landingPresent: existsSync(landing),
     present: protection.present,
@@ -261,6 +321,7 @@ export function reconWrite(opts = {}) {
     nosnapshot,
     missingOnDisk,
     recordedMissing,
+    indexPathForm,
     mtimeAux,
     findings,
   };

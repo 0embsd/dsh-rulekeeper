@@ -93,7 +93,15 @@ export const FILES = Object.freeze([
     fields: [
       { name: 'schema', type: 'number', required: true },
       { name: 'ts', type: 'iso8601', required: true },
-      { name: 'path', type: 'string', required: true, note: '**pathKey** 形式（posix + 折叠大小写）' },
+      {
+        name: 'path',
+        type: 'string',
+        required: true,
+        // P26（2026-09-24）：把"**必须是项目根相对**"写进契约本身 —— 历史遗留的越界记录（含绝对形态）
+        //   会造出一个**修不好的**假红（索引 append-only ⇒ 被治理方不得手改）⇒ 对账侧必须分级：
+        //   越界形态报 `GATE_WRITE_INDEX_PATH_FORM`（advisory），真删除仍报 `GATE_WRITE_PROTECTED_MISSING`。
+        note: '**pathKey** 形式（posix + 折叠大小写）**且必须是项目根相对**：不得为绝对路径（含盘符/前导 `/`）、不得含 `..`。违反者写入侧应拒绝登记；历史遗留的越界记录 ⇒ 对账报 `GATE_WRITE_INDEX_PATH_FORM`（**advisory**，逐条可见、不判红；索引 append-only ⇒ 被判红方无法合规修复）',
+      },
       { name: 'sha256_before', type: 'sha256', required: true },
       { name: 'sha256_after', type: 'sha256', required: false },
       { name: 'sha256_lf', type: 'sha256', required: false, note: '**行尾归一形态**（CRLF→LF）的 sha256：仅文本文件（二进制为 null）；供 core.autocrlf=true 时跨形态比对（G3）' },

@@ -75,10 +75,16 @@ export const RETIRE_MARK = 'EFFECT_RETIRE_CANDIDATE';
  * 同时把被替换的旧绑定**逐条留证**（`superseded` 字段 + `生效退役` 账本行）。
  *
  * 为什么非有不可（2026-09-22 实测，被治理项目当场撞到）：`EFFECT_CHECKER_ALREADY_BOUND` 只写了
- * "要先退役再改"，而**退役通路只支持"整条纪律摘空"**（`RETIRE_MARK` 分支把该 rule 的 checks 全摘）。
+ * "要先退役再改"，而**当时**退役通路只支持"整条纪律摘空"（`RETIRE_MARK` 分支把该 rule 的 checks 全摘）。
  * 于是"判据要在**不中断保护**的前提下改一处/换一版"这件事，在这套工具里**根本没有合法路径**：
  * 唯一出路是手改 `rules.json` —— 正是"闸门不可被 AI 直接改"这条声明存在的理由。
  * 判据本身会演进（本次就是：`byte-discipline@1 → @2`），一条判据一辈子只能绑一次 = 谎。
+ *
+ * **2026-09-24 更新（P11，措辞更正）**：上面"退役只支持整条摘空"**已不成立** —— 退役通路现有
+ * **判据粒度**：`rk-effect retire --carrier <载体>` 只摘**指定那一条**绑定（同 rule 的别的绑定与别条纪律都不动）；
+ * 未指定载体而该 rule 有多条绑定 ⇒ **fail-closed 拒绝**并逐条列出候选（不静默改成全摘）；
+ * 指定的载体不存在 ⇒ 同样拒绝并列出现有绑定。用例见 `test/effect-retire-granularity.test.mjs`（6 条，含端到端真落盘）。
+ * 保留这段历史说明是为了记住**当时为什么必须有 supersede**（退役粒度是后来补的，不是一开始就有）。
  */
 export const SUPERSEDE_MARK = 'EFFECT_SUPERSEDE';
 /** 老形态/新形态都认的字段名（`counterExample` 是字符串，装不下结构，故放顶层键） */

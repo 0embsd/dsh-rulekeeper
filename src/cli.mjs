@@ -2316,8 +2316,13 @@ export function runGateWrite(rest, io = defaultIo(), env = process.env) {
   io.out(line(`RK_GATE_WRITE_UNRECORDED=${r.unrecorded.length}`));
   io.out(line(`RK_GATE_WRITE_NOSNAPSHOT=${r.nosnapshot.length}`));
   io.out(line(`RK_GATE_WRITE_MISSING_ON_DISK=${r.missingOnDisk.length}`));
+  // P26：索引记录里**形态越界**的条数（advisory，不判红）。单独一行计数 + 逐条明细，便于"看见但不卡死"。
+  io.out(line(`RK_GATE_WRITE_INDEX_PATH_FORM=${(r.indexPathForm ?? []).length}`));
   io.out(line(`RK_GATE_WRITE_SKIPPED_NOT_PROTECTED=${r.skipped}`));
   io.out(line(`RK_GATE_WRITE_MTIME_NEWER_THAN_RECORD=${r.mtimeAux}`));
+  for (const c of r.indexPathForm ?? []) {
+    io.out(line(`INDEX_PATH_FORM ${c.form} path=${c.path} record_ts=${c.recordTs ?? '(none)'}`));
+  }
   for (const c of r.nosnapshot) io.out(line(`NOSNAPSHOT ${c.path} current=${short(c.sha256)} matched=${c.matched}`));
   for (const c of r.unrecorded) {
     io.out(line(`UNRECORDED ${c.path} current=${short(c.sha256)} baseline=${short(c.baseline)} record_ts=${c.recordTs ?? '(none)'}`));

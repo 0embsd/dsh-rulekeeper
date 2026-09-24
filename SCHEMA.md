@@ -54,7 +54,7 @@
 |---|---|---|---|---|---|
 | `schema` | number | 是 |  |  |  |
 | `ts` | iso8601 | 是 |  |  |  |
-| `path` | string | 是 |  |  | **pathKey** 形式（posix + 折叠大小写） |
+| `path` | string | 是 |  |  | **pathKey** 形式（posix + 折叠大小写）**且必须是项目根相对**：不得为绝对路径（含盘符/前导 `/`）、不得含 `..`。违反者写入侧应拒绝登记；历史遗留的越界记录 ⇒ 对账报 `GATE_WRITE_INDEX_PATH_FORM`（**advisory**，逐条可见、不判红；索引 append-only ⇒ 被判红方无法合规修复） |
 | `sha256_before` | sha256 | 是 |  |  |  |
 | `sha256_after` | sha256 | 否 |  |  |  |
 | `sha256_lf` | sha256 | 否 |  |  | **行尾归一形态**（CRLF→LF）的 sha256：仅文本文件（二进制为 null）；供 core.autocrlf=true 时跨形态比对（G3） |

@@ -42,6 +42,7 @@ rk-gate / rk-check / rk-snap / rk-crossplat / …   # 22 个薄壳子命令
 | **远端兜底** | `rk-gate ci`：**不依赖本机 hook**（新 clone 天然没有 hook），按 `base..head` 范围对账 | 未留证改动 → `exit≠0` |
 | **删除也算改动** | 提交枚举用 `--name-status`，D 面单列（`--diff-filter=ACMR` 会**整条漏掉**"只删"的提交） | 删受保护文件 → 判红 |
 | **台账不自证** | `verdict:"pass"` 必须带可对账物证（`committed == 提交内容 == baseline`），否则判红 | 手写一行 JSON **洗不白** |
+| **形态违法 ≠ 文件被删** | 快照索引的 `path` 必须是**项目根相对**形态；历史遗留的越界形态（如旧写侧烙下的绝对路径）⇒ 报 `GATE_WRITE_INDEX_PATH_FORM`（**advisory**，逐条可见、**不判红**——索引 append-only，被判红方无法合规修复）；**真删除**（合法形态记录 + 磁盘上确实没有）仍判 `GATE_WRITE_PROTECTED_MISSING` | 越界记录 → 可见但不卡提交；真删除 → `exit≠0` |
 | **自进化** | 同一纪律复发 ≥2 次 → `evolve` 生成**提案**（只写 `proposals/`，**绝不自动改规则**） | 闸先于写者 |
 | **落点可迁移** | `rk-migrate`：老落点 → 新落点（默认 dry-run；五项核对通过才成功；默认保留旧落点） | 核对不一致 → `exit≠0` 且不删源 |
 
