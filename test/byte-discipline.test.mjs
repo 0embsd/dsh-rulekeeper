@@ -176,7 +176,30 @@ test('判据⑨（P10）: 范围必须明示（非 git 仓 ⇒ 如实降级为�
   const res = run(dir);
   // 临时目录不是 git 仓 ⇒ 拿不到跟踪清单 ⇒ **不得假装**是 tracked 模式
   assert.match(res.out, /BYTE_DISCIPLINE_SCOPE MODE=filesystem INCLUDES_UNTRACKED=yes INCLUDES_GITIGNORED=yes/);
-  assert.match(res.out, /UNTRACKED_FILES=\d+ SKIPPED_BINARY=\d+ SCANNED=\d+/);
+  assert.match(res.out, /UNTRACKED_FILES=\d+ SKIPPED_BINARY=\d+ SKIPPED_NON_TEXT_EXT=\d+ SCANNED=\d+/);
+});
+
+test('判据⑨b（P18 复核，2026-09-24）: **没有扩展名白名单** —— `.patch`/无扩展名文件都必须被扫，且"按扩展名跳过"读数为 0', () => {
+  // 被治理方报"`TEXT_EXT` 仍不含 `.patch`" —— 本仓复核结论：`TEXT_EXT` 白名单**早已取消**
+  //   （`byte-discipline@2` 起"非二进制即文本"，因为白名单实测漏掉了**无扩展名**的 `.gitattributes`）。
+  //   本条用**可重跑的两态**把这件事钉住：① `.patch` 与无扩展名文件真被扫（真混行尾 ⇒ 真报）；
+  //   ② 读数 `SKIPPED_NON_TEXT_EXT=0` 必须打出来（消费者据此确认"没有按扩展名静默丢弃"）。
+  const dir = tempDir('byte-noext-whitelist');
+  writeFileSync(join(dir, '.gitattributes'), '*.patch text eol=lf\n.gitattributes text eol=lf\n', 'utf8');
+  gitInit(dir);   // 助手内部完成 add+commit（见本文件顶部）
+  // 两个"白名单时代会被跳过"的形态：`.patch` 与**无扩展名**文件，都造真混行尾
+  writeFileSync(join(dir, 'x.patch'), 'a\r\nb\n', 'utf8');
+  writeFileSync(join(dir, 'NOEXT'), 'c\r\nd\n', 'utf8');
+  // 入库：只有已跟踪文件才在默认扫描面内（否则本条测的是"未跟踪不计入"那条判据）
+  spawnSync('git', ['-C', dir, 'add', '-A'], { encoding: 'utf8' });
+  spawnSync('git', ['-C', dir, 'commit', '-q', '-m', 'probe'], { encoding: 'utf8' });
+  assert.equal(spawnSync('git', ['-C', dir, 'ls-files', '--error-unmatch', 'x.patch'], { encoding: 'utf8' }).status, 0,
+    '前置事实：x.patch 必须已入库（否则不在默认扫描面内）');
+  const res = run(dir);
+  assert.match(res.out, /BYTE_DISCIPLINE_SCOPE .*SKIPPED_NON_TEXT_EXT=0 /,
+    '必须打出"按扩展名跳过 = 0"的读数（恒 0 也是如实读数：白名单已不存在）');
+  assert.match(res.out, /BYTE_EOL_INCONSISTENT: x\.patch/, '`.patch` 必须被扫（白名单已取消）');
+  assert.match(res.out, /BYTE_EOL_INCONSISTENT: NOEXT/, '**无扩展名**文件也必须被扫（当年白名单正是漏了它）');
 });
 
 // ── 判据⑩（P10 第二段：扫描面必须等于"仓库承诺面"）─────────────────────────────

@@ -195,6 +195,22 @@ export function restoreSnapshot(opts = {}) {
  * 拿"快照对账"去数它们 = 对象错位（规则 41 同族）。
  */
 const SNAPSHOT_NEVER_BACKED_UP = Object.freeze(new Set(['rules.json', 'config.json', 'hooks.json', 'index.jsonl']));
+/**
+ * **由兄弟机制/共享库写备份、而本工具从不对其做快照**的源文件名（2026-09-24，P23 残留的根因）。
+ *
+ * 为什么单列一条（不能并进 `SNAPSHOT_NEVER_BACKED_UP`）：那个集合是"**落点管理文件**"——本工具的写通路
+ * 会备份它们；而这里是"**所有者不在本工具**"的文件：它们的备份由别的机制放进来，本工具既不管也从不快照。
+ * 实测两条来源：
+ *   · `ledger.jsonl` —— 本工具的账本，**append-only**（LF-120 冻结单：行不可原地改写）⇒ 从不作为快照对象；
+ *     但 `--ledger` 类通路会先备份再写 ⇒ 落点里出现合法命名的 `ledger.jsonl.<ts>.bak`。
+ *   · `lessons.json` / `usage.json` / `team.json` / `gates.json` —— **共享库**（common-ops 那套）的账本，
+ *     压根不是本工具管理的文件，却与落点 `backups/` 共用目录。
+ * 旧口径把它们报成"有备份无记录"并让 `recon` 判红 ⇒ 拿"快照对账"去数"别人的备份"（对象错位，规则 41 同族）。
+ */
+const EXTERNAL_OWNER_BACKUP_SOURCES = Object.freeze(new Set([
+  'ledger.jsonl', 'findings.jsonl',
+  'lessons.json', 'usage.json', 'team.json', 'gates.json', 'activations.jsonl',
+]));
 
 export function reconSnapshots(opts = {}) {  const { projectRoot, landingDir } = opts;
   const index = readIndex(landingDir);
@@ -251,6 +267,16 @@ export function reconSnapshots(opts = {}) {  const { projectRoot, landingDir } =
     const isSnapshotNaming = /\.\d{8}-\d{6}\.bak$/.test(name);
     if (!isSnapshotNaming || SNAPSHOT_NEVER_BACKED_UP.has(sourceName)) {
       nonSnapshotBackups.push({ backup: display, reason: `不是快照前像（${!isSnapshotNaming ? '命名不是快照形态' : `源文件 ${sourceName} 属落点管理文件，快照不备份它`}）⇒ 来自绑定写通路/索引自身，与快照索引无关，不计入判定` });
+      continue;
+    }
+    // **第三类：外部所有者的备份**（2026-09-24 实测，P23 残留 4 条的根因）：落点 `backups/` 是**共用目录**，
+    //   兄弟机制也会往里放备份 —— 实测 `ledger.jsonl.<ts>.bak`（本工具的账本，**append-only、从不作为快照对象**）
+    //   与 `lessons.json.<ts>.bak`（**共享库账本**，压根不是本工具管理的文件）。
+    //   它们的命名是合法快照形态、源文件也不在"管理文件"集合里 ⇒ 上面两条规则都拦不住 ⇒ 旧口径把
+    //   `ledger.jsonl`×3 + `lessons.json`×1 报成"有备份无记录"并让整条 recon 判红 —— 那是拿
+    //   "快照对账"去数"别的所有者的备份"。判据仍落在**该文件自己的事实**上：它的所有者不是"可被快照的受保护文件"。
+    if (EXTERNAL_OWNER_BACKUP_SOURCES.has(sourceName) || SNAPSHOT_NEVER_BACKED_UP.has(sourceName)) {
+      nonSnapshotBackups.push({ backup: display, reason: `不是快照前像（源文件 ${sourceName} 由**兄弟机制/共享库**写备份：本工具从不对它做快照 —— 账本 append-only、共享库账本不属本工具管理）⇒ 与快照索引无关，不计入判定` });
       continue;
     }
     unrecordedBackups.push({ backup: display, reason: '盘上有、索引从未引用过 ⇒ 可能是快照失败留下的孤儿（值得看一眼）' });

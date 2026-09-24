@@ -98,6 +98,15 @@ const noEol = [];
 let scanned = 0;
 let skippedBinary = 0;
 let skippedUntracked = 0;
+/**
+ * **按扩展名被跳过的文件数**（P18 复核结论，2026-09-24）：本口径**恒为 0**，且这是"如实读数"而非占位。
+ *
+ * 为什么留一个恒 0 的计数：`byte-discipline@2` 起**取消了扩展名白名单**（非二进制即文本，见主循环 L163），
+ * 于是"按扩展名静默丢弃文件"这条路**在实现上不存在**。但消费者无法从别处验证这一点 —— 他们只看到
+ * `SCANNED=<n>`，回答不了"有没有文件因为不在白名单里而被悄悄跳过"。把 0 打出来 = **把审计面封上**：
+ * 哪次改动若把白名单加回来，这个读数立刻 ≠ 0，一审现形。
+ */
+let skippedNonTextExt = 0;
 /** 被当夹具面跳过的目录（P12：跳过了什么、跳了多少文件，必须看得见） */
 const skippedFixtureDirs = [];
 // **扫描面**（2026-09-22，P10 第二段：他们实测检查器会扫到被 `.gitignore` 忽略的本地文件，
@@ -347,7 +356,7 @@ if (existsSync(hooksDir)) {
 // "不知道这一份清单覆盖到哪"）：扫的是**文件系统**，因此包含被 `.gitignore` 忽略的本地文件；
 // 二进制按 NUL/替换字符跳过并计数（不让行尾手术伤到压缩包）。
 console.log(`BYTE_DISCIPLINE_ROOT=${root.split('\\').join('/')} GITATTRIBUTES=${existsSync(gaPath) ? 'present' : 'absent'} PINS=${pins.length} HOOKS=${existsSync(hooksDir) ? 'present' : 'absent'} STRICT_DIRS=${strictDirs.join(',') || '(all)'}`);
-console.log(`BYTE_DISCIPLINE_SCOPE MODE=${scanModeEffective} INCLUDES_UNTRACKED=${scanModeEffective === 'tracked' ? 'no' : 'yes'} INCLUDES_GITIGNORED=${scanModeEffective === 'tracked' ? 'no' : 'yes'} UNTRACKED_FILES=${skippedUntracked} SKIPPED_BINARY=${skippedBinary} SCANNED=${scanned}`);
+console.log(`BYTE_DISCIPLINE_SCOPE MODE=${scanModeEffective} INCLUDES_UNTRACKED=${scanModeEffective === 'tracked' ? 'no' : 'yes'} INCLUDES_GITIGNORED=${scanModeEffective === 'tracked' ? 'no' : 'yes'} UNTRACKED_FILES=${skippedUntracked} SKIPPED_BINARY=${skippedBinary} SKIPPED_NON_TEXT_EXT=${skippedNonTextExt} SCANNED=${scanned}`);
 // **夹具面口径打在输出里**（P12）：样本放错目录时，人能立刻看到"我把哪个目录当样本跳过了"。
 console.log(`BYTE_DISCIPLINE_FIXTURE_FACE dirs=${FIXTURE_DIRS.join(',')} skipped=${skippedFixtureDirs.map((d) => `${d.rel}(${d.files})`).join(',') || '(none)'}`);
 console.log(`BYTE_DISCIPLINE_COUNTS mixed=${mixed.length} bom=${boms.length} noeol=${noEol.length}`);

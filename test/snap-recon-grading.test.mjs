@@ -104,3 +104,40 @@ test('P23④: 计数可核 —— records/backups/三类分级的数字与盘上
   assert.equal(r.unrecordedBackups.length, 1, 'y.mjs 那条是真未记录（值得看一眼）');
   assert.equal(r.ok, false, '有真未记录 ⇒ 判红（这才是该红的那一类）');
 });
+
+test('P23⑤: **外部所有者**的备份 ⇒ 计 nonSnapshot、不判红（被治理方残留 4 条的根因）', () => {
+  // 现场（2026-09-24 被治理方报"仍剩 UNRECORDED=4"，本仓复核到**具体身份**）：
+  //   `ledger.jsonl.<ts>.bak`×3 + `lessons.json.<ts>.bak`×1。
+  //   它们**命名是合法快照形态**、源文件也**不在**"落点管理文件"集合里 ⇒ 旧的两条规则一条都拦不住
+  //   ⇒ 被报成"有备份无记录"并把整条 recon 判红。而事实是：
+  //     · 账本是 **append-only**（LF-120）⇒ 本工具**从不**把它当快照对象；它的 `.bak` 来自别的写通路；
+  //     · `lessons.json` 是**共享库账本**，压根不是本工具管理的文件，只是与落点 `backups/` 共用目录。
+  //   判据仍落在"该文件自己的事实"上：它的**所有者**不是"可被快照的受保护文件"（规则 41 同族）。
+  const { projectRoot, landing, backups } = landingWith({
+    label: 'p23-external-owner',
+    backupName: 'x.mjs.20260923-100000.bak',
+  });
+  writeFileSync(join(backups, 'ledger.jsonl.20260923-100000.bak'), 'ledger pre-image\n', 'utf8');
+  writeFileSync(join(backups, 'lessons.json.20260923-100001.bak'), 'shared ledger pre-image\n', 'utf8');
+  const r = reconSnapshots({ projectRoot, landingDir: landing });
+  assert.equal(r.unrecordedBackups.length, 0,
+    `兄弟机制/共享库的备份**不得**算成"孤儿快照"；unrecorded=${JSON.stringify(r.unrecordedBackups)}`);
+  assert.equal(r.ok, true, '这两类不得让快照对账判红');
+  assert.equal(r.nonSnapshotBackups.length, 2, '但必须**如实计入** nonSnapshot（看得见、不判红）');
+  assert.match(r.nonSnapshotBackups.map((b) => b.reason).join(' '), /兄弟机制|共享库|append-only|不属本工具管理/);
+  assert.equal(r.backups, 3, '盘上备份总数仍如实为 3');
+});
+
+test('P23⑥（守卫）: 真孤儿（快照形态命名、源文件是可被快照的普通文件、索引从未记录）仍必须判红', () => {
+  // 这条守住"P23⑤ 的分级不得顺手把真孤儿也放过"——两类的**唯一**区别是源文件的所有者。
+  const { projectRoot, landing, backups } = landingWith({
+    label: 'p23-real-orphan',
+    backupName: 'x.mjs.20260923-100000.bak',
+  });
+  writeFileSync(join(backups, 'orphan.mjs.20260923-100002.bak'), 'orphan\n', 'utf8');
+  const r = reconSnapshots({ projectRoot, landingDir: landing });
+  assert.equal(r.unrecordedBackups.length, 1, `真孤儿必须照旧点名；unrecorded=${JSON.stringify(r.unrecordedBackups)}`);
+  assert.match(String(r.unrecordedBackups[0].backup), /orphan\.mjs\./);
+  assert.equal(r.ok, false, '有真孤儿 ⇒ 判红（这才是该红的那一类）');
+  assert.equal(r.nonSnapshotBackups.length, 0, '它不是"外部所有者"⇒ 不该被归到那一类');
+});
