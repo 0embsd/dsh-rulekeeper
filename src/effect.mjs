@@ -21,7 +21,7 @@
 // 归属：core 模块。零依赖：只用 node:*。
 
 import { createHash, randomBytes } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -41,6 +41,7 @@ import { packageRoot as packageRootOfThisModule, toPosix } from './platform/path
 import { requireAnchoredApprovalOf } from './config.mjs';
 import { isSafeId, listProposals, proposalPath, validateProposalQuality } from './proposal.mjs';
 import { redactValue } from './redact.mjs';
+import { REPO_KINDS, resolveRepoPatterns } from './repo-patterns.mjs';
 import { canonicalRule } from './ruleid.mjs';
 import { DEFAULT_NEAR_DUP_THRESHOLD, similarityText } from './similarity.mjs';
 import { isProtected, loadLandingRules, loadRules } from './rules.mjs';
@@ -541,6 +542,187 @@ export function recurrenceIdentity(rows = [], rule, activationTs, {
  * **只读**生效体检（LF-A20/A30）。
  * @param {{landingDir: string, now?: Date, staleDays?: number, rules?: object|null}} opts
  */
+/**
+ * `applicability.scope` 的已知取值表（**这是数据面声明，不是闸门**）。
+ * 来历（2026-09-24，被治理项目侧工单 §2）：某个类目在落点上恒为 `none`，而**唯一**的 ENV 面判据
+ * `leak-check` 对私有仓是**错档**（它自己 `exit 2` 自曝）⇒ 工单要求"`none` 必须带可读理由，
+ * 不得出现无解释的 none"。勘察发现：11 份随包规格**早就写了** `applicability.scope`，
+ * 但 `src/**` **一次都没读过它**（`grep applicability src/` 零命中）——
+ * 所以缺的不是"信息"，是"消费"。本表就是那份消费面。
+ *
+ * **刻意的边界（规则 43：自称型控制不是安全边界）**：
+ *   · 它**只解释** `EFFECT_TEXT_ONLY`，**不豁免**它——`RK_EFFECT_RESULT` 不因此变化；
+ *   · 认不出的 scope ⇒ 报 `EFFECT_CHECKER_SCOPE_UNKNOWN`（info）**并照旧给出理由**，不做 fail-closed
+ *     （未知取值是**声明面**的新值，不是判定面的故障；对治理别人仓的用户 fail-closed = 直接不能用）；
+ *   · 理由的来源是**插件包内**的规格文件 + 落点事实，**不读账本自报的 mechanism**
+ *     （实测 578 条教训行里 575 条自报 `text` ⇒ 拿自报当免罪符会把 17 条 error 一起洗白）。
+ */
+export const KNOWN_CHECKER_SCOPES = Object.freeze([
+  'any',
+  'any-with-git-hooks',
+  'any-with-plan-scope',
+  'public-repo-only',
+  'plugin-repo-only',
+  'js-project-with-src',
+  'js-project-with-tests',
+]);
+
+/** 形态事实探测的有界上限（体检是高频只读动作，不能变成慢查询）。 */
+export const SCOPE_FACTS_LIMITS = Object.freeze({ maxFiles: 200, maxDirs: 200, maxDepth: 4 });
+
+/** 一份规格文件的 `applicability.scope` 与本落点事实是否相符。 */
+export function checkerScopeVerdict(scope, facts = {}) {
+  const s = typeof scope === 'string' ? scope.trim() : '';
+  if (s === '') return { verdict: 'undeclared', reason: '该规格**未声明** applicability.scope（是不是"该用但没绑"无从判断）' };
+  if (!KNOWN_CHECKER_SCOPES.includes(s)) {
+    return { verdict: 'unknown-scope', reason: `该规格声明的 scope=${s} **不在已知取值表**里（${KNOWN_CHECKER_SCOPES.join(' / ')}）⇒ 解释不了"为什么没绑"` };
+  }
+  if (s === 'any') return { verdict: 'applicable', reason: null };
+  if (s === 'public-repo-only') {
+    return facts.repoKind === 'public'
+      ? { verdict: 'applicable', reason: null }
+      : { verdict: 'not-applicable', reason: `scope=public-repo-only，而本落点 repoKind=${facts.repoKind}（来源 ${facts.repoKindSource}）⇒ 该判据在本落点是**错档**（不适用 ≠ 通过）` };
+  }
+  if (s === 'plugin-repo-only') {
+    return facts.isPluginRepo === true
+      ? { verdict: 'applicable', reason: null }
+      : { verdict: 'not-applicable', reason: 'scope=plugin-repo-only，而本落点**不是插件自己的仓**（--project 未给或 ≠ 插件包根）⇒ 该判据在本落点不适用' };
+  }
+  if (s === 'js-project-with-src') {
+    return facts.hasJsSrc === true
+      ? { verdict: 'applicable', reason: null }
+      : { verdict: 'not-applicable', reason: `scope=js-project-with-src，而本落点没有 \`src/**/*.mjs\`（实测 src 下 .mjs 文件数 = ${facts.jsSrcCount ?? 0}）⇒ 该判据在本落点没有被测对象（不适用 ≠ 通过）` };
+  }
+  if (s === 'js-project-with-tests') {
+    return facts.hasJsTests === true
+      ? { verdict: 'applicable', reason: null }
+      : { verdict: 'not-applicable', reason: `scope=js-project-with-tests，而本落点没有 \`test/**/*.mjs\`（实测 test 下 .mjs 文件数 = ${facts.jsTestCount ?? 0}）⇒ 该判据在本落点没有被测对象（不适用 ≠ 通过）` };
+  }
+  // 剩下的是**形态**类声明（git 钩子 / plan 落点面 / 以及将来新增的取值）。
+  // 如实落"未评估"，不猜、也不据此声称不适用 —— 这一条是**如实边界**，不是缺口。
+  return { verdict: 'unassessed', reason: `该规格声明 scope=${s}；本落点是否具备该形态**本轮未机械评估**⇒ 这条读数只说明"有声明"，不解释"为什么没绑"` };
+}
+
+/**
+ * 读**插件包内** `scripts/checkers/**` 的规格，返回"每条 rule 装了哪些判据 + 各自的适用档位声明"。
+ * 只读、零写入；规格形状不合法（无 rule / scope 非字符串）如实进 `problems`，不静默丢弃。
+ * @param {{packageRoot?: string, dirs?: string[]}} [opts]
+ * @returns {{files: object[], problems: object[]}}
+ */
+export function shippedCheckerSpecs(opts = {}) {
+  const pkgRoot = typeof opts.packageRoot === 'string' && opts.packageRoot !== ''
+    ? opts.packageRoot
+    : packageRootOfThisModule();
+  const dirs = Array.isArray(opts.dirs) && opts.dirs.length > 0 ? opts.dirs : ['scripts/checkers'];
+  const files = [];
+  const problems = [];
+  for (const dir of dirs) {
+    const abs = join(pkgRoot, dir);
+    if (!existsSync(abs)) continue;
+    let names;
+    try {
+      names = readdirSync(abs).sort();
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (!/\.json$/i.test(name)) continue;
+      const rel = toPosix(join(dir, name));
+      let spec;
+      try {
+        spec = JSON.parse(readFileSync(join(abs, name), 'utf8'));
+      } catch {
+        continue;   // 不是规格/坏 JSON：这里不承担 schema 校验（另有通路），不猜
+      }
+      // "像规格"的判据 = 文件自己的事实（与 adopt.mjs 的 looksLikeSpec 同口径）
+      const hasCommand = Array.isArray(spec?.command) && spec.command.length > 0;
+      const hasRef = typeof spec?.checkerRef === 'string' && spec.checkerRef.trim() !== '';
+      if (!hasCommand && !hasRef) continue;
+      const rule = typeof spec?.rule === 'string' ? canonicalRule(spec.rule) : '';
+      if (rule === '') {
+        problems.push({ code: 'EFFECT_CHECKER_SPEC_RULE_MISSING', severity: 'info', message: `${rel}: 像规格却没有可用的 rule 字段 ⇒ 无法与纪律配对` });
+        continue;
+      }
+      const app = spec?.applicability;
+      const scope = typeof app?.scope === 'string' ? app.scope.trim() : '';
+      if (app !== undefined && app !== null && (typeof app !== 'object' || Array.isArray(app))) {
+        problems.push({ code: 'EFFECT_CHECKER_SPEC_APPLICABILITY_SHAPE', severity: 'info', message: `${rel}（rule=${rule}）: applicability 必须是对象 {scope, requires?, note?}` });
+      }
+      if (scope === '') {
+        files.push({ rule, scope: null, spec: rel });
+        continue;
+      }
+      if (!KNOWN_CHECKER_SCOPES.includes(scope)) {
+        problems.push({ code: 'EFFECT_CHECKER_SCOPE_UNKNOWN', severity: 'info', message: `${rel}（rule=${rule}）: applicability.scope=${scope} 不在已知取值表（${KNOWN_CHECKER_SCOPES.join(' / ')}）` });
+      }
+      files.push({ rule, scope, spec: rel });
+    }
+  }
+  return { files, problems };
+}
+
+/**
+ * 数目录树里的 `.mjs` 文件的**有界**计数（只看目录名/扩展名，不读内容）。
+ * 有界 = 深度与文件数双上限：体检是高频只读动作，不能因为治理仓里塞了 `node_modules` 就变成慢查询。
+ * 上限之内没找到就说"没找到"（**这是有界结论，不是全树结论**——措辞里如实带上界）。
+ */
+function countMjsFiles(root, limits, depth = 0, acc = { files: 0, dirs: 0, truncated: false }) {
+  if (acc.truncated || depth > limits.maxDepth) return acc;
+  let names;
+  try {
+    names = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return acc;
+  }
+  for (const ent of names) {
+    if (acc.truncated) return acc;
+    if (ent.isDirectory()) {
+      acc.dirs += 1;
+      if (acc.dirs > limits.maxDirs) { acc.truncated = true; return acc; }
+      if (ent.name === 'node_modules' || ent.name === '.git') continue;
+      countMjsFiles(join(root, ent.name), limits, depth + 1, acc);
+      continue;
+    }
+    if (!ent.isFile()) continue;                       // 软链不跟（避免环）
+    if (!/\.mjs$/i.test(ent.name)) continue;
+    acc.files += 1;
+    if (acc.files >= limits.maxFiles) { acc.truncated = true; return acc; }
+  }
+  return acc;
+}
+
+/**
+ * 落点事实（给 `checkerScopeVerdict` 用）：**同一份 repoKind 口径**（repo-patterns）+ 两个形态事实。
+ * 形态事实只用于**解释**，不参与任何闸门判定（见 KNOWN_CHECKER_SCOPES 的边界注释）。
+ */
+export function scopeFactsOf({ projectRoot = null, landingDir = null, packageRoot = null, limits = SCOPE_FACTS_LIMITS } = {}) {
+  const repoKindInfo = resolveRepoPatterns({ root: projectRoot ?? undefined, landingDir: landingDir ?? undefined });
+  const pkg = packageRoot ?? packageRootOfThisModule();
+  const realOrNull = (p) => {
+    if (typeof p !== 'string' || p === '') return null;
+    try { return realpathSync.native(p); } catch { return null; }
+  };
+  const pkgReal = realOrNull(pkg);
+  const projReal = realOrNull(projectRoot);
+  const jsSrc = typeof projectRoot === 'string' && projectRoot !== ''
+    ? countMjsFiles(join(projectRoot, 'src'), limits)
+    : { files: 0, dirs: 0, truncated: false };
+  const jsTest = typeof projectRoot === 'string' && projectRoot !== ''
+    ? countMjsFiles(join(projectRoot, 'test'), limits)
+    : { files: 0, dirs: 0, truncated: false };
+  return {
+    repoKind: repoKindInfo.kind,
+    repoKindSource: repoKindInfo.source,
+    isPluginRepo: pkgReal !== null && projReal !== null && pkgReal === projReal,
+    hasJsSrc: jsSrc.files > 0,
+    jsSrcCount: jsSrc.files,
+    jsSrcBounded: jsSrc.truncated,
+    hasJsTests: jsTest.files > 0,
+    jsTestCount: jsTest.files,
+    jsTestBounded: jsTest.truncated,
+  };
+}
+
 export function effectPlan(opts = {}) {
   const landingDir = opts.landingDir;
   const now = opts.now ?? new Date();
@@ -569,6 +751,18 @@ export function effectPlan(opts = {}) {
   const items = [];
   const allRules = [...new Set([...groups.keys(), ...bindings.keys(), ...activations.keys()])].sort();
 
+  // ── "有理由的 none" 的**支撑面**（2026-09-24，被治理项目侧工单 §2）──────────────────────
+  // 档位一律走 repo-patterns 的**同一份口径**（config 声明 > 远端探测 > 保守 private），
+  // 不在体检里另写一套（否则同一落点会出现两个档位结论）。
+  const scopeFacts = scopeFactsOf({ projectRoot: opts.projectRoot, landingDir });
+  const shipped = shippedCheckerSpecs(opts.specDirs === undefined ? {} : { dirs: opts.specDirs });
+  for (const p of shipped.problems) findings.push(p);
+  const specsByRule = new Map();
+  for (const f of shipped.files) {
+    if (!specsByRule.has(f.rule)) specsByRule.set(f.rule, []);
+    specsByRule.get(f.rule).push(f);
+  }
+
   for (const rule of allRules) {
     const g = groups.get(rule) ?? { rule, count: 0, firstSeen: null, lastSeen: null, variants: new Set() };
     const b = bindings.get(rule) ?? { rule, checks: [], gates: [], inject: [] };
@@ -592,6 +786,8 @@ export function effectPlan(opts = {}) {
     const targetMismatch = vers.some((v) => v.passed === true && (v.target === null || !carriers.has(v.target))
       && (lastActivation === null || (v.ts ?? '') > lastActivation));
     const openProposal = proposals.find((p) => typeof p.rule === 'string' && canonicalRule(p.rule) === rule && p.status === 'proposed') ?? null;
+    // 本条 `state === 'none'` 的**可读理由**（见下面 TEXT_ONLY 分段的注释）；无则 null。
+    let unboundReason = null;
 
     let state;
     if (b.checks.length === 0 && b.inject.length === 0 && b.gates.length === 0) state = 'none';
@@ -636,6 +832,29 @@ export function effectPlan(opts = {}) {
     }
     if (g.count > 0 && state === 'none') {
       findings.push({ code: 'EFFECT_TEXT_ONLY', severity: 'error', rule, message: `${rule}: 账本有 ${g.count} 条但 rules.json 无绑定（只写下来了，没生效）` });
+      // 同一事实**分开报**（规则 41：落点级/环境级故障不许与对象级判据混在一起）：
+      // "没绑定"是欠账；"为什么这里绑不了"是另一条读数。后者只由**插件包内规格的档位声明**
+      // 与**本落点事实**推出 ⇒ 被治理方改不动，也不是账本自报。
+      const scopeNotes = [];
+      for (const s of specsByRule.get(rule) ?? []) {
+        const v = checkerScopeVerdict(s.scope, scopeFacts);
+        if (v.verdict === 'applicable') continue;
+        scopeNotes.push({
+          spec: s.spec,
+          declaredScope: s.scope,
+          verdict: v.verdict,
+          reason: v.reason,
+        });
+      }
+      if (scopeNotes.length > 0) {
+        unboundReason = { code: 'checker-scope-mismatch', specs: scopeNotes };
+        findings.push({
+          code: 'EFFECT_UNBOUND_REASON',
+          severity: 'info',
+          rule,
+          message: `${rule}: 本条 none 的**理由（载体 = 插件包内规格声明）**：${scopeNotes.map((s) => `${s.spec}[scope=${s.declaredScope ?? '(未声明)'} → ${s.verdict}] ${s.reason}`).join('；')}｜**理由 ≠ 免责**：上面的 EFFECT_TEXT_ONLY 照旧，RK_EFFECT_RESULT 不因此变化`,
+        });
+      }
     }
     if (state === 'retired') {
       findings.push({ code: 'EFFECT_RETIRED', severity: 'info', rule, message: `${rule}: 已于 ${retireTs} 人签字退役（零信号窗口内）；再命中/再复发即作废` });
@@ -719,6 +938,9 @@ export function effectPlan(opts = {}) {
       verified,
       recurredAfterActivation: recurred > 0,
       openProposal: openProposal === null ? null : openProposal.id,
+      // 工单 §2 要的"`none` 必须带可读理由"：理由挂在**条目**上（对象级），
+      // 而不是让消费方去读那条 info finding 或自己猜。null = 确实没有可陈述的理由。
+      unboundReason,
     });
   }
 

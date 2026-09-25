@@ -141,6 +141,26 @@ export function validateCheckerBinding(binding) {
   if (b.timeoutMs !== undefined && b.timeoutMs !== null && (!Number.isInteger(b.timeoutMs) || b.timeoutMs <= 0)) {
     problems.push('timeoutMs 必须是正整数');
   }
+  // `applicability`（2026-09-24，工单 §2）：声明的**形状**在这里校验，取值**只认已知表**在
+  // `effect.mjs` 的 KNOWN_CHECKER_SCOPES（那里是消费面）。
+  // 刻意**不**把"未知 scope"判成问题：取值表是可扩展的声明面，把认不出的值拒绝掉，
+  // 会让治理别人仓的用户**直接写不进去**（那是把说明面当闸门用）。形状错（不是对象/scope 非串）才拦。
+  if (b.applicability !== undefined && b.applicability !== null) {
+    const a = b.applicability;
+    if (typeof a !== 'object' || Array.isArray(a)) {
+      problems.push('applicability 必须是对象（`{ scope: "<取值>", requires?: string[], note?: string }`）');
+    } else {
+      if (typeof a.scope !== 'string' || a.scope.trim() === '') {
+        problems.push('applicability.scope 必须是非空字符串（它回答"这条判据对哪些仓适用"；空串等于没声明）');
+      }
+      if (a.requires !== undefined && a.requires !== null && (!Array.isArray(a.requires) || a.requires.some((x) => typeof x !== 'string' || x === ''))) {
+        problems.push('applicability.requires 必须是字符串数组（省略即表示无条件）');
+      }
+      if (a.note !== undefined && a.note !== null && typeof a.note !== 'string') {
+        problems.push('applicability.note 必须是字符串');
+      }
+    }
+  }
   return problems;
 }
 

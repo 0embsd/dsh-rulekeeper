@@ -2818,6 +2818,19 @@ function runCliEffect(argv, io, env) {
       io.out(line(`RK_EFFECT_RULES=${plan.items.length}`));
       for (const s of EFFECT_STATES) io.out(line(`RK_EFFECT_${s.toUpperCase()}=${plan.counts[s] ?? 0}`));
       io.out(line(`RK_EFFECT_TEXT_ONLY=${plan.findings.filter((f) => f.code === 'EFFECT_TEXT_ONLY').length}`));
+      // "有理由的 none"（2026-09-24，工单 §2）：**分开报**，不合并进 TEXT_ONLY 计数——
+      // 理由是**载体声明**给的（插件包内规格的 applicability.scope + 落点事实），不是账本自报，
+      // 也**不**把上面那条 error 摘掉（理由 ≠ 免责）。
+      io.out(line(`RK_EFFECT_UNBOUND_REASON=${plan.findings.filter((f) => f.code === 'EFFECT_UNBOUND_REASON').length}`));
+      for (const it of plan.items) {
+        if (it.unboundReason === null || it.unboundReason === undefined) continue;
+        for (const s of it.unboundReason.specs) {
+          io.out(line(`RK_EFFECT_NONE_REASON rule=${it.rule} spec=${s.spec} scope=${s.declaredScope ?? '(未声明)'} verdict=${s.verdict}`));
+        }
+      }
+      for (const f of plan.findings.filter((x) => x.code.startsWith('EFFECT_CHECKER_SCOPE') || x.code.startsWith('EFFECT_CHECKER_SPEC'))) {
+        io.out(line(`RK_EFFECT_CHECKER_SPEC_NOTE ${f.code} ${f.message}`));
+      }
       io.out(line(`RK_EFFECT_UNENFORCED=${plan.findings.filter((f) => f.code === 'EFFECT_BINDING_UNENFORCED').length}`));
       io.out(line(`RK_EFFECT_UNVERIFIED=${plan.findings.filter((f) => f.code === 'EFFECT_NOT_VERIFIED').length}`));
       io.out(line(`RK_EFFECT_RECURRED_AFTER=${plan.findings.filter((f) => f.code === 'EFFECT_RECURRED_AFTER_ACTIVATION').length}`));

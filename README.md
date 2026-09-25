@@ -206,6 +206,28 @@ rk-effect apply --landing <落点> --proposal <id> --by human --apply
 四条真跑过验证的绑定全被报成「没跑过 verify」（verify PASSED=5 / plan VERIFIED=0）。
 凭证还要求**晚于最后一次生效登记**，防止「先跑验证、后改绑定」冒充已核实。
 
+**`applicability`：让 `none` 有理由（2026-09-24，工单 §2）**。规格文件可写一段**档位声明**：
+
+```json
+"applicability": { "scope": "public-repo-only", "requires": ["一个仓库根"], "note": "为什么" }
+```
+
+`rk-effect plan` 遇到 `state === "none"` 且该纪律**随包装了判据**时，会把这层声明与**本落点事实**
+对照，产出一条 **info 级** `EFFECT_UNBOUND_REASON`，并把同一个对象挂到该条目的 `unboundReason`
+字段（`--json` 可读）。已知取值：`any` / `public-repo-only` / `plugin-repo-only` / `js-project-with-src` /
+`js-project-with-tests`（机械判）+ `any-with-git-hooks` / `any-with-plan-scope`（**如实落"未评估"**，不猜）。
+`rk-effect plan` 另打印 `RK_EFFECT_UNBOUND_REASON=<条数>` 与逐条 `RK_EFFECT_NONE_REASON`；文本面同时打印
+`RK_EFFECT_CHECKER_SPEC_NOTE`（scope 认不出 / 规格缺 `rule`）。
+
+> **这条读数刻意不是豁免机制（规则 43：自称型控制不是安全边界）**：①它**只解释** `EFFECT_TEXT_ONLY`，
+> **不摘掉**它、也**不改变** `RK_EFFECT_RESULT` 与退出码；②理由的载体 = **插件包内**的规格声明 × 落点事实，
+> 被治理方改不动，**也不读账本自报的 `mechanism`**（实测某落点 578 条教训行里 575 条自报 `text`——
+> 拿自报当免罪符会把 17 条 error 一起洗白）；③认不出的 `scope` 报 `EFFECT_CHECKER_SCOPE_UNKNOWN`（info）
+> **并照旧给出理由**，不做 fail-closed —— 取值表是可扩展的**声明面**，拒绝未知值会让治理别人仓的用户直接写不进去。
+> ④**被测对象级**：理由逐条落在那条纪律上，不用 `RK_EFFECT_RESULT` 这类聚合值当证据（规则 41）。
+> 机械面：`test/none-reason.test.mjs`（红态样本**现造**：临时落点 + `repoKind=private`；反事实：同一落点
+> 只把档位改成 `public` ⇒ 理由必须消失）；`validateCheckerBinding` 只校验 `applicability` 的**形状**。
+
 **状态事件（append-only 的正解）**：账本行不可原地改写。「这条记错了/被后一条取代了」写成一条
 `category: 状态事件` 的行，`problem` 里写 `STATUS_SUPERSEDE <被取代的 id>[,…]`；读侧
 （`src/ledger.mjs` 的 `supersededIds` 与各派生段）把它 fold 成 superseded，不进复发计数。
