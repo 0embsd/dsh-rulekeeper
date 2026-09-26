@@ -1324,6 +1324,11 @@ export function ciWorkflowYaml(opts = {}) {
       '    runs-on: ${{ matrix.os }}',
       '    steps:',
       '      - uses: actions/checkout@v5',
+      // **`fetch-depth: 0`（2026-09-26 补）**：默认浅克隆**不带 tag** ⇒ `test/version-tag.test.mjs`
+      //   的"版本号 = 最近 tag"判据在本作业里拿不到 tag，只能报 skipped（判据形同不存在）。
+      //   与 gate 作业对齐成全历史（本就该如此：判据要能读 tag/历史）。
+      '        with:',
+      '          fetch-depth: 0',
       '      - uses: actions/setup-node@v5',
       '        with:',
       `          node-version: '${nodeVersion}'`,

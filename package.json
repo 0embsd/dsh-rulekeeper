@@ -1,6 +1,6 @@
 {
   "name": "dsh-rulekeeper",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DSH 纪律治理：教训账本 + 机械门禁（pre/post-commit 真阻断）+ 自进化提案；零依赖 Node CLI，命令前缀 rk-*",
   "type": "module",
   "license": "MIT",

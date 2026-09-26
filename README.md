@@ -572,11 +572,11 @@ RULEKEEPER_PLAN_BASE=HEAD~1 RULEKEEPER_PLAN_HEAD=HEAD node scripts/checkers/plan
 少了它们，装上之后所有判据都跑不起来（spec 的命令指不到脚本、红/绿样本不存在）。
 这条由 `test/package-face.test.mjs` 机械守住（发布面 ≠ 入口面：旧判据只核入口时，整整一层判据运行时依赖被漏掉）。
 
-### 方式 1：从 GitHub 装（推荐：可复现、钉版本）
+### 方式 1：从 GitHub 装（推荐：可复现、钉版本；也可从 tag 装 —— 见下方前提）
 
 ```bash
 # ① 固定 tag 的 tarball（内容不可变，最稳）
-dsh plugin --profile <你的档> add https://github.com/0embsd/dsh-rulekeeper/releases/download/v0.2.0/dsh-rulekeeper-0.2.0.tgz
+dsh plugin --profile <你的档> add https://github.com/0embsd/dsh-rulekeeper/releases/download/v0.3.0/dsh-rulekeeper-0.3.0.tgz
 
 # ② 或直接钉 commit（不依赖 release）
 dsh plugin --profile <你的档> add "github:0embsd/dsh-rulekeeper#<commit-sha>"
@@ -586,6 +586,14 @@ dsh plugin --profile <你的档> add "github:0embsd/dsh-rulekeeper#<commit-sha>"
 ```
 
 ### 方式 2：本地挂载（推荐起步）
+
+> ⚠ **方式 1① 的前提是"Release 真的建出来了"** —— `tag` 只建 tag，**不会**自动产出 release 页面上的 tarball。
+> 2026-09-26 实测教训：本仓当时只有一个 tag `v0.2.0`、**一个 Release 都没有**（`/releases/tags/v0.2.0` → 404）
+> ⇒ 上一版 README 里那条 tarball 命令**照抄必然失败**（"推荐方式"是死的）。
+> **发版完整动作 = ① `package.json` 的 `version` 改成 `x.y.z` → ② 打附注 tag `vx.y.z` → ③ 建 Release。**
+> ①②在本仓内完成；**第③步要人来做**（本机无 `gh` CLI、也无 token）：GitHub → Releases →
+> *Draft a new release* → 选 tag `v0.3.0` → Publish。
+> 一致性由 `test/version-tag.test.mjs` 机械守着（版本号 = 最近 tag；README 里那个版本号 = 包版本）。
 
 ```bash
 git clone https://github.com/0embsd/dsh-rulekeeper.git <包目录>

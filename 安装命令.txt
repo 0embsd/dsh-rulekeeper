@@ -1,1 +1,1 @@
-dsh plugin --profile web add "github:0embsd/dsh-rulekeeper#58c5912"
+dsh plugin --profile web add "github:0embsd/dsh-rulekeeper#v0.3.0"
