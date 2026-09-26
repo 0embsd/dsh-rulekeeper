@@ -645,6 +645,14 @@ dsh plugin --profile <你的档> add "github:0embsd/dsh-rulekeeper#v0.3.0"
 >   实测在一个干净档上它被 pnpm 的构建脚本确认拦住（`git-hosted plugins build on install via their
 >   prepare script, which pnpm blocks until allowed`），而同一次用**不可变 commit sha** 就装成功（用时 1m44s）。
 >   稳的写法是**钉 40 位/短 commit sha**（方式 1②），或用方式 2 的 `link:`。
+>   > **⚠ 上面 ① 已被同日的复测推翻（保留原文不改写，按本仓"历史更正"惯例）**：逐条重测三种 ref
+>   > 在**全新档**上的表现 —— `#main`、`#v0.3.0`（tag）、`#a410793`（sha）**全部 `rc=0`** 且版本正确
+>   > ⇒ **没有"tag ref 装不上"这回事**，① 的建议作废（不必因此避开 tag、也不必去钉 sha）。
+>   > 那次失败**不可复现**；`prepare script ... blocks until allowed` 这条报错是**误诊**：
+>   > 本包 `package.json` **没有** `prepare` / `postinstall`、**零依赖、无构建步骤**（`files` 白名单
+>   > 全是现成源码）⇒ 没有需要 pnpm"放行"的构建脚本可谈，而 ~100 秒的耗时更像**取源超时/网络抖动**。
+>   > **正确处置 = 原样重跑一次同一条命令**；**不要**按提示去改 `pnpm-workspace.yaml` 的 `allowBuilds`
+>   > （那会给一个本来没有构建步骤的包引入一个不需要的许可面）。
 > ② **更新与"生效"是两件事**：更新只把新代码放到盘上；**正在跑的宿主进程仍用旧代码**
 >   （ESM 模块在进程内缓存）⇒ 一律要**重启该档 DSH**。本仓自己踩过两次这个坑
 >   （详见 `docs/` 里的宿主陈旧假红记录）。
