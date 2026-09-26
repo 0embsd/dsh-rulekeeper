@@ -228,6 +228,26 @@ rk-effect apply --landing <落点> --proposal <id> --by human --apply
 > 机械面：`test/none-reason.test.mjs`（红态样本**现造**：临时落点 + `repoKind=private`；反事实：同一落点
 > 只把档位改成 `public` ⇒ 理由必须消失）；`validateCheckerBinding` 只校验 `applicability` 的**形状**。
 
+**项目侧报警器面（`config.specDirs`，2026-09-26，契约扩展位）**：`adopt` 默认只扫两个目录
+（`scripts/checkers`、`tools/rulekeeper/checkers`）。被治理项目把自己的报警器放在别处时，插件**看不见**它
+⇒ 只能喊"没绑定"，说不出"**你仓里已经有东西在拦它**"，于是告警会推着人去重装已经装过的报警器。
+落点 `config.json` 加 `"specDirs": ["tools/rulekeeper/alarms"]` 即把那些目录**追加**进扫描面
+（只收**项目根相对**目录；绝对路径 / `..` 一律判错，不静默接受）。
+
+- 规格按**目录自己的事实**标 `origin`：目录里有 `*.spec.json` ⇒ `plugin`（插件随包件）；
+  否则 / 由 `specDirs` 声明 ⇒ `project`（**项目自己的报警器**）。
+- 项目侧规格要带 **`evidence`**（凭证路径数组），且**每一项都要在项目根下解析得到**：
+  缺实证 ⇒ `ADOPT_ALARM_NO_EVIDENCE`；路径不存在 ⇒ `ADOPT_ALARM_EVIDENCE_MISSING`（都是 **warn**）。
+  ⇒ "有报警器"与"**有可复核实证**"是两个数（`RK_ADOPT_ALARM_EVIDENCE with=/without=`），不许混读。
+- 三个**平行**读数（各自带来源，禁止互相替代）：`RK_ADOPT_FACE`（账本**自称**）/
+  `RK_ADOPT_BINDINGS`（`rules.json` **实际**）/ `RK_ADOPT_ALARM_SPECS`（**项目自己已有**的报警器，
+  再分 `BOUND` / `UNBOUND`）。未绑定的那条**会出绑定草稿** —— 这就是"已有报警器 → 合法绑上"的那条路。
+- **硬边界（写在实现注释里，防止被后人放宽）**：① 报警器**不并入** `entries`/`faceCount`/
+  `ENTRY_ACTIVATION`（并入 = **假覆盖**，"加了映射就涨覆盖率"）；② **不写回**账本的 `mechanism`；
+  ③ **不影响** `rk-effect plan` 的 state / findings / 退出码（`plan` 不读本段）。
+  机械面：`test/adopt-alarm-surface.test.mjs`（含"加了报警器之后 `plan` 结论逐字不变"与
+  "账本、`rules.json` 逐字节不变"两条反面判据）。
+
 **状态事件（append-only 的正解）**：账本行不可原地改写。「这条记错了/被后一条取代了」写成一条
 `category: 状态事件` 的行，`problem` 里写 `STATUS_SUPERSEDE <被取代的 id>[,…]`；读侧
 （`src/ledger.mjs` 的 `supersededIds` 与各派生段）把它 fold 成 superseded，不进复发计数。

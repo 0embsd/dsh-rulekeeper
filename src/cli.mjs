@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 
-import { ensureLanding, MODES } from './config.mjs';
+import { declaredSpecDirs, ensureLanding, MODES } from './config.mjs';
 import { backupFile, listBackups, restoreFile } from './backup.mjs';
 import { CHECK_KINDS, compareWithExpected, displayPath, loadShapeBaseline, measureFile, PKG_ROOT, runCheckKind, shapeBaselineKey } from './checks.mjs';
 import { evolve as runEvolve, fileSha256, rulesPathOf } from './evolve.mjs';
@@ -2781,7 +2781,7 @@ function runCliEffect(argv, io, env) {
   if (sub === 'adopt') {
     // P2 自动管线三段（2026-09-21）：机制面必填 + 可机械化类目自动出绑定草稿。
     // 默认 dry-run；`--apply` 才把草稿写进 `proposals/<id>.json`（**不碰** rules.json —— 唯一写通路仍是 apply）。
-    const report = adoptionReport({ landingDir: landing, projectRoot, now });
+    const report = adoptionReport({ landingDir: landing, projectRoot, now, specDirs: declaredSpecDirs(landing) });
     if (report.ok !== true) {
       for (const f of report.findings) io.err(`rk-effect adopt: ${f.code}: ${f.message}\n`);
       io.out(resultLine('EFFECT_ADOPT', false));
@@ -2806,16 +2806,33 @@ function runCliEffect(argv, io, env) {
       + `；与 draft-activation 的注解层计数不是同一件事（见该命令的 RK_ACTIVATION_DIMENSION_NOTE）`));
     // **账本自称 vs 实际已绑**（P21）：两个数分开命名、各自标明来源，禁止被读成同一件事。
     io.out(line(`RK_ADOPT_BINDINGS source=rules.json rules=${s.boundRules} checker_rules=${s.boundCheckerRules} checks=${s.boundChecks}`));
+    // ── **项目侧报警器面**（2026-09-26，契约扩展位）────────────────────────────────────
+    // 与 `RK_ADOPT_FACE`（账本自称）/ `RK_ADOPT_BINDINGS`（rules.json 实际）**并列的第三个基数**：
+    // "**这个仓自己**已经有哪些报警器（规格形状，声明在 config.specDirs 或默认两个目录里）"。
+    // 它**不并入**任何覆盖率（并入 = 假覆盖），也**不写回**账本 `mechanism`；`plan` 完全不读它。
+    io.out(line(`RK_ADOPT_ALARM_SPECS=${s.alarmSpecs ?? 0} BOUND=${s.alarmBound ?? 0} UNBOUND=${s.alarmUnbound ?? 0}（**项目侧报警器**：源 = 项目自己放的规格文件；UNBOUND = 该 rule 在 rules.json 里没绑 checker ⇒ 可走签字通路绑它）`));
+    io.out(line(`RK_ADOPT_ALARM_EVIDENCE with=${s.alarmWithEvidence ?? 0} without=${(s.alarmSpecs ?? 0) - (s.alarmWithEvidence ?? 0)}（带**可复核实证**（evidence 逐项在项目根下解析得到）的条数；without 的那些只能记"自称有报警器"，不许据它记 mechanized）`));
+    io.out(line(`RK_ADOPT_SPEC_ORIGIN plugin=${s.pluginSpecs ?? 0} project=${s.alarmSpecs ?? 0}（规格来源：plugin = 插件随包件；project = 项目自己的报警器）`));
+    const specDirsDeclared = declaredSpecDirs(landing);
+    io.out(line(`RK_ADOPT_SPEC_DIRS declared=${specDirsDeclared.length === 0 ? '(none)' : specDirsDeclared.join(',')}（落点 config.json 的 specDirs；空 = 只扫默认两个目录）`));
+    for (const p of report.plans.filter((x) => x.origin === 'project')) {
+      io.out(line(`RK_ADOPT_ALARM rule=${p.rule} spec=${p.spec} decision=${p.decision} entries=${p.entries} evidence=${p.evidence === null || p.evidence === undefined ? '(none)' : p.evidence.length}`));
+    }
     io.out(line(`RK_ADOPT_LEDGER_SELFCLAIM source=ledger.jsonl mechanized=${s.faceCount.mechanized}（账本自称的"已机械化"条数；与上面检查器绑定数**不是同一件事**）`));
     for (const sk of report.skippedSpecs ?? []) io.out(line(`RK_ADOPT_SPEC_SKIPPED rel=${sk.rel} reason=${sk.reason}`));
     io.out(line(`RK_ADOPT_APPLIED=${flags.apply === true ? 1 : 0} WRITTEN=${written.length} SKIPPED=${skipped.length}`));
     for (const p of report.plans) io.out(line(`RK_ADOPT_PLAN rule=${p.rule} entries=${p.entries} spec=${p.spec} decision=${p.decision}`));
     for (const d of report.drafts) io.out(line(`RK_ADOPT_DRAFT rule=${d.rule} spec=${d.spec} proposal=${d.proposal.id}`));
     for (const w of written) io.out(line(`RK_ADOPT_WROTE ${w.rule} ${w.id} ${w.path}`));
-    for (const f of report.findings) io.out(line(`FINDING ${f.code} ${f.rule === undefined ? 'warn' : 'error'} ${f.rule ?? '-'} ${f.message}`));
+    // 严重度**显式优先**（2026-09-26）：新 finding 带 `severity` 字段，旧的没有 ⇒ 回落到
+    // "有 rule 字段 = error"这条老启发式（保住既有 5 条 finding 的行为，不动它们的 rc 语义）。
+    // 起因：新加的 `ADOPT_ALARM_*` 实证 warn **也带 rule**，被老启发式误读成 error ⇒
+    // adopt 明明只是"提醒补实证"却判 fail。启发式判严重度是**判据错位**，这里按声明读。
+    const severityOf = (f) => f.severity ?? (f.rule === undefined ? 'warn' : 'error');
+    for (const f of report.findings) io.out(line(`FINDING ${f.code} ${severityOf(f)} ${f.rule ?? '-'} ${f.message}`));
     if (flags.json === true) io.out(jsonStable({ stats: report.stats, plans: report.plans, drafts: report.drafts.map((d) => d.proposal), written }));
     // rc：有 error 级 finding（机制面未登记 / 规格坏了）⇒ 1；否则 0（草稿本身不是失败）
-    const hasError = report.findings.some((f) => f.rule !== undefined);
+    const hasError = report.findings.some((f) => severityOf(f) === 'error');
     io.out(resultLine('EFFECT_ADOPT', !hasError));
     return hasError ? RC.FAIL : RC.OK;
   }

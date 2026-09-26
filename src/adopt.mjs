@@ -62,10 +62,11 @@ function looksLikeSpec(spec) {
  *
  * @returns {{specs: object[], findings: object[], skipped: object[]}}
  */
-export function scanSpecs(projectRoot, { dirs = DEFAULT_SPEC_DIRS } = {}) {
+export function scanSpecs(projectRoot, { dirs = DEFAULT_SPEC_DIRS, projectDirs = [] } = {}) {
   const specs = [];
   const findings = [];
   const skipped = [];
+  const extra = new Set(projectDirs.map((d) => toPosix(String(d).split(sep).join('/'))));
   for (const dir of dirs) {
     const abs = join(projectRoot, dir);
     if (!existsSync(abs)) continue;
@@ -75,6 +76,14 @@ export function scanSpecs(projectRoot, { dirs = DEFAULT_SPEC_DIRS } = {}) {
     } catch {
       continue;
     }
+    // ── **归属标签**（2026-09-26，项目侧报警器面）────────────────────────────────────
+    // 判据落在**目录自己的事实**上，不靠调用方记：该目录里出现 `*.spec.json` ⇒ 插件自身的规格目录
+    // （`origin: 'plugin'`）；否则 ⇒ 项目侧（`origin: 'project'`）。`config.specDirs` 声明的目录
+    // **一律** `origin: 'project'`（显式声明优先于推断）。
+    // 为什么必须有这个标签：`adopt` 的 `already-bound` 是按规格自报的 `rule` 算的，而**同一条 checker
+    // 可以在不同落点服务不同 rule**（实测：随包 `byte-discipline` 自报 CAT-CODE，而被治理落点把它绑给
+    // CROSS-PLATFORM）。不标来源，读者会把"插件默认配对"读成"该落点的实际绑定面" —— 那是假覆盖。
+    const origin = extra.has(toPosix(dir)) ? 'project' : (names.some((n) => /\.spec\.json$/i.test(n)) ? 'plugin' : 'project');
     for (const name of names) {
       // 只看 JSON；非 JSON 是脚本本体/README，不算"没认出来的规格"
       if (!/\.json$/i.test(name)) continue;
@@ -91,7 +100,7 @@ export function scanSpecs(projectRoot, { dirs = DEFAULT_SPEC_DIRS } = {}) {
         skipped.push({ rel, reason: '不是规格形状（缺非空 rule，或缺 command/checkerRef）' });
         continue;
       }
-      specs.push({ rel, rule: canonicalRule(spec.rule), spec, mtimeMs: statSync(join(abs, name)).mtimeMs });
+      specs.push({ rel, origin, rule: canonicalRule(spec.rule), spec, mtimeMs: statSync(join(abs, name)).mtimeMs });
     }
   }
   return { specs, findings, skipped };
@@ -121,7 +130,8 @@ export function mechanismStats(rows = []) {
 /**
  * 三段报告的**纯计算**部分（不写盘）。
  *
- * @param {{landingDir: string, projectRoot: string, now?: Date}} opts
+ * @param {{landingDir: string, projectRoot: string, now?: Date, specDirs?: string[]}} opts
+ *   `specDirs` = 落点 `config.json` 里声明的**追加**规格目录（项目侧报警器面）；只加扫描面，不改判定。
  * @returns {{ok: boolean, stats: object, plans: object[], drafts: object[], findings: object[]}}
  */
 export function adoptionReport(opts = {}) {
@@ -188,17 +198,65 @@ export function adoptionReport(opts = {}) {
     if ((b.checks ?? []).some((c) => c !== null && typeof c === 'object' && c.kind === 'checker')) boundCheckerRules.add(rule);
   }
 
-  const { specs, findings: specFindings, skipped: skippedSpecs } = scanSpecs(projectRoot);
+  const { specs, findings: specFindings, skipped: skippedSpecs } = scanSpecs(projectRoot, {
+    dirs: [...DEFAULT_SPEC_DIRS, ...(Array.isArray(opts.specDirs) ? opts.specDirs : [])],
+    projectDirs: Array.isArray(opts.specDirs) ? opts.specDirs : [],
+  });
   for (const f of specFindings) findings.push(f);
 
   const drafts = [];
   const plans = [];
+  // ── **项目侧报警器面**（2026-09-26，契约扩展位）──────────────────────────────────
+  // 与"绑定草稿"**分开**的两件事，必须分开报（P21/P8' 的同一口径）：
+  //   · `plans[].origin='project'` 的条目是"**这个仓自己已经有的报警器**"（不是插件出的件）；
+  //   · 它对判定**零影响**：下面只算两个**平行读数**（已绑 / 可绑未绑），
+  //     **绝不**并入 `entries`/`withActivation`/`faceCount`（那会变成"加映射 = 加覆盖"的假覆盖）。
   for (const s of specs) {
     const info = byRule.get(s.rule);
     const bound = boundCheckerRules.has(s.rule);
     const hasOpen = openRules.has(s.rule);
     const decision = bound ? 'already-bound' : (hasOpen ? 'open-proposal' : 'draft');
-    plans.push({ rule: s.rule, spec: s.rel, entries: info?.entries ?? 0, decision });
+    // `evidence` 只对**项目侧**报警器有意义（插件随包规格的实证是 redSample/greenSample 那条通路）；
+    // 值 = 已**逐项解析到**的凭证路径列表（解析不到的项不进来，另有 finding 报），`null` = 没给实证。
+    let alarmEvidence = null;
+    if (s.origin === 'project') {
+      const ev = Array.isArray(s.spec.evidence) ? s.spec.evidence.map((x) => String(x ?? '').trim()).filter((p) => p !== '') : [];
+      alarmEvidence = ev.length > 0 && ev.every((p) => existsSync(join(projectRoot, p))) ? ev : null;
+    }
+    plans.push({ rule: s.rule, spec: s.rel, origin: s.origin ?? 'plugin', entries: info?.entries ?? 0, decision, evidence: alarmEvidence });
+    // ── 项目侧报警器的**实证必填**（2026-09-26）──────────────────────────────────────
+    // 承认"这个类目有报警器"必须能指认**它拦过什么**。故项目侧规格要带 `evidence`，且
+    // **每一项都要能在项目根下解析到**（写了个不存在的路径等于没写）。
+    // 只对 `origin === 'project'` 要求：插件随包规格的实证由 `redSample/greenSample` + `verify` 承担，
+    // 那是另一条通路，不该在 adopt 里重复要求（否则会把插件自己的 11 份规格全部判红）。
+    if (s.origin === 'project') {
+      const ev = s.spec.evidence;
+      if (!Array.isArray(ev) || ev.length === 0) {
+        findings.push({
+          code: 'ADOPT_ALARM_NO_EVIDENCE',
+          severity: 'warn',
+          rule: s.rule,
+          message: `${s.rel}: 项目侧报警器**没给实证**（缺非空 \`evidence\` 数组）⇒ 只能记"**自称**有报警器"，不许据此记 mechanized（规则 43：自称型控制不是安全边界）`,
+        });
+      } else {
+        const missing = ev.map((x) => String(x ?? '').trim()).filter((p) => p !== '' && !existsSync(join(projectRoot, p)));
+        if (missing.length > 0) {
+          findings.push({
+            code: 'ADOPT_ALARM_EVIDENCE_MISSING',
+            severity: 'warn',
+            rule: s.rule,
+            message: `${s.rel}: evidence 指的路径在项目根下**不存在**：${missing.slice(0, 3).join('、')}${missing.length > 3 ? ' …' : ''} ⇒ 实证不可复核`,
+          });
+        } else if (ev.some((x) => String(x ?? '').trim() === '')) {
+          findings.push({
+            code: 'ADOPT_ALARM_EVIDENCE_EMPTY',
+            severity: 'warn',
+            rule: s.rule,
+            message: `${s.rel}: evidence 里有空项`,
+          });
+        }
+      }
+    }
     if (decision !== 'draft') continue;
 
     // 四要件**从规格里已实测的事实派生**（不编）：命令、期望退出码、样本目录、验证命令行
@@ -244,6 +302,19 @@ export function adoptionReport(opts = {}) {
       boundRules: bindings.size,
       boundCheckerRules: boundCheckerRules.size,
       boundChecks: [...bindings.values()].reduce((n, b) => n + (b.checks ?? []).length, 0),
+      // ── **项目侧报警器面**（2026-09-26）：三条平行读数，**各自带基数与来源** ────────────────
+      // 目的：把"这个类目为什么 `none`"从"插件没判据"补全为"**该仓自己已有报警器 X（或确实没有）**"。
+      // 硬边界（写在这里以免被后人放宽）：
+      //   · **不并入** `entries` / `faceCount` / `withActivation`（那会制造假覆盖）；
+      //   · **不写回** 账本的 `mechanism`（`adopt` 只读）；
+      //   · **不影响** `rk-effect plan` 的 state / findings / 退出码（`plan` 不读本段）。
+      alarmSpecs: plans.filter((p) => p.origin === 'project').length,
+      alarmBound: plans.filter((p) => p.origin === 'project' && p.decision === 'already-bound').length,
+      alarmUnbound: plans.filter((p) => p.origin === 'project' && p.decision !== 'already-bound').length,
+      // **实证面**：项目侧报警器里带齐可复核实证的条数（其余 = 自称）。
+      // 与 `alarmSpecs` 分开报：否则"有报警器"会被读成"有实证"（假覆盖的另一种形态）。
+      alarmWithEvidence: plans.filter((p) => p.origin === 'project' && p.evidence !== null).length,
+      pluginSpecs: plans.filter((p) => p.origin !== 'project').length,
     },
     plans,
     drafts,

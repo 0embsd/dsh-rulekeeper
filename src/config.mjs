@@ -68,7 +68,43 @@ export function validateConfig(obj) {
       out.push(`prePush.noCi 必须是布尔（实际 ${JSON.stringify(pp.noCi)}）`);
     }
   }
+  // `specDirs`（2026-09-26，契约扩展位 · 项目侧报警器面）：**追加**扫描目录（不替换默认两个）。
+  // 为什么需要：`adopt` 默认只扫 `scripts/checkers` 与 `tools/rulekeeper/checkers`；被治理项目把
+  // 自己的报警器（如既有门禁脚本的规格）放在别处时，插件**完全看不见** ⇒ 只能喊"没绑定"，
+  // 说不出"你仓里已经有东西在拦它"。本键就是那条可见性通路（只影响 `adopt` 的**读数与草稿**，
+  // 不参与任何判定；约束见 README 的"项目侧报警器"一节）。
+  if (Object.hasOwn(obj, 'specDirs')) {
+    const sd = obj.specDirs;
+    if (!Array.isArray(sd) || sd.some((x) => typeof x !== 'string' || x.trim() === '')) {
+      out.push('specDirs 必须是**非空字符串数组**（项目根相对的目录，如 ["tools/rulekeeper/alarms"]）');
+    } else if (sd.some((x) => x.startsWith('/') || /^[A-Za-z]:[\\/]/.test(x) || x.split(/[\\/]/).includes('..'))) {
+      // 只收**项目根相对**路径：写绝对路径 / `..` 会让"扫的是哪个仓"随机器漂移（与 P25 的
+      // `--project` 写错同族：路径形态错了，结论就不可复现）。
+      out.push('specDirs 只接受**项目根相对**目录（不许绝对路径、不许含 `..`）');
+    }
+  }
   return out;
+}
+
+/**
+ * 读落点声明的**追加规格目录**（`config.json` 的 `specDirs`）。
+ * 读不到 / 形状不对 ⇒ 返回 `[]`（**不抛**）：它是可选的可见性通路，坏配置不该让读侧崩，
+ * 但也**绝不假装读到了**（调用方打印 `RK_ADOPT_SPEC_DIRS`，坏值在 `validateConfig` 里另报）。
+ * @returns {string[]}
+ */
+export function declaredSpecDirs(landingDir) {
+  if (typeof landingDir !== 'string' || landingDir === '') return [];
+  const file = join(landingDir, CONFIG_FILE);
+  if (!existsSync(file)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8'));
+    const sd = parsed?.specDirs;
+    if (!Array.isArray(sd)) return [];
+    return sd.filter((x) => typeof x === 'string' && x.trim() !== '' && !x.startsWith('/')
+      && !/^[A-Za-z]:[\\/]/.test(x) && !x.split(/[\\/]/).includes('..'));
+  } catch {
+    return [];
+  }
 }
 
 /** 读落点的"要不要锚定人签字"开关（**读不了就当作 false**：不能因为配置读不到就把写通路锁死，但也绝不假装锚定过） */
