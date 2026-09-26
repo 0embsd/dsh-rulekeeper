@@ -49,6 +49,25 @@ const discovered = pathArgs.length > 0
   : globSync('test/**/*.test.mjs', { cwd: ROOT }).sort();
 const runArgs = pathArgs.length > 0 ? pathArgs : discovered;
 
+// ── **发现 0 条 ⇒ 明确失败，不回落**（2026-09-26，从 GitHub 装包实测发现）────────────────────
+// 现场：`dsh plugin add github:0embsd/dsh-rulekeeper#<sha>` 装出来的包里**没有用例文件**
+//   （`package.json` 的 `files` 只放 `test/fixtures/checker/`，98 个 `*.test.mjs` 不在发布面上）。
+//   于是 `globSync` 得 0 条 ⇒ 旧行为把 `[]` 传下去 ⇒ `node --test --` 按**自己的默认发现**跑，
+//   抓到 3 个**碰巧长得像测试**的文件（`scripts/checkers/test-isolation.mjs`、
+//   `test-fixtures/red/test/violating.sample.mjs` —— 后者是**故意违规的夹具**），报 1 pass / 2 fail。
+//   ⇒ 那是**误报**：既不是"装坏了"，也不是"用例挂了"，而是"这个包里根本没有用例面"。
+// 诚实口径（与本仓"没判 ≠ 判绿"同族）：**没有可跑的用例就该判失败并说清为什么**，
+//   绝不回落去跑别的文件 —— 否则每个装包的人都会看到两条假红，而"零用例"这个真事实被藏起来。
+if (pathArgs.length === 0 && discovered.length === 0) {
+  console.error(`rk-test: 在 <包根>/test/ 下没发现任何 \`*.test.mjs\`（包根=${ROOT}）`);
+  console.error('  常见原因：这是**从发布包/从 GitHub 装出来**的副本 —— 用例文件不在 `package.json` 的 `files` 里');
+  console.error('            （发布面只含 `test/fixtures/checker/` 等判据运行时要用的夹具）。');
+  console.error('  处置：要跑自测请用**完整检出**（`git clone https://github.com/0embsd/dsh-rulekeeper.git`）后在包根跑本命令；');
+  console.error('        只是想核对装出来的包是否健康，请跑 `rk-selfcheck --root <包根>`（S8 脱敏 / S9 可达性 / 文档漂移）。');
+  console.error('  本命令**不回落**到 node 的默认测试发现 —— 那会把夹具与检查器脚本当成用例，产出与本包无关的假红。');
+  process.exit(1);
+}
+
 const partial = pathArgs.length > 0;
 if (partial) {
   console.error(`⚠ rk-test: **部分**运行（只跑 ${pathArgs.length} 个指定路径）——这**不是**交付凭证。`);

@@ -599,6 +599,13 @@ dsh plugin --profile <你的档> add link:<包目录>
 
 本包**没有构建步骤**（纯 ESM、零 npm 依赖），**不需要** `npm run assemble`、也没有 `dist/` 需要挂——直接挂包目录即可。
 
+> **装出来的包里没有用例面（2026-09-26 实测登记）**：`package.json` 的 `files` 只放
+> `test/fixtures/checker/`（判据运行时**要读的夹具**），98 个 `*.test.mjs` **不在**发布面上。
+> ⇒ 在**装出来的副本**里跑 `rk-test` 会以 **rc=1** 明确失败并说明原因（**不回落**到 node 的默认
+> 测试发现——那会把 `scripts/checkers/*.mjs` 与 `test-fixtures/red/**` 里**故意违规的夹具**当成用例，
+> 报出与本包无关的假红，实测 1 pass / 2 fail）。
+> 想在装出来的副本上核对健康，用 `rk-selfcheck --root <包根>`；要跑自测请用**完整检出**。
+
 ### 方式 3：从 npm 安装（**尚未发布到 registry，此路当前不通**）
 
 ```bash
