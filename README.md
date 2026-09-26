@@ -622,6 +622,34 @@ dsh plugin --profile <你的档> add dsh-rulekeeper
 
 尚未发布到 npm 时请用方式 2（本地挂载）或方式 1（从 GitHub 装）。
 
+### 装完之后怎么更新（**对使用者**，2026-09-26 实测登记）
+
+**更新方式取决于当初怎么装的** —— 两种装法的行为**完全不同**，别混：
+
+| 你当初用 | 上游发了新版，你会怎样 | 怎么更新 |
+|---|---|---|
+| **方式 2 `link:<包目录>`** | 市场**永远不提示**（`updateAvailable:false`，实测：`link:` 在 dshmarket 里是**明确排除**的分支——"development sources, never opted into online updates"） | 你自己在那个目录 `git pull`。**盘上有就是最新**（符号链接直连源码）⇒ 没有"更新按钮"这一环 |
+| **方式 1 `github:...#<ref>`** | **市场会提示"有更新"**（实测：把 spec 钉在 `a410793`、上游前进到 `de64901` 之后，`dshmarket` 的判定为 `kind=github, current=a410793…, latest=de64901…, updateAvailable=true`）；点按钮或重跑安装即更新 | 见下面两条命令 |
+| 方式 3 npm | 不适用（尚未发布） | — |
+
+```bash
+# GitHub 安装的使用者，更新到最新（跟随 main）：
+dsh plugin --profile <你的档> add "github:0embsd/dsh-rulekeeper#main"
+# 或者仍钉 tag（可复现，推荐）：
+dsh plugin --profile <你的档> add "github:0embsd/dsh-rulekeeper#v0.3.0"
+# 装完**重启该档 DSH**（"更新会下载新版本，重启后生效" —— 前端页面会立即更新，服务端不会）
+```
+
+> **⚠ 两条实测得来的注意**（2026-09-26）：
+> ① **别用 `"github:0embsd/dsh-rulekeeper#v0.3.0"` 这种"以 tag 为 ref"的写法在**全新档**上首发安装**：
+>   实测在一个干净档上它被 pnpm 的构建脚本确认拦住（`git-hosted plugins build on install via their
+>   prepare script, which pnpm blocks until allowed`），而同一次用**不可变 commit sha** 就装成功（用时 1m44s）。
+>   稳的写法是**钉 40 位/短 commit sha**（方式 1②），或用方式 2 的 `link:`。
+> ② **更新与"生效"是两件事**：更新只把新代码放到盘上；**正在跑的宿主进程仍用旧代码**
+>   （ESM 模块在进程内缓存）⇒ 一律要**重启该档 DSH**。本仓自己踩过两次这个坑
+>   （详见 `docs/` 里的宿主陈旧假红记录）。
+
+
 ### 装完怎么验证（三条，缺一不算装上）
 
 ```bash
