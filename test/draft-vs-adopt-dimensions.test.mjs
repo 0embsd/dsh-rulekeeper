@@ -106,3 +106,89 @@ test('P8④: `--write` 之后（**重跑一次**读覆盖）：ANNOTATED 上升�
   assert.equal(p1 < p0, true, `同时 PENDING 必须下降（${p0} -> ${p1}）；out=${after.out}`);
   assert.match(after.out, /RK_DRAFT_WRITTEN=0/, '重跑不得重复写（幂等）');
 });
+
+// ── P8'（2026-09-24，被治理项目侧工单 §2）：**同一条命令内三个基数**──────────────────────────
+// 现场：一条命令的屏上同时出现 50 / 55 / 89，谁也没说自己是谁 ⇒ 被读成"同命令内计数不一致"。
+// 三个数其实都成立（全集模板数 / 待起草集 / --json 输出上限），缺的是**标签**与**不静默截断**。
+// 判据（成对，缺一不算）：
+//   ⓐ 每个基数都有名字与来历（`RK_DRAFT_BASE` 一行写三个；`--json` 各字段自带名）；
+//   ⓑ **代数关系成立**：`json_array == min(pending, cap)`、`pending <= stats_drafted`；
+//   ⓒ 打印的 HIGH/MEDIUM 与**它自己声称的基数**自洽（待起草集合与全集各自成对）；
+//   ⓓ 输出上限**被写出来**（cap 不是字面量魔法数），且 `--limit` **不改变**它（那正是原始症状）。
+// 反向红：把 `RK_DRAFT_BASE` 那行删掉 ⇒ ⓐ 必红；把 `slice(0, DRAFT_JSON_CAP)` 换成 `slice(0, 50)`
+// 且不报 cap ⇒ ⓓ 必红。
+
+/** 取 JSON 里的 `"字段": 数字`（jsonStable 会缩进，故不能锚在行首） */
+const jsonNum = (out, field) => Number(new RegExp(`"${field}":\\s*(\\d+)`).exec(out)?.[1] ?? '-1');
+/**
+ * 取 `--json` 的 payload 并解析。
+ * ⚠ 必须**去 `RK_*` 行**再解析：结果行与 payload 同流（既有设计），`JSON.parse` 直接吃会炸。
+ * ⚠ 且**不能**用"全串数 `"activation":` 出现次数"当数组长度 —— `noAnchor[]` 的条目里也有
+ * `activation: ""`（空串），全串计数会把两个数组加在一起（本用例第一版就是这么错的红）。
+ */
+function payloadOf(out) {
+  const lines = String(out).split(/\r?\n/).filter((l) => !/^RK_/.test(l));
+  return JSON.parse(lines.join('\n').slice(lines.join('\n').indexOf('{')));
+}
+
+test("P8'①: 三个基数各有名字与来历（`RK_DRAFT_BASE` + `--json` 字段名）", () => {
+  const { landing } = scene('p8p-labels');
+  const r = run(['draft-activation', '--landing', landing]);
+  assert.match(r.out, /RK_DRAFT_BASE stats_drafted=\d+/, `必须有一行写明三个基数；out=${r.out}`);
+  assert.match(r.out, /pending=\d+/, 'RK_DRAFT_BASE 必须含 pending');
+  assert.match(r.out, /json_array=\d+/, 'RK_DRAFT_BASE 必须含 json_array');
+  assert.match(r.out, /输出上限 \d+/, 'json_array 必须点明它是**输出上限**，不是待写条数');
+
+  const j = run(['draft-activation', '--landing', landing, '--json']);
+  const payload = j.out.slice(j.out.indexOf('{'));
+  assert.match(payload, /"draftedFull":\s*\d+/, 'stats 必须带 draftedFull（全集口径，名字自解释）');
+  assert.match(payload, /"draftedPending":\s*\d+/, 'stats 必须带 draftedPending');
+  assert.match(payload, /"draftsShown":\s*\d+/, 'stats 必须带 draftsShown');
+  assert.match(payload, /"draftsShownCap":\s*\d+/, 'stats 必须带 draftsShownCap（上限本身也要可见）');
+});
+
+test("P8'②: 代数关系成立 —— json_array == min(pending, cap)；pending <= stats_drafted", () => {
+  const { landing } = scene('p8p-algebra');
+  const r = run(['draft-activation', '--landing', landing]);
+  const base = /RK_DRAFT_BASE stats_drafted=(\d+).*?pending=(\d+).*?json_array=(\d+)/s.exec(r.out);
+  assert.ok(base !== null, `必须能解析出三个基数；out=${r.out}`);
+  const [, full, pending, shown] = base.map(Number);
+  const cap = Number(/输出上限 (\d+)/.exec(r.out)?.[1] ?? '-1');
+  assert.equal(cap > 0, true, '上限必须是正数且可读');
+  assert.equal(shown, Math.min(pending, cap), `json_array 必须 == min(pending, cap)（实得 shown=${shown} pending=${pending} cap=${cap}）`);
+  assert.equal(pending <= full, true, `待起草不得超过全集（pending=${pending} full=${full}）`);
+
+  // `--json` 的字段必须与文本面**同一口径**（不许两套）
+  const j = run(['draft-activation', '--landing', landing, '--json']);
+  assert.equal(jsonNum(j.out, 'draftedPending'), pending, '--json 的 draftedPending 必须与文本面一致');
+  assert.equal(jsonNum(j.out, 'draftsShown'), shown, '--json 的 draftsShown 必须与文本面一致');
+  assert.equal(jsonNum(j.out, 'draftsShownCap'), cap, '--json 的 draftsShownCap 必须与文本面一致');
+  // 数组长度必须**就是** shown —— 且解析后按**数组自己的长度**核（不靠字符串计数）
+  const payload = payloadOf(j.out);
+  assert.equal(payload.drafts.length, shown, `drafts 数组长度必须 == draftsShown（实得 ${payload.drafts.length} vs ${shown}）`);
+  assert.equal(payload.drafts.length, payload.stats.draftsShown, '数组长度必须与它自己声明的 draftsShown 相等（同一基数、同一事实）');
+});
+
+test("P8'③: 打印的 HIGH/MEDIUM 与**它自己声称的基数**自洽（待起草 vs 全集各自成对）", () => {
+  const { landing } = scene('p8p-bases');
+  const r = run(['draft-activation', '--landing', landing]);
+  const line = /RK_DRAFT_HIGH=(\d+)（待起草集合） RK_DRAFT_MEDIUM=(\d+)（待起草集合）｜全集口径：HIGH=(\d+) MEDIUM=(\d+)/.exec(r.out);
+  assert.ok(line !== null, `HIGH/MEDIUM 必须同时给出两套基数；out=${r.out}`);
+  const [subHigh, subMed, fullHigh, fullMed] = line.slice(1).map(Number);
+  const pending = Number(/pending=(\d+)/.exec(r.out)?.[1] ?? '-1');
+  const full = Number(/stats_drafted=(\d+)/.exec(r.out)?.[1] ?? '-1');
+  assert.equal(subHigh + subMed, pending, `待起草基数的 HIGH+MEDIUM 必须 == pending（${subHigh}+${subMed} vs ${pending}）`);
+  assert.equal(fullHigh + fullMed, full, `全集基数的 HIGH+MEDIUM 必须 == stats_drafted（${fullHigh}+${fullMed} vs ${full}）`);
+});
+
+test("P8'④: 输出上限**写出来了**，且 `--limit` 不改变它（原始症状：--limit 500 仍是 50）", () => {
+  const { landing } = scene('p8p-cap');
+  const a = run(['draft-activation', '--landing', landing, '--json']);
+  const b = run(['draft-activation', '--landing', landing, '--json', '--limit', '500']);
+  const capOf = (out) => jsonNum(out, 'draftsShownCap');
+  assert.equal(capOf(a.out) > 0, true, '上限必须出现在 --json 里');
+  assert.equal(capOf(b.out), capOf(a.out), '`--limit` 不得改变**输出上限**（它是显示上限，不是产草稿上限）');
+  // 上限本身是常量：与产草稿上限是两个不同的旋钮，必须都能被读到
+  assert.match(b.out, /"draftedFull":\s*\d+/, '--limit 影响的是 draftedFull，不是 draftsShownCap');
+});
+

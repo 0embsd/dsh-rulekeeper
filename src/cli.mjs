@@ -67,6 +67,14 @@ import {
   dropShell, restoreShell, SHELL_FIXTURES, snapshotShell, verifyShell,
 } from './shellrevert.mjs';
 
+/**
+ * `draft-activation --json` 里 `drafts[]` 的输出上限（P8'，2026-09-24）。
+ * 它是**显示上限**，与 `--limit`（产草稿上限）无关 —— 此前写成字面量 50 且**没有名字、没有读数**，
+ * 于是被治理项目侧实测成"`--limit 500` 仍是 50"，读作"同一命令内计数不一致"。
+ * 现在：有名字、打在 `RK_DRAFT_BASE` 与 `stats.draftsShownCap` 上（静默截断 = 消除）。
+ */
+const DRAFT_JSON_CAP = 50;
+
 export function defaultIo() {
   return { out: stdWrite, err: stdWriteErr };
 }
@@ -2715,23 +2723,53 @@ function runCliEffect(argv, io, env) {
     io.out(line(`RK_DRAFT_ROWS=${result.stats.rows}`));
     io.out(line(`RK_DRAFT_ALREADY=${rows.length - result.stats.rows}`));
     io.out(line(`RK_DRAFT_ANNOTATED=${[...byId.keys()].length}`));
-    io.out(line(`RK_DRAFT_PENDING=${todo.length}`));
+    // ── **三个基数各自写明**（P8'，2026-09-24 被治理项目侧工单 §2）────────────────────────────
+    // 现场：同一条命令的屏上同时出现 50 / 55 / 89 三个数，**谁都不说自己是哪个基数** ⇒
+    //   实测被读成"同一命令内计数不一致"。三个数的来历其实都是确定的，只是从没写出来：
+    //     · `stats.drafted` = 产出草稿的模板数（已排除"账本行自带 activation"的行）；
+    //     · `pending`       = 这些草稿里**尚未进注解层**（`activations.jsonl` 没有该 id）的部分
+    //                         —— 它就是 `--write` 会写的集合；屏上 26+29=55 用的也是它；
+    //     · 数组长度        = `--json` 的输出上限（**硬上限**，`--limit` **不改变**它 ——
+    //                         这正是"`--limit 500` 仍是 50"的成因。属**静默截断**，本次显式写出来）。
+    const draftPending = todo.length;
+    const draftShown = Math.min(draftPending, DRAFT_JSON_CAP);
+    io.out(line(`RK_DRAFT_PENDING=${draftPending}（**待起草基数**：本次 --write 会写的条数；下面 HIGH/MEDIUM 也用它）`));
+    io.out(line(`RK_DRAFT_BASE stats_drafted=${result.stats.drafted}（产草稿模板数 = **全集**）`
+      + ` pending=${draftPending}（待起草 = 本次 --write 的集合）`
+      + ` json_array=${draftShown}（**输出上限 ${DRAFT_JSON_CAP}**，与 --limit 无关）`));
     // ── **P8：两个"草稿数"不是一回事，输出必须替它们说清**（2026-09-23）────────────────────────
     // 现场：`RK_DRAFT_ANNOTATED`（**注解层**已覆盖的条目数）与 `adopt` 段的 `DRAFTS`
     // （**由规格派生出的绑定草稿数**）并排出现在同一屏，语义完全不同 ⇒ 实测被读成
     // "注解了 34 条却一个字没草拟？自相矛盾"（连 lowQuality 的结论也跟着被误读）。
     // 改法：① 给两个数各加**自解释**的名字（旧名保留，兼容既有消费方）；② 打印一行明确的关系说明。
     io.out(line(`RK_ACTIVATION_ANNOTATED=${[...byId.keys()].length}（**注解层**：条目级"何时适用"已被注解覆盖的行数）`));
-    io.out(line(`RK_ACTIVATION_PENDING=${todo.length}（**待起草**：本次能起草但还没进注解层的条目数）`));
+    io.out(line(`RK_ACTIVATION_PENDING=${draftPending}（**待起草**：本次能起草但还没进注解层的条目数）`));
     io.out(line(`RK_ACTIVATION_DIMENSION_NOTE=本条命令只产"**条目级激活条件注解**"（何时适用）；`
       + '它**不产绑定草稿**——绑定草稿由 `rk-effect adopt` 的 `DRAFTS` 给出（**规格派生**，回答"哪条纪律该挂哪个检查器"）。'
       + '两个数**不同维度、不可比**：本行的 ANNOTATED/PENDING 与 adopt 的 DRAFTS/ALREADY_BOUND 不要并排读成同一件事。'));
-    io.out(line(`RK_DRAFT_HIGH=${todo.filter((d) => d.confidence === 'high').length}`));
-    io.out(line(`RK_DRAFT_MEDIUM=${todo.filter((d) => d.confidence === 'medium').length}`));
+    io.out(line(`RK_DRAFT_HIGH=${todo.filter((d) => d.confidence === 'high').length}（待起草集合）`
+      + ` RK_DRAFT_MEDIUM=${todo.filter((d) => d.confidence === 'medium').length}（待起草集合）`
+      + `｜全集口径：HIGH=${result.stats.highConfidence} MEDIUM=${result.stats.mediumConfidence}（两者之和 = stats_drafted）`));
     io.out(line(`RK_DRAFT_NO_ANCHOR=${result.stats.noAnchor}`));
-    io.out(line(`RK_DRAFT_LOW_QUALITY=${result.stats.lowQuality}`));
+    io.out(line(`RK_DRAFT_LOW_QUALITY=${result.stats.lowQuality}（**全集**口径）`
+      + '｜待起草集合内的低质条数 **恒为 0**：低质条目在校验不过时就被跳过、**不进 drafts**，'
+      + '而待起草集 ⊆ drafts ⇒ 别把全集的这个数读成"待写里有几条不合格"'));
     if (flags.json === true) {
-      io.out(jsonStable({ landing, stats: result.stats, drafts: todo.slice(0, 50), noAnchor: result.noAnchor.slice(0, 50), lowQuality: result.lowQuality.slice(0, 20) }));
+      io.out(jsonStable({
+        landing,
+        // **基数标签**（P8'）：三个数各自带名字，消费方不必再猜。`stats.drafted` 保留原义（全集），
+        // 另加 draftedPending / draftsShown / draftsShownCap —— 只**加**字段，不改既有字段语义。
+        stats: {
+          ...result.stats,
+          draftedFull: result.stats.drafted,
+          draftedPending: draftPending,
+          draftsShown: draftShown,
+          draftsShownCap: DRAFT_JSON_CAP,
+        },
+        drafts: todo.slice(0, DRAFT_JSON_CAP),
+        noAnchor: result.noAnchor.slice(0, 50),
+        lowQuality: result.lowQuality.slice(0, 20),
+      }));
     } else {
       for (const d of todo.slice(0, 10)) io.out(line(`DRAFT ${d.id} [${d.confidence}] ${d.activation}`));
       if (todo.length > 10) io.out(line(`…（其余 ${todo.length - 10} 条见 --json）`));

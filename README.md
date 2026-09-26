@@ -333,6 +333,18 @@ rk-effect apply --landing <落点> --proposal <id> --by human --apply
     **且**条件必须过 `validateActivation`（含路径/通配符/命令/错误串之一）⇒ 防"灌水式覆盖率"
     （第一版实测产出过 `当命令里出现 git 时`、`当 exit 码为 0 时` 这种恒真废话，已淘汰）
   - 默认**只出草稿**；`--write` 才写注解层（幂等：已注解的不再起草）
+  - **三个基数各自有名（P8'，2026-09-24）**：同一条命令的输出里会出现三个不同的数，
+    **它们不是同一个基数**，此前谁都没写名字 ⇒ 实测被读成"同命令内计数不一致"：
+
+    | 数 | 名字 | 含义 | 怎么读 |
+    |---|---|---|---|
+    | 89 | `stats.drafted` / `stats.draftedFull` | **产出草稿的模板数**（已排除账本行自带 `activation` 的行） | 全集口径 |
+    | 55 | `RK_DRAFT_PENDING` / `stats.draftedPending` | 其中**尚未进注解层**的部分 | **`--write` 会写的集合**；屏上 HIGH/MEDIUM 用的也是它 |
+    | 50 | `stats.draftsShown`（`stats.draftsShownCap` = 上限） | `--json` 里 `drafts[]` 的**显示上限** | 与 `--limit` **无关**；打在 `RK_DRAFT_BASE` 行上 |
+
+    `RK_DRAFT_BASE` 一行给出三者；`stats.lowQuality` 是**全集**口径，而低质条目**不进 drafts** ⇒
+    待起草集内的低质条数**恒为 0**（别把全集的数读成"待写里有几条不合格"）。
+    上限本身有名字（不是字面量魔法数）⇒ 不再有**静默截断**。判据见 `test/draft-vs-adopt-dimensions.test.mjs` 的 P8'①–④。
 - **体检可读**：`RK_EFFECT_ENTRY_ACTIVATION` / `RK_EFFECT_ENTRY_COVERAGE` 取的是**合并视图**；
   `doctor` 抓 `DOCTOR_ANNOTATION_ORPHAN`（注解指向不存在的 id）与 `DOCTOR_ANNOTATION_UNCHECKABLE`（条件不可判）。
 - **实测（真实落点，2026-09-19）**：起草 34 条（全部 high，锚点为 `文件:行号`）⇒ 覆盖率
