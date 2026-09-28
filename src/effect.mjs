@@ -825,6 +825,20 @@ export function effectPlan(opts = {}) {
     if (uncovered.length > 0) {
       findings.push({ code: 'EFFECT_BINDING_UNENFORCED', severity: 'error', rule, message: uncovered.join('；') });
     }
+    // 4.1 消费面（2026-09-28）：**绑定了却没有内容可产出** = 挂名绑定（假覆盖）。
+    // 与 EFFECT_TEXT_ONLY 严格互补：那条是「有账本行、没绑定」；本条是「有绑定、账本 0 行」——
+    // 注入面（`rk-effect inject`）会算出空正文，而 state 却是 `injected`（看上去活着）⇒ 此前无读数能暴露。
+    // 判据只用**本落点事实**（绑定形状 + 账本计数），不猜宿主有没有真调注入面。
+    // 可达性依据：`allRules` 已并入 `bindings.keys()`（本函数上方），且 `g` 缺省 `count: 0` ⇒ 0 行的纪律照样进循环。
+    // severity=warn：误报面尚未在全部落点量过（规则 53），先观察；本落点 inject 为空，不会触发。
+    if (b.inject.length > 0 && b.checks.length === 0 && g.count === 0) {
+      findings.push({
+        code: 'EFFECT_BINDING_UNCONSUMED',
+        severity: 'warn',
+        rule,
+        message: `${rule}: 只有 inject 绑定（${b.inject.length} 条）而账本 0 行 ⇒ 注入面无内容可产（绑定挂名，不产生任何提醒）`,
+      });
+    }
     for (const c of b.checks) {
       if (c.gate !== null && !CLOSE_KNOWN_GATES.includes(c.gate)) {
         findings.push({ code: 'EFFECT_BINDING_UNKNOWN_GATE', severity: 'error', rule, message: `绑定的机制 ${c.gate} 不在已知机制表（${CLOSE_KNOWN_GATES.join(' / ')}）` });

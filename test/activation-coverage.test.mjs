@@ -148,3 +148,25 @@ test('判据（端到端）: CLI `rk-effect plan` 打印新口径行', () => {
   assert.match(out, /RK_EFFECT_ENTRY_ACTIVATION=1\/2/, `应打印 1/2；实际输出：\n${out}`);
   assert.match(out, /RK_EFFECT_ENTRY_COVERAGE=50\.00/, '应打印覆盖率 50.00');
 });
+
+// ── 4.1 消费面（2026-09-28）：绑定**挂了却没内容可产** = 挂名绑定 ─────────────────────
+// 注：绑定经**官方入口** `opts.rules` 注入。不手写 rules.json 文件——落点装载器有自己的校验/布局，
+// 手写文件实测**不被接受**（会把用例变成"测装载器"而不是"测判据"）。
+// 反向红：删掉 effect.mjs 里该 finding ⇒ 第一条必红；把 `g.count === 0` 写成 `!== 0` ⇒ 两条互换后必红。
+const UNCONSUMED_RULES = { schema: 1, checks: [], gates: [], inject: [{ rule: 'CAT-CODE' }] };
+
+test('判据（4.1 消费面）: 只有 inject 绑定而账本 0 行 ⇒ EFFECT_BINDING_UNCONSUMED（挂名）', () => {
+  const { landing } = freshLanding('p02-unconsumed', { entries: [] });
+  const plan = effectPlan({ landingDir: landing, now: new Date(TS), rules: UNCONSUMED_RULES });
+  const f = plan.findings.find((x) => x.code === 'EFFECT_BINDING_UNCONSUMED');
+  assert.ok(f, '有绑定但账本 0 行 ⇒ 注入面无内容可产，必须报挂名');
+  assert.equal(f.severity, 'warn', '误报面未全域量过 ⇒ 取 warn（规则 53：先量再收紧）');
+  assert.ok(String(f.message).includes('CAT-CODE'), '必须给出条目标识，不得只报总数');
+});
+
+test('判据（4.1 消费面·正对照）: 同一绑定但账本有行 ⇒ 不得报 UNCONSUMED', () => {
+  const { landing } = freshLanding('p02-consumed', { entries: [ledgerEntry({ id: 'A1', ts: TS, rule: 'CAT-CODE' })] });
+  const plan = effectPlan({ landingDir: landing, now: new Date(TS), rules: UNCONSUMED_RULES });
+  assert.ok(!plan.findings.some((x) => x.code === 'EFFECT_BINDING_UNCONSUMED'),
+    '有内容可注入时不得报挂名（防"凡 inject 都报"的假阳）');
+});
