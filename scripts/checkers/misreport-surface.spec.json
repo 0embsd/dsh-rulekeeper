@@ -26,11 +26,11 @@
   "timeoutMs": 30000,
   "notes": "误报面：对 rules.json 里每条 checker 绑定核「绿样本上必须 exit=0 / 红样本上必须非 0 / 必须写明绿样本」。规则 53 的机械面。递归护栏：命令里含本检查器的绑定跳过并计数（不判自己）。",
   "applicability": {
-    "scope": "plugin-repo-only",
+    "scope": "any-with-checker-bindings",
     "requires": [
-      "scripts/checkers/misreport-surface.mjs 在 cwd 下",
-      "rules.json 里有 checker 绑定"
+      "被检根（RULEKEEPER_SAMPLE_DIR ?? cwd）下有 .dsh-ai/rulekeeper/rules.json",
+      "rules.json 里至少一条 kind=checker 绑定（零绑定 ⇒ exit 2，不适用）"
     ],
-    "note": "**不可搬迁**：它按 cwd 解析各绑定的 spec 与 command，要求\"项目根相对路径\"这套前提成立 ⇒ 只适合插件仓自身（及把检查器整套搬过去的仓）。无 rules.json ⇒ exit 2"
+    "note": "**2026-09-28 起可搬迁（N-B4）**：原口径 plugin-repo-only 已作废 —— 原实现要求 scripts/checkers/misreport-surface.mjs 在 **cwd** 下（否则 exit 2），故项目侧无法使用。现改为：①自身定位护栏接受 **cwd 或本文件所在包**（PKG_ROOT，由 import.meta.url 上溯两级推导）②`checkerRef: \"@self/<rel>\"` 的绑定，其命令里等值的那一段参数**按 PKG_ROOT 解析为绝对路径**（项目侧没有 scripts/checkers/，判据本体在插件包里）③各绑定的 spec/样本仍按**被检根→cwd** 两条解析（原语义不变）。实测：项目侧 cwd=<项目根> 跑 → MISREPORT_ROOT=<项目根> BINDINGS=3 CHECKED=3 全 verdict=ok ⇒ exit 0；插件仓自身仍 exit 0（回归）。无 rules.json 或零 checker 绑定 ⇒ 仍 exit 2"
   }
 }

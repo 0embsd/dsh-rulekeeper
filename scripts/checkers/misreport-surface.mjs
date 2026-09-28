@@ -28,8 +28,13 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const SELF = 'scripts/checkers/misreport-surface.mjs';
+// **可搬迁（N-B4，2026-09-28）**：本检查器可能从**插件检出**执行、而被检根是**别的项目**
+//   （cwd = 该项目根）。此时「插件侧脚本」必须按**本文件自身位置**解析，不能假定 cwd 下也有
+//   scripts/checkers/。PKG_ROOT = 本文件所在包的根（scripts/checkers/x.mjs → 上溯三级）。
+const PKG_ROOT = fileURLToPath(new URL('../..', import.meta.url));   // scripts/checkers/x.mjs → 上溯两级 = 包根
 const root = process.env.RULEKEEPER_SAMPLE_DIR ?? process.cwd();
 const rulesRel = ['.dsh-ai/rulekeeper/rules.json', '.dsh-ai/lessonflow/rules.json'].find((p) => existsSync(join(root, p)));
 if (rulesRel === undefined) {
@@ -39,8 +44,10 @@ if (rulesRel === undefined) {
 // 本检查器自身的定位护栏：**看 cwd**（不是看被检根）——因为规格/命令都是按 `cwd`（= 项目根）解析的，
 // 若本文件不在 cwd 下，说明"相对路径解析"这套前提不成立 ⇒ 判据不可信，如实 2。
 // （写红样本时实测踩过：按被检根找自己会把"被检对象 = 违规样本目录"这种用法误判成不可信。）
-if (!existsSync(join(process.cwd(), SELF))) {
-  console.log(`MISREPORT_SELF=absent（${SELF} 不在 cwd 下 ⇒ 相对路径解析前提不成立，判据不可信）`);
+const selfInCwd = existsSync(join(process.cwd(), SELF));
+const selfInPkg = existsSync(join(PKG_ROOT, SELF));
+if (!selfInCwd && !selfInPkg) {
+  console.log(`MISREPORT_SELF=absent（${SELF} 既不在 cwd 也不在插件包内 ⇒ 相对路径解析前提不成立，判据不可信）`);
   process.exit(2);
 }
 
@@ -127,7 +134,13 @@ for (const b of bindings) {
 
   const run = (sampleDir) => {
     const sampleAbs = resolveRel(sampleDir) ?? join(root, sampleDir);
-    return spawnSync(command[0], command.slice(1), {
+    // @self/<rel> 引用的命令参数按**插件包根**解析（可搬迁关键）：项目侧落点没有 scripts/checkers/，
+    //   而判据本体在插件包里 ⇒ 把该参数替换为绝对路径；其余参数与 cwd/env 语义一律不动。
+    const selfRef = typeof spec.checkerRef === 'string' && spec.checkerRef.startsWith('@self/')
+      ? spec.checkerRef.slice('@self/'.length)
+      : null;
+    const argv = command.slice(1).map((a) => (selfRef !== null && a === selfRef ? join(PKG_ROOT, selfRef) : a));
+    return spawnSync(command[0], argv, {
       cwd: root,
       shell: false,
       encoding: 'utf8',
