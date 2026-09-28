@@ -107,7 +107,10 @@ function repoPathCandidates(text) {
 function evidenceTokens(text) {
   const out = new Set();
   // 带扩展名的文件（相对路径或裸文件名都算）
-  const reFile = /[A-Za-z0-9_@.\-]+(?:\/[A-Za-z0-9_@.\-*]+)*\.[A-Za-z]{1,8}\b/g;
+  // **Unicode 感知（2026-09-28，N-B3 实测修复）**：原字符类只含 ASCII ⇒ 中文路径段**完全抽不出 token**
+  //   （`docs/中文目录/文件.md` 一个 token 都没有 ⇒ 真锚点被判成「没有对象锚点」）。本仓文档几乎全是
+  //   中文名 ⇒ 这是判据自身的**误报面**。改为 `\p{L}\p{N}`（需 u 标志）；仍保留"必须带扩展名"的收窄。
+  const reFile = /[\p{L}\p{N}_@.\-]+(?:\/[\p{L}\p{N}_@.\-*]+)*\.[A-Za-z]{1,8}(?![\p{L}\p{N}])/gu;
   let m;
   while ((m = reFile.exec(text)) !== null) {
     // **不要去掉前导点**：`/^[.\-/]+/` 会把 `.dsh-ai/rulekeeper/rules.json` 变成
@@ -122,7 +125,7 @@ function evidenceTokens(text) {
   // 时才需要这一条。**故意不认** `13/13`、`F-2/F-3` 这种"比例/编号"：写检查器时实测它们被误判成
   // 路径，一次报出 4 条假阳（按 ≥30% 止损口径收紧）。
   const KNOWN_TOP = '(?:src|test|test-fixtures|scripts|bin|docs|\\.dsh-ai|\\.githooks|tools|packages|apps)';
-  const reDir = new RegExp(`(?:^|[\\s（(「'"])((?:${KNOWN_TOP})/[A-Za-z0-9_@.\\-]+(?:/[A-Za-z0-9_@.\\-]+)*)`, 'g');
+  const reDir = new RegExp(`(?:^|[\\s（(「'"])((?:${KNOWN_TOP})/[\\p{L}\\p{N}_@.\\-]+(?:/[\\p{L}\\p{N}_@.\\-]+)*)`, 'gu');
   while ((m = reDir.exec(text)) !== null) {
     const t = m[1].replace(/[.,;:、，；）)】」'"`]+$/, '');
     if (/\.[A-Za-z]{1,8}$/.test(t)) continue;           // 带扩展名的已由上面处理
