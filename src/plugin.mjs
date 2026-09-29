@@ -19,6 +19,9 @@ import { landingCapability, createLandingResolver, liveRootAgents } from './land
 import { agentKeyOf, registerAgentScopedDelivery } from './scoped.mjs';
 import { deliveryCapability, registerDelivery } from './deliver.mjs';
 import { makePreStepHandler, preStepCapability } from './prestep.mjs';
+// 4.4/4.4a（2026-09-29，老板决定"只做 observe"）：命令形态观察。判据对象＝宿主 `tools/pre-execute`
+//   交来的 exec（字段见 dsh-tools 类型定义）；**只记账**，不改写 content、不进 system prompt、不阻断。
+import { observeCommandForms, formatObserveLine } from './command-form.mjs';
 
 /** 本包根目录（`src/plugin.mjs` 上溯两级）——用于"宿主事件表扫描**排除自身**"（见 `eventTableFromHost`） */
 export const PKG_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -72,6 +75,9 @@ export function probeService(ctx, name, method = null) {
 
 /** 工具名命名空间（宿主里所有本插件注册的工具都必须带这个前缀，避免与其它插件撞名） */
 export const TOOL_PREFIX = 'rulekeeper_';
+
+/** 命令形态观察的落点文件（**observe-only** 台账；相对落点目录，见 4.4/4.4a） */
+export const COMMAND_FORM_OBSERVE_REL = 'command-form-observe.jsonl';
 
 let reportSink = null;
 
@@ -479,6 +485,23 @@ export function apply(ctx, { dshRoot, events = PLUGIN_EVENTS, tools = PLUGIN_TOO
           if (ev === 'agent/disposed') {
             forgetScoped(args[0] && args[0].agent);
             return typeof next === 'function' ? await next() : undefined;
+          }
+          // ── 4.4 / 4.4a（2026-09-29）：**命令形态观察（observe-only）** ─────────────────────
+          // 档位（老板决定）：只记账——**不改写 content、不进 system prompt、不阻断**；判定权不在此。
+          // 为什么落这里：本插件**早已订阅** `tools/pre-execute`（PLUGIN_EVENTS）且被用例钉死
+          //   "订阅集合恰等于 PLUGIN_EVENTS + 每个订阅过 safeListener" ⇒ 改自家＝零上游耦合、可单测、回滚＝撤本分支
+          //   （原登记曾把落点让给上游引擎内建检测器，见清单 4.4 的改判与教训 L732）。
+          // 失败一律 fail-open：观察绝不能影响主流程（更不能吃掉本次调用的决策）。
+          if (ev === 'tools/pre-execute') {
+            try {
+              const obs = observeCommandForms(args[0]);
+              if (obs.findings.length > 0) {
+                const obsDir = landing.resolve();
+                if (typeof appendLine === 'function' && typeof obsDir === 'string' && obsDir !== '') {
+                  appendLine(join(obsDir, COMMAND_FORM_OBSERVE_REL), JSON.parse(formatObserveLine(obs)), {});
+                }
+              }
+            } catch { /* 观察失败不得影响主流程（fail-open 到底） */ }
           }
           return typeof next === 'function' ? await next() : undefined;
         },
