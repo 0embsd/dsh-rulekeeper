@@ -684,6 +684,16 @@ node <包目录>/bin/rk-gate.mjs hooks verify --repo <某个仓库根> # 真调�
 > 之所以把更正**追加**在这里而不是删掉旧文案：这是公开仓的历史说明，
 > 删掉会让人以为"从来没这么写过"；留着并注明哪句已过期，更诚实。
 
+> **⚠ 上一段的调用形态也已被更正（2026-10-01）**：`index.js` 的 `apply()` 现在传的实参是
+> **三个键**：`applyPlugin(ctx, { dshRoot: resolveDshRoot(), handlers: defaultHandlers(), appendLine })`。
+> 其中 `dshRoot` 用于 boot 自检读宿主事件表；`appendLine` 是**落盘能力的接线**
+> （落点写入统一走 `src/append.mjs` 的 `appendLine`，单行单次 `writeSync`）。
+> **为什么补 `appendLine`**：它是 `apply()` 的**可选参数、默认 `null`**，而落盘侧两处
+> （`src/plugin.mjs` 的命令形态观察、`src/isolation.mjs` 的监听器错误落盘）都以
+> `typeof appendLine === 'function'` 为守卫 ⇒ **入口不传 = 两处落盘在生产双双静默失效**
+> （命令形态观察的落点文件从未被写过一行）。回归判据见 `test/entry-observe-wiring.test.mjs`
+> （驱动**生产入口**、非纯函数层）。消费者仍可覆盖：`applyPlugin(ctx, { …你自己的 })`。
+
 > **已修（2026-09-16，同日）**：上面这段"默认是空壳"是**当时的实现缺陷**，不是应有行为 ——
 > 老板当场指出"插件装上了不能用，装它干嘛"。现在默认装载**注入包内真实实现**（`src/handlers.mjs`）：
 > `rulekeeper_gate` 真判定（只读 allow/deny）、`rulekeeper_record` 真追加取证台账行、`rulekeeper_snap` 真留 pre-image 快照；

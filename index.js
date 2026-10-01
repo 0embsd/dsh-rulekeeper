@@ -18,6 +18,17 @@
 import { apply as applyPlugin, bootSelfCheck, eventTableFromHost, PLUGIN_EVENTS, PLUGIN_TOOLS, TOOL_PREFIX } from './src/plugin.mjs';
 import { defaultHandlers } from './src/handlers.mjs';
 import { dshHome } from './src/platform/paths.mjs';
+// **必须在这里接线**（2026-10-01 修）：`apply()` 的 `appendLine` 是**可选参数、默认 `null`**，
+// 而落盘侧两处都写成 `typeof appendLine === 'function'` 守卫（`plugin.mjs` 的命令形态观察、
+// `isolation.mjs` 的监听器错误落盘）⇒ 入口不传 = **两处落盘在生产里双双静默失效**。
+// 为什么以前没暴露（**2026-10-01 独立 CR 更正后的准确说法**；规则 41/54：说法必须与事实一致）：
+//   **该落盘分支没有任何用例覆盖** —— 全仓 grep 可证：`appendLine` 只出现在 `test/append.test.mjs`
+//   （测 `src/append.mjs` 自身）、`test/isolation.test.mjs`（注入的是 `makeErrorSink`，**另一个缝**）。
+//   **没有任何用例把 `appendLine` 传进 `apply()`**。（初版注释写"单测为了可测性显式注入该参数"是**错的**；
+//     错根因会把预防指向"多加注入式用例"，而真正要覆盖的是**入口接线**这一环。）
+//   与本文件 12-16 行记的 `handlers` 未注入是**同一失效形态**——第二次发生。
+// 生产唯一写入点 = `src/append.mjs` 的 `appendLine`（单行单次 `writeSync` 的原子性契约）。
+import { appendLine } from './src/append.mjs';
 
 export { bootSelfCheck, eventTableFromHost, PLUGIN_EVENTS, PLUGIN_TOOLS, TOOL_PREFIX };
 
@@ -44,6 +55,7 @@ export default {
     // 返回普通对象会被判 `TypeError: Invalid effect`（2026-09-15 真装载实测）。
     // 报告本体在 `src/plugin.mjs` 的 `lastApplyReport` / `apply(..., {onReport})`。
     // 2026-09-16：**默认注入真实 handlers**（装上即用）—— 消费者仍可自行调用 applyPlugin 覆盖。
-    applyPlugin(ctx, { dshRoot: resolveDshRoot(), handlers: defaultHandlers() });
+    // 2026-10-01：**同时注入真实 `appendLine`**（同上一条的理由）——落盘类能力不得只活在测试缝里。
+    applyPlugin(ctx, { dshRoot: resolveDshRoot(), handlers: defaultHandlers(), appendLine });
   },
 };
