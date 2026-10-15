@@ -257,10 +257,27 @@ export function duplicateImportBindings(code) {
  */
 export function findPublicFaceLeaks(rel, text, forbidden = PUBLIC_FACE_FORBIDDEN) {
   const found = [];
-  for (const { re, why, allow } of forbidden) {
+  // 行号换算：供"整行注释窄豁免"（模式表里的 `inlineComment`）定位匹配落在哪一行。
+  // 为什么需要：产品契约里**必须**写某个 .pem 路径（nginx 模板行、源码注释），而判据本意是抓
+  // "配置/命令里出现私钥文件名" ⇒ 整行注释不该算泄漏（老板 2026-10-15 批准，选项 A）。
+  const lineStarts = [0];
+  for (let i = 0; i < text.length; i += 1) if (text[i] === '\n') lineStarts.push(i + 1);
+  const lineTextAt = (idx) => {
+    let lo = 0;
+    let hi = lineStarts.length - 1;
+    while (lo < hi) {                       // 二分找该偏移所在行
+      const mid = (lo + hi + 1) >> 1;
+      if (lineStarts[mid] <= idx) lo = mid; else hi = mid - 1;
+    }
+    const end = text.indexOf('\n', lineStarts[lo]);
+    return text.slice(lineStarts[lo], end === -1 ? text.length : end);
+  };
+  for (const { re, why, allow, inlineComment } of forbidden) {
     const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
     for (const m of text.matchAll(g)) {
       if (typeof allow === 'function' && allow(rel, m[0], text)) continue;
+      // ★窄豁免★：整行注释里的该串不算（只对在模式表里声明了 inlineComment 的条目生效）。
+      if (typeof inlineComment === 'function' && inlineComment(lineTextAt(m.index))) continue;
       found.push({ why, match: m[0] });
       break;
     }
