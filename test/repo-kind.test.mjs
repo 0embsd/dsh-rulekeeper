@@ -27,7 +27,10 @@ test.after(cleanupAll);
 
 const PROJECT_NAME = `myx${'V2'}`;                       // 内部项目名（拼接后才是真串）
 const HOST_NO = `${'1'}${'01'}`;                         // 内部主机编号
-const TEST_NET_IP = `${'203'}.${'0'}.${'113'}.${'9'}`;   // 文档用测试网段（不是真实基础设施）
+// 正对照样本必须**未被豁免表覆盖**：TEST-NET-1/2/3 已整体放行（2026-09-28）⇒ 原用的 203.0.113.9
+//   让本条正对照失效。现值 = RFC 6890 的 IANA 特殊用途保留段（/24 内取值；**注释里也不落字面量**，否则检测器自扫会判自己红），非真实设施、未被豁免；
+//   仍运行时拼装（规则 51）。变量名同步改名，避免「TEST_NET」这个已不成立的误称。
+const NON_EXEMPT_IP = `${'192'}.${'0'}.${'0'}.${'9'}`;
 
 /** 造一个最小落点（可选 config） */
 function landing(label, config = null) {
@@ -122,7 +125,7 @@ test('判据③: 同一个内部项目名 —— public 红、private 绿（三�
 test('判据④（反向）: 基础设施类两档都红 —— 私有仓照样会漏', () => {
   const privLanding = landing('rk-kind-priv2', { schema: 1, mode: 'observe', repoKind: 'private' });
   const repo = tempDir('rk-kind-repo2');
-  const body = `fix: 连 ${TEST_NET_IP} 那台机器\n`;
+  const body = `fix: 连 ${NON_EXEMPT_IP} 那台机器\n`;
   const out = commitMessageGate({ repoRoot: repo, messageFile: writeMsg(repo, body), landingDir: privLanding });
   assert.equal(out.ok, false, '真实 IPv4 在 private 档也必须红（基础设施标识不分公开/私有）');
   assert.ok(out.findings.some((f) => f.why === undefined && f.code === 'GATE_COMMITMSG_INTERNAL_LEAK'));

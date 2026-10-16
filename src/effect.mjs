@@ -561,6 +561,12 @@ export const KNOWN_CHECKER_SCOPES = Object.freeze([
   'any',
   'any-with-git-hooks',
   'any-with-plan-scope',
+  // 2026-10-16 补：`scripts/checkers/misreport-surface.spec.json` 自 **2026-09-28（N-B4 搬迁改造）**起
+  //   声明 scope=`any-with-checker-bindings`（原 `plugin-repo-only` 作废：原实现要求检查器脚本在 cwd 下，
+  //   项目侧用不了；现改为"检查器本体在插件包、绑定按 PKG_ROOT 解析"）。**规格改了、本表没跟着加**
+  //   ⇒ 引擎一直判 `unknown-scope`，两条用例（判据④/⑤）实测红（2026-10-16：953/943/9）。
+  //   语义（由那两条用例反推并与之逐条对齐）：**插件自己的仓** 或 **落点里有 kind=checker 绑定** ⇒ 适用。
+  'any-with-checker-bindings',
   'public-repo-only',
   'plugin-repo-only',
   'js-project-with-src',
@@ -587,6 +593,13 @@ export function checkerScopeVerdict(scope, facts = {}) {
     return facts.isPluginRepo === true
       ? { verdict: 'applicable', reason: null }
       : { verdict: 'not-applicable', reason: 'scope=plugin-repo-only，而本落点**不是插件自己的仓**（--project 未给或 ≠ 插件包根）⇒ 该判据在本落点不适用' };
+  }
+  if (s === 'any-with-checker-bindings') {
+    // 适用条件（两个事实任一成立，两边都写进理由，读者可核对）：
+    //   ① --project = 插件包根（检查器本体所在处）② 落点 rules.json 里至少一条 kind=checker 绑定。
+    return facts.isPluginRepo === true || facts.hasCheckerBindings === true
+      ? { verdict: 'applicable', reason: null }
+      : { verdict: 'not-applicable', reason: `scope=any-with-checker-bindings：本落点既**不是插件自己的仓**（--project 未给或 ≠ 插件包根），落点 rules.json 里也**没有 kind=checker 绑定**（实测 ${facts.checkerBindingsCount ?? 0} 条）⇒ 该判据在本落点**无可核对象**` };
   }
   if (s === 'js-project-with-src') {
     return facts.hasJsSrc === true
@@ -710,10 +723,23 @@ export function scopeFactsOf({ projectRoot = null, landingDir = null, packageRoo
   const jsTest = typeof projectRoot === 'string' && projectRoot !== ''
     ? countMjsFiles(join(projectRoot, 'test'), limits)
     : { files: 0, dirs: 0, truncated: false };
+  // 落点里 kind=checker 绑定数（2026-10-16 加；`any-with-checker-bindings` 的判定事实）。
+  //   读法沿用 adopt.mjs 的既有惯用法；读不到/解析失败 ⇒ 0（**不猜**：没有绑定就是没有）。
+  const checkerBindingsCount = (() => {
+    if (typeof landingDir !== 'string' || landingDir === '') return 0;
+    try {
+      const parsed = JSON.parse(readFileSync(join(landingDir, 'rules.json'), 'utf8'));
+      return (parsed?.checks ?? []).filter((c) => c !== null && typeof c === 'object' && c.kind === 'checker').length;
+    } catch {
+      return 0;
+    }
+  })();
   return {
     repoKind: repoKindInfo.kind,
     repoKindSource: repoKindInfo.source,
     isPluginRepo: pkgReal !== null && projReal !== null && pkgReal === projReal,
+    hasCheckerBindings: checkerBindingsCount > 0,
+    checkerBindingsCount,
     hasJsSrc: jsSrc.files > 0,
     jsSrcCount: jsSrc.files,
     jsSrcBounded: jsSrc.truncated,
