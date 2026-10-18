@@ -198,7 +198,7 @@ export function hookRunnerContent() {
     '  const tried = [];',
     '  for (const rel of [\'rulekeeper\', \'lessonflow\']) {',
     '    const p = join(repo, \'.dsh-ai\', rel, \'hooks\', hook + \'.mjs\');',
-    '    tried.push(p);',
+    '    tried.push(relative(repo, p));',
     '    if (existsSync(p)) return { file: p, tried };',
     '  }',
     '  return { file: null, tried };',
