@@ -258,6 +258,38 @@ export function hookRunnerContent() {
     '  if (r.error) { process.stderr.write("dsh-rulekeeper hook: 无法执行 " + cmd + ": " + r.error.message + "\\n"); process.exit(1); }',
     '  if (typeof r.status !== \'number\' || r.status !== 0) process.exit(typeof r.status === \'number\' ? r.status : 1);',
     '}',
+    '// ── 项目扩展点（P25，2026-10-18）：基础 steps **全部通过后**，按 hook 名执行 <landing>/hooks/<hook>.mjs ──',
+    '// 为什么是运行时找文件：控制逻辑要住在**项目自己的文件**里（可评审、可 diff、跨机可移植），',
+    '//   而不是住在生成物里 —— 生成物会被 `rk-gate hooks install` 覆盖 ⇒ 手加的门禁会静默消失。',
+    '// 模板只负责“找到就执行、退出码逐字透传”；缺文件时的档位由本机态/配置的 `hooksExt.required` 决定。',
+    'function resolveExt() {',
+    '  const tried = [];',
+    '  for (const rel of [\'rulekeeper\', \'lessonflow\']) {',
+    '    const p = join(repo, \'.dsh-ai\', rel, \'hooks\', hook + \'.mjs\');',
+    '    tried.push(p);',
+    '    if (existsSync(p)) return { file: p, tried };',
+    '  }',
+    '  return { file: null, tried };',
+    '}',
+    'function extRequired() {',
+    '  const local = readLandingJson(\'hooks.local.json\').hooksExt;',
+    '  if (local !== null && typeof local === \'object\' && typeof local.required === \'boolean\') return local.required;',
+    '  const cfg = readLandingJson(\'config.json\').hooksExt;',
+    '  return cfg !== null && typeof cfg === \'object\' && cfg.required === true;',
+    '}',
+    'const ext = resolveExt();',
+    'if (ext.file !== null) {',
+    '  console.error(\'[rk-ext] loaded \' + hook + \': \' + ext.file);',
+    '  const er = spawnSync(process.execPath, [ext.file, hook, ...process.argv.slice(3)], { stdio: \'inherit\', cwd: repo });',
+    '  if (er.error) { console.error(\'[rk-ext] 扩展执行失败（fail-closed）: \' + er.error.message); process.exit(1); }',
+    '  process.exit(typeof er.status === \'number\' ? er.status : 1);',
+    '}',
+    'if (extRequired()) {',
+    '  console.error(\'[rk-ext] required=true 但找不到 <landing>/hooks/\' + hook + \'.mjs ⇒ 拒绝（fail-closed）\');',
+    '  console.error(\'  试过：\' + ext.tried.join(\' / \'));',
+    '  process.exit(1);',
+    '}',
+    'console.error(\'[rk-ext] 未配置项目扩展（hooks/\' + hook + \'.mjs 不存在）⇒ 跳过（required=false，如实告知）\');',
     'process.exit(0);',
     '',
   ].join(EOL);
@@ -416,6 +448,8 @@ export function installHooks(opts = {}) {
   //   `hooksPath` ⇒ 沿用**旧记录里的 previous**（那才是真正的原值）。
   // P14：原值记录改放**本机态**；读取走 `readHooksState`（local 优先、清单回退）⇒ 老落点也能沿用旧值。
   const priorState = readHooksState(repoRoot);
+  // 扩展点开关（P25）：本机态/老清单位里的 `hooksExt` 必须在重装时原样带回（见下方 localState 注释）。
+  const priorExt = priorState.local?.hooksExt ?? priorState.manifest?.hooksExt ?? null;
   const observed = readHooksPath(repoRoot, runGit);
   let previous = { hooksPath: observed.hooksPath, existed: observed.present };
   {
@@ -464,6 +498,9 @@ export function installHooks(opts = {}) {
     // LF-810：卸载所需的**安装前状态**（"原值 + 本来有没有" + 我们到底改没改过 config）
     previous: { hooksPath: previous.hooksPath, existed: previous.existed === true },
     configChanged: opts.setConfig !== false && configSet,
+    // 扩展点开关（P25）：`hooksExt` 是**人设的本机开关**，重装时必须原样保留 ——
+    //   否则每次 install 都把 `required=true` 抹回缺省 ⇒ 门禁静默降级（正是本轮要消灭的形态）。
+    ...(priorExt === null ? {} : { hooksExt: priorExt }),
   };
   writeLfNoBom(manifestPathOf(repoRoot), `${JSON.stringify(manifest, null, 2)}${EOL}`);
   writeLfNoBom(localStatePathOf(repoRoot), `${JSON.stringify(localState, null, 2)}${EOL}`);
