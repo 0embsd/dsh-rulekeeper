@@ -59,9 +59,9 @@
   },
   "dshCompat": {
     "min": "0.1.0-rc.3",
-    "max": "0.4.0"
+    "max": "0.3.0"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh": ">=0.1.0-rc.3 <0.4.0"
+    "@deepseek-ai/dsh": ">=0.1.0-rc.3 <0.3.0"
   }
 }
