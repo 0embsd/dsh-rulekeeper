@@ -218,16 +218,23 @@ export function makeAnchoredApplyHandler({ ctx, cwd = process.cwd(), now = () =>
     if (proposalId === '') return { ok: false, decision: 'usage', reason: '需要 proposal（提案 id）' };
     if (!isSafeId(proposalId)) return { ok: false, decision: 'usage', reason: `提案 id 不安全（只允许 [A-Za-z0-9._-] 且禁 ".."）: ${JSON.stringify(proposalId)}` };
     const apply = args.apply === true;
+    // 退役的**作用域参数**（P26，2026-10-18）：同 rule 可能有多条绑定，退役必须点名摘哪一条；
+    // CLI 侧早就有 `--carrier`，插件工具此前漏了这个参数 ⇒ 多绑定场景下只能落到 `EFFECT_RETIRE_AMBIGUOUS`。
+    // 这里只做透传（空串按未给处理），判定仍由 `planActivation` 的唯一口径负责。
+    const carrier = typeof args.carrier === 'string' && args.carrier.trim() !== '' ? args.carrier.trim() : undefined;
 
     // ① dry-run：先算清"要写什么"；连这一步都过不了，就不该去打扰人
-    const planned = applyActivationFn({ landingDir: landing, projectRoot, proposalId, by: 'human', apply: false, now: now() });
+    const planned = applyActivationFn({ landingDir: landing, projectRoot, proposalId, by: 'human', apply: false, now: now(), carrier });
     if (planned.ok !== true) {
       return { ok: false, decision: 'plan-failed', reason: `${planned.code}: ${planned.message}`, proposalId };
     }
     const binding = planned.additions?.binding ?? {};
-    const summary = binding.kind === 'checker'
-      ? `kind=checker command=${(binding.command ?? []).join(' ')} sample=${binding.redSample?.source ?? '-'}`
-      : `kind=${binding.kind} carrier=${binding.carrier ?? '-'} patterns=${(planned.additions?.patterns ?? []).join(',') || '(none)'}`;
+    const retirement = planned.kind === 'retire' ? (planned.additions?.retirement ?? null) : null;
+    const summary = retirement !== null
+      ? `kind=retire removedBindings=${retirement.removedBindings} removedCarrier=${retirement.removedCarrier ?? '-'} remainingBindings=${retirement.remainingBindings ?? '-'}`
+      : binding.kind === 'checker'
+        ? `kind=checker command=${(binding.command ?? []).join(' ')} sample=${binding.redSample?.source ?? '-'}`
+        : `kind=${binding.kind} carrier=${binding.carrier ?? '-'} patterns=${(planned.additions?.patterns ?? []).join(',') || '(none)'}`;
 
     // ② 问真人（唯一入口）。服务缺失 / 无根 agent / 抛错（含 DELEGATED_CALLER）⇒ 一律不写
     // 读法：**无 inject 要求**（`readOptionalService` 优先走 `ctx.reflect.get`）—— `userQuestions` 是可选的，
@@ -280,7 +287,7 @@ export function makeAnchoredApplyHandler({ ctx, cwd = process.cwd(), now = () =>
     });
 
     // ④ 带锚定凭证落盘
-    const out = applyActivationFn({ landingDir: landing, projectRoot, proposalId, by: 'human', apply, now: now(), approval });
+    const out = applyActivationFn({ landingDir: landing, projectRoot, proposalId, by: 'human', apply, now: now(), approval, carrier });
     return {
       ok: out.ok === true,
       decision: out.ok === true ? (apply ? 'applied' : 'dry-run') : 'apply-failed',

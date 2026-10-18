@@ -186,6 +186,7 @@ export const TOOL_PARAMETERS = Object.freeze({
     properties: {
       proposal: { type: 'string', description: '提案 id（落点 proposals/<id>.json）' },
       project: { type: 'string', description: '项目根（默认进程工作目录）' },
+      carrier: { type: 'string', description: '退役时指定摘哪一条绑定（同 rule 多条绑定时必填；与 CLI --carrier 同义）' },
       apply: { type: 'boolean', description: 'true 才真写；缺省/false = 只走到"问真人 + dry-run"，不落盘' },
     },
     required: ['proposal'],

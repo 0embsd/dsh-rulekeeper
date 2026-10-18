@@ -192,11 +192,58 @@ test('判据: 只走到"问真人 + dry-run"（apply 缺省）时不落盘', asy
   assert.equal(existsSync(join(f.landing, 'rules.json')) && checksOf(f.landing).length, 0, 'dry-run 不落盘');
 });
 
+test('判据: rulekeeper_apply 透传 carrier —— 同 rule 两条绑定只退役指定那条；不给 carrier 仍报歧义', async () => {
+  const root = tempDir('anchor-carrier');
+  const repo = join(root, 'repo');
+  const landing = join(repo, '.dsh-ai', 'rulekeeper');
+  mkdirSync(join(landing, 'proposals'), { recursive: true });
+  for (const name of ['A.md', 'B.md', 'README.md']) writeFileSync(join(repo, name), 'v1\n', 'utf8');
+  writeFileSync(join(landing, 'config.json'), `${JSON.stringify({ schema: 1, mode: 'observe' }, null, 2)}\n`, 'utf8');
+  const two = ['A.md', 'B.md'].map((carrier) => ({
+    kind: 'file_untracked_change', rule: 'CAT-PROC', carrier, falsePositive: 'README.md',
+    gate: 'pre-commit', patterns: [carrier], proposal: `P-old-${carrier}`, activatedAt: '2026-09-19T00:00:00.000Z',
+  }));
+  writeFileSync(join(landing, 'rules.json'), `${JSON.stringify({
+    schema: 1, project: 't', protected_paths: ['A.md', 'B.md'], gates: [], checks: two, inject: [],
+  }, null, 2)}\n`, 'utf8');
+  writeFileSync(join(landing, 'ledger.jsonl'), '', 'utf8');
+  const retire = {
+    schema: 1, id: 'P-retire-1', rule: 'CAT-PROC', source: 'human', createdAt: '2026-09-19T00:00:00.000Z',
+    redCriteria: 'EFFECT_RETIRE_CANDIDATE：旧绑定无提案来源，先退役清账',
+    counterExample: 'path:A.md',
+    falsePositiveSurface: 'path:README.md',
+    activationCheck: '回读 rules.json：只剩另一条绑定',
+    status: 'proposed',
+  };
+  writeFileSync(join(landing, 'proposals', 'P-retire-1.json'), `${JSON.stringify(retire, null, 2)}\n`, 'utf8');
+
+  // 判据侧：给 carrier 只摘一条；不给 ⇒ 歧义（两个方向都要能复现）
+  const base = { landingDir: landing, projectRoot: repo, proposalId: 'P-retire-1', by: 'human', apply: false, now: TS };
+  const one = applyActivation({ ...base, carrier: 'B.md' });
+  assert.equal(one.ok, true, JSON.stringify(one));
+  assert.equal(one.additions.retirement.removedCarrier, 'B.md');
+  assert.equal(one.additions.retirement.remainingBindings, 1);
+  const ambiguous = applyActivation({ ...base });
+  assert.equal(ambiguous.ok, false, '不给 carrier 必须仍判歧义（红样本）');
+  assert.equal(ambiguous.reasonCode, 'EFFECT_RETIRE_AMBIGUOUS');
+
+  // 工具面：carrier 必须真的透传到同一条 dry-run 通路
+  const askOk = async ({ questions }) => ({ answers: [{ id: questions[0].id, selected: [APPROVAL_APPROVE_LABEL] }] });
+  const h = makeAnchoredApplyHandler({ ctx: { userQuestions: { ask: askOk }, agents: { roots: () => [{ id: 'root-1' }] } }, cwd: repo, now: () => TS });
+  const through = await h({ proposal: 'P-retire-1', carrier: 'B.md' });
+  assert.equal(through.ok, true, JSON.stringify(through));
+  assert.equal(through.decision, 'dry-run');
+  const blocked = await h({ proposal: 'P-retire-1' });
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.decision, 'plan-failed');
+});
+
 test('判据: 工具名与参数已登记进 PLUGIN_TOOLS（装载即用，不是写了没人调）', async () => {
   const { PLUGIN_TOOLS, TOOL_PARAMETERS } = await import('../src/plugin.mjs');
   const names = PLUGIN_TOOLS.map((t) => t.name);
   assert.ok(names.includes('rulekeeper_apply'), `工具必须登记：${names.join(',')}`);
   assert.deepEqual(TOOL_PARAMETERS['rulekeeper_apply'].required, ['proposal']);
+  assert.ok(TOOL_PARAMETERS['rulekeeper_apply'].properties.carrier, '退役作用域参数 carrier 必须登记（否则工具面不可达）');
   const { HANDLER_TOOL_NAMES, defaultHandlers } = await import('../src/handlers.mjs');
   assert.ok(HANDLER_TOOL_NAMES.includes('rulekeeper_apply'), 'handler 名单要与工具同名（同一命名空间）');
   // 纯函数表里给的是**fail-closed 兜底**（不是空壳、也不是能落盘的实现）：拿不到 ctx 就明确拒绝
