@@ -1,6 +1,6 @@
 {
   "name": "dsh-rulekeeper",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "DSH 纪律治理：教训账本 + 机械门禁（pre/post-commit 真阻断）+ 自进化提案；零依赖 Node CLI，命令前缀 rk-*",
   "type": "module",
   "license": "MIT",
@@ -56,5 +56,12 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "dshCompat": {
+    "min": "0.1.0-rc.3",
+    "max": "0.4.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.1.0-rc.3 <0.4.0"
   }
 }

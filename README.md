@@ -598,7 +598,7 @@ RULEKEEPER_PLAN_BASE=HEAD~1 RULEKEEPER_PLAN_HEAD=HEAD node scripts/checkers/plan
 
 ```bash
 # ① 固定 tag 的 tarball（内容不可变，最稳）
-dsh plugin --profile <你的档> add https://github.com/0embsd/dsh-rulekeeper/releases/download/v0.3.0/dsh-rulekeeper-0.3.0.tgz
+dsh plugin --profile <你的档> add https://github.com/0embsd/dsh-rulekeeper/releases/download/v0.4.0/dsh-rulekeeper-0.4.0.tgz
 
 # ② 或直接钉 commit（不依赖 release）
 dsh plugin --profile <你的档> add "github:0embsd/dsh-rulekeeper#<commit-sha>"
@@ -614,7 +614,7 @@ dsh plugin --profile <你的档> add "github:0embsd/dsh-rulekeeper#<commit-sha>"
 > ⇒ 上一版 README 里那条 tarball 命令**照抄必然失败**（"推荐方式"是死的）。
 > **发版完整动作 = ① `package.json` 的 `version` 改成 `x.y.z` → ② 打附注 tag `vx.y.z` → ③ 建 Release。**
 > ①②在本仓内完成；**第③步要人来做**（本机无 `gh` CLI、也无 token）：GitHub → Releases →
-> *Draft a new release* → 选 tag `v0.3.0` → Publish。
+> *Draft a new release* → 选 tag `v0.4.0` → Publish。
 > 一致性由 `test/version-tag.test.mjs` 机械守着（版本号 = 最近 tag；README 里那个版本号 = 包版本）。
 
 ```bash
@@ -658,7 +658,7 @@ dsh plugin --profile <你的档> add dsh-rulekeeper
 # GitHub 安装的使用者，更新到最新（跟随 main）：
 dsh plugin --profile <你的档> add "github:0embsd/dsh-rulekeeper#main"
 # 或者仍钉 tag（可复现，推荐）：
-dsh plugin --profile <你的档> add "github:0embsd/dsh-rulekeeper#v0.3.0"
+dsh plugin --profile <你的档> add "github:0embsd/dsh-rulekeeper#v0.4.0"
 # 装完**重启该档 DSH**（"更新会下载新版本，重启后生效" —— 前端页面会立即更新，服务端不会）
 ```
 
