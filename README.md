@@ -636,6 +636,41 @@ dsh plugin --profile <你的档> add link:<包目录>
 > 报出与本包无关的假红，实测 1 pass / 2 fail）。
 > 想在装出来的副本上核对健康，用 `rk-selfcheck --root <包根>`；要跑自测请用**完整检出**。
 
+### 新克隆 / 换机：先装钩子，再改文件（否则门禁静默不生效）
+
+git 的 `core.hooksPath` **不随仓库走**。新克隆/换机后若不做这一步，`git commit` **不会执行任何门禁**，
+输出里也**一条 `RK_GATE_*` 都不会有** —— 那是「静默不生效」，不是「通过」。
+
+```bash
+cd <包目录>
+node bin/rk-gate.mjs hooks install --repo . --hooks-path .githooks
+```
+
+预期输出（关键行）：
+
+```
+RK_GATE_HOOKS_CONFIG_SET=true
+HOOK installed pre-commit sha256=...
+RK_GATE_HOOKS_RESULT=pass
+```
+
+核对**运行时配置**（不是看文件在不在）：
+
+```bash
+git config --get core.hooksPath        # 期望 .githooks
+node bin/rk-doctor.mjs --landing .dsh-ai/rulekeeper --project .
+```
+
+`rk-doctor` 在未设/指向不对时给 `DOCTOR_HOOKS_PATH_UNSET` / `DOCTOR_HOOKS_PATH_DRIFT`（默认 warn；`--strict` 下算 error）。
+
+另：改受保护文件（`AGENTS.md`、`CLAUDE.md`、`.claude/rules/**`、契约文档）前先留证：
+
+```bash
+node bin/rk-snap.mjs take --landing .dsh-ai/rulekeeper --path <被保护文件> --project .
+```
+
+否则 pre-commit 会以 `RK_GATE_WRITE_NOSNAPSHOT` 拒（实测：16 个受保护文件无快照 ⇒ `RK_GATE_WRITE_RESULT=fail`）。这是设计如此，不是缺陷。
+
 ### 方式 3：从 npm 安装（**尚未发布到 registry，此路当前不通**）
 
 ```bash

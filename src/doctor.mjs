@@ -9,8 +9,9 @@
 //
 // 归属：core 模块。零依赖：只用 node:*。
 
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 import { validateActivation } from './annotations.mjs';
 import { readLines } from './append.mjs';
@@ -213,10 +214,55 @@ export function doctor(opts = {}) {
   }
 
   const hasError = findings.some((f) => f.level === 'error');
+  findings.push(...hooksPathFindings({ projectRoot, landingDir }));
   if (summary.nonPathEvidence > 0) {
     push(findings, 'info', 'DOCTOR_NON_PATH_EVIDENCE', `${summary.nonPathEvidence} 项 evidence 是自由文本（非路径）-> 按设计跳过存在性检查，仅计数`, { count: summary.nonPathEvidence });
   }
   return { ok: !hasError, findings, summary };
+}
+
+/**
+ * `core.hooksPath` 运行时接线检查（2026-10-18，换机静默失效缺口）。
+ *
+ * 缺口现场：新克隆里钩子文件随仓到达，但 `core.hooksPath` **不随仓**（git 的固有行为），
+ * 于是 `git commit` 完全不执行门禁，输出里一条 `RK_GATE_*` 都没有 —— 是**静默不生效**，不是通过。
+ * 因此这里只认运行时真实配置（`git config --get core.hooksPath`），**不看文件在不在**；
+ * 非 git 工作树如实给 info（不适用 ≠ 通过）。
+ */
+function hooksPathFindings({ projectRoot, landingDir }) {
+  const out = [];
+  const repo = spawnSync('git', ['-C', projectRoot, 'rev-parse', '--is-inside-work-tree'], { encoding: 'utf8' });
+  if (repo.status !== 0 || String(repo.stdout ?? '').trim() !== 'true') {
+    out.push({ level: 'info', code: 'DOCTOR_HOOKS_PATH_NOT_APPLICABLE', msg: 'projectRoot 不是 git 工作树 ⇒ core.hooksPath 检查不适用（不适用 ≠ 通过）' });
+    return out;
+  }
+  let expected = '.githooks';
+  try {
+    const hooksJson = JSON.parse(readFileSync(join(landingDir, 'hooks.json'), 'utf8'));
+    if (typeof hooksJson?.hooksPath === 'string' && hooksJson.hooksPath.trim() !== '') expected = hooksJson.hooksPath.trim();
+  } catch {
+    // hooks.json 缺失/坏：退回安装器默认值（与 hooks install 的默认一致）
+  }
+  const got = spawnSync('git', ['-C', projectRoot, 'config', '--get', 'core.hooksPath'], { encoding: 'utf8' });
+  const configured = got.status === 0 ? String(got.stdout ?? '').trim() : '';
+  const key = (p) => {
+    const s = resolve(projectRoot, p).replace(/\\/g, '/');
+    return process.platform === 'win32' ? s.toLowerCase() : s;
+  };
+  if (configured === '') {
+    out.push({
+      level: 'warn',
+      code: 'DOCTOR_HOOKS_PATH_UNSET',
+      msg: `core.hooksPath 未设 ⇒ 钩子不会执行：提交不会打印任何 RK_GATE_* 行（静默不生效 ≠ 通过）；先跑 rk-gate hooks install --repo ${projectRoot} --hooks-path ${expected}`,
+    });
+  } else if (key(configured) !== key(expected)) {
+    out.push({
+      level: 'warn',
+      code: 'DOCTOR_HOOKS_PATH_DRIFT',
+      msg: `core.hooksPath=${configured} 未指向落点 hooks 目录 ${expected}（resolve=${resolve(projectRoot, expected)}）⇒ 执行的可能不是这套门禁`,
+    });
+  }
+  return out;
 }
 
 /** 供 CLI 复用：按 --strict 把 warn 也算失败 */
