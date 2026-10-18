@@ -159,6 +159,13 @@ test('红→绿: apply 不传 landingDir 时，靠宿主 ctx.agents 解析出落
 });
 
 test('绿: pre-step 事件把"本轮是哪个会话"记下来（systemPrompt.context 拿不到 agent，只能靠它）', async () => {
+  // 2026-10-18：本用例此前**隐式依赖**「仓库自身 dev 落点里没有 state=none 行」——
+  // 新增 GATE-BYPASS 账本行后，provider 在真实落点上出话，前置断言假红。
+  // 处置：隔离 cwd（"不传 landingDir / 无 ctx.agents"的前提保持不变），断言一条都不放宽。
+  const prevCwd = process.cwd();
+  const emptyCwd = tempDir('plugin-note-empty-cwd');
+  process.chdir(emptyCwd);
+  try {
   const root = fixtureHost('plugin-note-agent');
   const { projectRoot } = freshProjectLanding('plugin-note-proj', {
     entries: [ledgerEntry({ id: 'L1', ts: '2026-09-19T00:00:00.000Z', rule: 'CAT-CODE' })],
@@ -182,6 +189,9 @@ test('绿: pre-step 事件把"本轮是哪个会话"记下来（systemPrompt.con
   const text = provider({});
   assert.match(text, /CAT-CODE/, 'pre-step 记下的会话 cwd 必须让投递通道活过来');
   assert.equal(lastApplyReport.deliveryCapability.landing.static.includes('landingDir'), true);
+  } finally {
+    process.chdir(prevCwd);
+  }
 });
 
 test('红态→绿（LF-450 fail-open）: 注入 listener 抛错后订阅回调不抛、落诊断、且**透传上游决策**', async () => {
