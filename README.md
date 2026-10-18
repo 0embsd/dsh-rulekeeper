@@ -126,7 +126,7 @@ rk-effect inject --landing <落点>                       # 把"只写下来了"
 | 类 | 例子 | 公开仓 | 私有仓 |
 |---|---|---|---|
 | **identity**（本仓自己的名字） | 内部项目名 / 内部工具名 / 内部结果行前缀 / 内部容器仓名 / 内部主机编号 | 拦 | **不拦** |
-| **infrastructure**（真敏感） | 本机盘卷路径 / 真实 IPv4 / 私钥头与文件名 / 云凭据真值 | 拦 | **拦** |
+| **infrastructure**（真敏感） | 本机盘卷路径 / 真实 IPv4 / 私钥头与**私钥**文件名（公开证书名豁免） / 云凭据真值 | 拦 | **拦** |
 
 档位解析顺序（`src/repo-patterns.mjs`）：① 落点 `config.json` 的 `"repoKind": "public" | "private"`
 （显式声明，唯一权威）→ ② 自动探测远端（GitHub/GitLab 等已知公开托管商 ⇒ public）→ ③ 兜底 **private**
@@ -135,6 +135,16 @@ rk-effect inject --landing <落点>                       # 把"只写下来了"
 三道门（`pre-commit` 暂存文件 / `commit-msg`+`pre-push` 提交正文 / `pre-push` 引用名）**读同一档位**。
 实测（`test/repo-kind.test.mjs`）：同一段含内部项目名的文本，public 档三道门全红、private 档全绿；
 而本机绝对路径 / 真实 IPv4 在**两档都红**。
+
+**2026-10-18 收窄（两条实测缺口，规则 53/85）**：
+
+- **pre-commit 只看本次新增行**（`git diff --cached -U0` 的 `+` 侧），历史行不判——判据本意是
+  「这次提交**新引入**了什么」。旧行为扫整份暂存文件：nginx 模板文件里的历史 `.pem` 行会让整个文件
+  **不可改**（实测 `internal/modules/cert/mode2.go`：历史行 14 处命中、本次新增 0 处，却判红），形成死锁。
+  新文件在 diff 里全是 `+`，判定**不削弱**；git 取不到 diff 时退回整份扫描（宁严不松）。
+- **「私钥文件名」按名分档**：`privkey*.pem`、`id_` 前缀的 SSH 私钥名、**路径形态**的 `.key` 拦；
+  `fullchain.pem` / `chain.pem` / `ca.pem`（含 `cloudflare-aop-ca.pem` 这类按**段**命中的公开 CA）**豁免**——
+  公开证书链不是凭据证据（规则 85：宽泛模式不能当凭据判定）。裸 `rule.key` 是代码属性访问，不算文件名。
 
 **诚实边界**：`repoKind` 是**声明**，不是签名 —— 私有仓标成 public 只会更严（自伤不伤人），
 反过来公开仓标成 private 才能少扫一类 ⇒ **公开仓仍需分支保护**（本模块管不了托管商侧）。

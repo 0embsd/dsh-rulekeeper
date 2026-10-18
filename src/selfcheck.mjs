@@ -19,6 +19,7 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { CONFIG_FILE, landingDirs, validateConfig } from './config.mjs';
 // **按仓库性质分档的黑名单**（2026-09-21，交接第 1 步）：原来这份表不分公开/私有 ⇒ 私有仓里
 // "本仓自己的名字"被当泄漏，pre-commit/commit-msg/pre-push 三道门一起拒提交。分档口径与解析顺序
@@ -272,10 +273,12 @@ export function findPublicFaceLeaks(rel, text, forbidden = PUBLIC_FACE_FORBIDDEN
     const end = text.indexOf('\n', lineStarts[lo]);
     return text.slice(lineStarts[lo], end === -1 ? text.length : end);
   };
-  for (const { re, why, allow, inlineComment } of forbidden) {
+  for (const { re, why, allow, inlineComment, exemptMatch } of forbidden) {
     const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
     for (const m of text.matchAll(g)) {
       if (typeof allow === 'function' && allow(rel, m[0], text)) continue;
+      // ★分档豁免★（2026-10-18）：命中的是**公开证书名**（fullchain/chain/ca）⇒ 不是私钥凭据（规则 85）。
+      if (typeof exemptMatch === 'function' && exemptMatch(m[0])) continue;
       // ★窄豁免★：整行注释里的该串不算（只对在模式表里声明了 inlineComment 的条目生效）。
       if (typeof inlineComment === 'function' && inlineComment(lineTextAt(m.index))) continue;
       found.push({ why, match: m[0] });
@@ -308,6 +311,37 @@ export function scanPublicFacePaths(root, relPaths = [], opts = {}) {
       continue;   // 二进制/读不了 ⇒ 跳过（S8 只管文本公开面）
     }
     for (const leak of findPublicFaceLeaks(posix, text, forbidden)) out.push({ rel: posix, ...leak });
+  }
+  return out;
+}
+
+/**
+ * 对**本次暂存新增行**（`git diff --cached -U0` 的 `+` 侧）做同一份公开面扫描（pre-commit 用）。
+ *
+ * 为什么只扫新增行（2026-10-18 实测，规则 53/85）：
+ *   判据本意 = 「这次提交**新引入**了私钥文件名/内部标识」。扫整份暂存文件时，历史行会让
+ *   整个文件不可改（现场：mode2.go 历史行 14 处 .pem，改 4 处 proxy_pass 也被判红）⇒ 死锁。
+ *   新文件在 diff 里全部是 `+`，故不削弱「新引入」的判定。
+ * git 不可用（非仓 / 命令异常）⇒ **退回整份扫描**（宁可更严，不静默放行）。
+ */
+export function scanPublicFaceAdded(root, relPaths = [], opts = {}) {
+  const forbidden = Array.isArray(opts.forbidden) ? opts.forbidden : PUBLIC_FACE_FORBIDDEN;
+  const out = [];
+  for (const rel of relPaths) {
+    const posix = String(rel).split(sep).join('/');
+    if (posix.startsWith('test/fixtures/')) continue;
+    const res = spawnSync('git', ['-C', root, 'diff', '--cached', '--unified=0', '--', posix], { encoding: 'utf8' });
+    if (res.error || res.status !== 0) {
+      for (const leak of scanPublicFacePaths(root, [posix], { forbidden })) out.push(leak);
+      continue;
+    }
+    const added = String(res.stdout ?? '')
+      .split('\n')
+      .filter((l) => l.startsWith('+') && !l.startsWith('+++'))
+      .map((l) => l.slice(1))
+      .join('\n');
+    if (added.trim() === '') continue;
+    for (const leak of findPublicFaceLeaks(posix, added, forbidden)) out.push({ rel: posix, ...leak });
   }
   return out;
 }

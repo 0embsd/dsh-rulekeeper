@@ -30,7 +30,7 @@ import { validateUncheckableDeclaration } from './uncheckable.mjs';
 import { redactValue } from './redact.mjs';
 import { offGuard } from './mode.mjs';
 import { pathKey, resolveProjectLanding, toPosix } from './platform/paths.mjs';
-import { PUBLIC_FACE_FORBIDDEN, findPublicFaceLeaks, scanPublicFacePaths } from './selfcheck.mjs';
+import { PUBLIC_FACE_FORBIDDEN, findPublicFaceLeaks, scanPublicFaceAdded, scanPublicFacePaths } from './selfcheck.mjs';
 import { resolveRepoPatterns } from './repo-patterns.mjs';
 
 /** 工具自产物/非项目目录：任何判据都不得把它们当"项目文件"（㉚） */
@@ -424,7 +424,11 @@ export function precommitGate(opts = {}) {
   // 注意用 `runGitRaw`（(repoRoot, argv) -> {status, stdout}），不是 `runGit`（不同的调用形态）；
   // `detectRepoKind` 只读 `git config --get remote.origin.url`，两者都兼容。
   const repoPatterns = resolveRepoPatterns({ root: repoRoot, landingDir: landing, runGitRaw });
-  for (const leak of scanPublicFacePaths(repoRoot, staged.paths, { forbidden: repoPatterns.forbidden })) {
+  // **2026-10-18 收窄（规则 53/85）**：pre-commit 只扫**本次新增行**（`git diff --cached` 的 `+` 侧），
+  //   历史行不判 —— 判据本意是「这次提交新引入了什么」。旧行为扫整份暂存文件，让
+  //   `internal/modules/cert/mode2.go`（历史行含 fullchain/privkey）成了改不动的死锁（实测 14 行命中/新增 0）。
+  //   新文件在 diff 里全是 `+`，不削弱；git 异常时 scanPublicFaceAdded 退回整份扫描（宁严不松）。
+  for (const leak of scanPublicFaceAdded(repoRoot, staged.paths, { forbidden: repoPatterns.forbidden })) {
     findings.push({
       code: 'GATE_PRECOMMIT_INTERNAL_LEAK',
       message: `暂存文件出现${leak.why}「${leak.match}」: ${leak.rel}（${repoPatterns.kind === 'public' ? '公开仓不得暴露内部标识/本地路径/基础设施信息' : '私有仓不得暴露基础设施信息/凭据'}；改掉措辞再提交）`,

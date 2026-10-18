@@ -44,3 +44,23 @@ test('判据（多行）: 中间行也必须扫到（`m` 标志的意义）', ()
   const multi = ['# 注释行', '名字随便', `target=deploy/${KEYNAME}`, '', '结束'].join('\n');
   assert.equal(hits(multi), true, '`^` 不加 m 时会只看第一行 ⇒ 这条会漏');
 });
+
+// ── 2026-10-18 收窄：公开证书 ≠ 私钥（规则 85：宽泛模式不能当凭据证据）────────────────
+const PUBLIC = {
+  fullchain: `${'full'}${'chain'}${PEM}`,
+  chain: `${'ch'}${'ain'}${PEM}`,
+  ca: `${'c'}${'a'}${PEM}`,
+};
+
+test('判据（公开证书档）: fullchain / chain / ca 不算私钥凭据', () => {
+  assert.equal(hits(`ssl_certificate /etc/mycert/${PUBLIC.fullchain};`), false, '公开证书链');
+  assert.equal(hits(`ssl_certificate /etc/mycert/${PUBLIC.chain};`), false, '中间链');
+  assert.equal(hits(`ssl_client_certificate /etc/mycert/cloudflare-aop-${PUBLIC.ca};`), false, '公开 CA（段=ca）');
+  assert.equal(hits(`/etc/mycert/authenticated_origin_pull_${PUBLIC.ca}`), false, '公开 CA（下划线分段）');
+});
+
+test('判据（分档边界）: 名字含 ca 子串的 .pem 仍拦；路径形态 .key 拦；代码属性访问不拦', () => {
+  assert.equal(hits(`/etc/x/${'cache'}${PEM}`), true, '名字含 ca 子串 ≠ 公开 CA（按段判定）');
+  assert.equal(hits(`拷贝 /etc/x/server.${'key'}`), true, '路径形态的私钥文件');
+  assert.equal(hits(`const v = rule.${'key'}`), false, '代码属性访问不是文件名（S8 实测假阳）');
+});

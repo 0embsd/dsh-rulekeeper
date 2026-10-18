@@ -191,8 +191,18 @@ export const INFRA_PATTERNS = Object.freeze([
     // 行首紧跟 `*` `?`（通配）一律不算 —— 那是 ignore 规则。
     // 前导用**拉丁字母/数字的否定回看**（`(?<![\w.*?])`）而不是"行首或斜杠"：因为中文里
     // 「文件 id_ed25519 丢了」这种写法太常见，紧贴着汉字也算**裸文件名**（写这一行时被用例抓到）。
-    re: /(?<![\w.*?])(?:id_rsa|id_ed25519)(?![\w.*?])|(?:^|[/\\]|[\s"'(=])(?<![*?<]\.)[\w@.-]{2,}\.pem\b/m,
+    // **2026-10-18 再收窄（两处实测缺口，规则 53/85）**：
+    //   缺口 A（死锁）：pre-commit 曾扫**整份暂存文件** ⇒ internal/modules/cert/mode2.go 里历史行
+    //     的 fullchain/privkey 让整个文件不可改（改 4 处 proxy_pass 也被判红，实测 14 行命中/新增行 0）。
+    //     判据本意是"这次提交**新引入**了私钥文件名"⇒ pre-commit 改为只喂 `git diff --cached` 的 `+` 侧
+    //     （scanPublicFaceAdded）。历史行不判；新文件仍是全 `+`，不削弱。
+    //   缺口 B（宽泛）：`*.pem` 一律算私钥，与规则 85「不许用宽泛模式当凭据证据」冲突 ——
+    //     fullchain（公开证书链）/ chain / ca（公开 CA）不是凭据。故按名字**分档豁免**（exemptMatch），
+    //     私钥类（privkey*.pem / id_rsa / id_ed25519 / id_ecdsa）照拦；`.key` 只在**路径形态**
+    //     （`/server.key`）下拦 —— 裸 `rule.key` 是代码属性访问，按"宽泛模式"拦会假阳（S8 实测抓出）。
+    re: /(?<![\w.*?])(?:id_rsa|id_ed25519|id_ecdsa)(?![\w.*?])|(?<![\w.*?])[\w@.-]{2,}\.pem\b|[/\\][\w@.-]{2,}\.key\b/m,
     why: '私钥文件名（基础设施标识）',
+    exemptMatch: isPublicCertName,
     allow: (rel) => rel === 'src/selfcheck.mjs' || rel === 'src/repo-patterns.mjs',   // 仅本模式表自身
     // ★2026-10-15 窄豁免（老板批准选项 A）★：**整行注释**里的该串不算泄漏。
     //
@@ -209,6 +219,23 @@ export const INFRA_PATTERNS = Object.freeze([
     inlineComment: (line) => /^\s*(?:\/\/|#|\*|<!--)/.test(line),
   },
 ]);
+
+/**
+ * 公开证书文件名（**不是**私钥凭据）：按名字**段**判定 fullchain / chain / ca。
+ *
+ * 为什么需要（规则 85：宽泛模式不能当凭据证据）：`fullchain.pem` 是公开证书链、`ca.pem` 是公开 CA
+ * 证书；把它们当"私钥文件名"会逼着项目改产品文案去过判据（实测已发生），方向错了。
+ * 只豁免 `.pem`；`.key` 一律不豁免（私钥扩展名）。
+ * 段 = 用 `.` `-` `_` 切词（`cloudflare-aop-ca.pem` 的 ca 算；`cache.pem` 不算 —— 不按子串）。
+ */
+export function isPublicCertName(name) {
+  const s = String(name ?? '').toLowerCase().trim();
+  if (!s.endsWith('.pem')) return false;
+  const base = s.slice(0, -4);
+  if (base === '') return false;
+  const segs = base.split(/[._-]+/).filter(Boolean);
+  return segs.some((x) => x === 'fullchain' || x === 'chain' || x === 'ca');
+}
 
 /** 分档表：`public` = identity + infra；`private` = 只 infra */
 export function patternsForKind(kind) {
