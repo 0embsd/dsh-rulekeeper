@@ -45,10 +45,10 @@ function install(root) {
   return r;
 }
 
-function writeExt(root, body) {
+function writeExt(root, name, body) {
   const dir = join(root, '.dsh-ai', 'rulekeeper', 'hooks');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'pre-commit.mjs'), body, 'utf8');
+  writeFileSync(join(dir, `${name}.mjs`), body, 'utf8');
 }
 
 function patchLocal(root, hooksExt) {
@@ -58,9 +58,15 @@ function patchLocal(root, hooksExt) {
   writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
 }
 
-function runHook(root) {
-  return spawnSync(process.execPath, [join(root, '.dsh-ai', 'rulekeeper', 'hook.mjs'), 'pre-commit'], {
-    cwd: root, encoding: 'utf8',
+function patchLocalRaw(root, extra) {
+  const file = localStatePathOf(root);
+  const state = { ...JSON.parse(readFileSync(file, 'utf8')), ...extra };
+  writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+}
+
+function runHook(root, hookName = 'pre-commit', input) {
+  return spawnSync(process.execPath, [join(root, '.dsh-ai', 'rulekeeper', 'hook.mjs'), hookName], {
+    cwd: root, encoding: 'utf8', ...(input === undefined ? {} : { input }),
   });
 }
 
@@ -87,10 +93,19 @@ test('P25③: 重装保留本机态 hooksExt（required=true 不被抹掉）', (
   assert.deepEqual(state.hooksExt, { required: true }, 'install 后 hooksExt 必须原样保留');
 });
 
+test('P25③b: 本机态的人设键（不在 install 管理面）重装后仍在', () => {
+  const root = gitRepo('p25-keep-extra');
+  install(root);
+  patchLocalRaw(root, { q91Checker: 'tools/checker.mjs' });
+  install(root);
+  const state = JSON.parse(readFileSync(localStatePathOf(root), 'utf8'));
+  assert.equal(state.q91Checker, 'tools/checker.mjs', 'install 不许抹掉模板/扩展仍在读的人设键');
+});
+
 test('P25④: 扩展文件存在 ⇒ 执行并逐字透传退出码', () => {
   const root = gitRepo('p25-run');
   install(root);
-  writeExt(root, "process.stderr.write('ext-ran\\n');\nprocess.exit(7);\n");
+  writeExt(root, 'pre-commit', "process.stderr.write('ext-ran\\n');\nprocess.exit(7);\n");
   const r = runHook(root);
   assert.equal(r.status, 7, `退出码必须透传；stderr=${r.stderr}`);
   assert.match(r.stderr, /\[rk-ext\] loaded pre-commit/);
@@ -109,4 +124,26 @@ test('P25⑤: 缺扩展时 required 档位', () => {
   const skipped = runHook(root);
   assert.equal(skipped.status, 0, 'required=false 缺扩展必须放行');
   assert.match(skipped.stderr, /未配置项目扩展.*required=false/);
+});
+
+test('P25⑥: 未声明 hooksExt 的仓不输出降级噪音（放行且无横幅）', () => {
+  const root = gitRepo('p25-undeclared');
+  install(root);
+  const r = runHook(root);
+  assert.equal(r.status, 0);
+  assert.doesNotMatch(r.stderr, /未配置项目扩展/, '没声明 hooksExt 的仓不该被降级横幅长期刷屏');
+});
+
+test('P25⑦（可达性）: commit-msg / pre-push 的成功出口也必须执行扩展', () => {
+  const root = gitRepo('p25-reach');
+  install(root);
+  writeExt(root, 'commit-msg', "process.exit(7);\n");
+  const cm = runHook(root, 'commit-msg', '');
+  assert.equal(cm.status, 7, `commit-msg 扩展必须可达；stderr=${cm.stderr}`);
+  assert.match(cm.stderr, /\[rk-ext\] loaded commit-msg/);
+
+  writeExt(root, 'pre-push', "process.exit(5);\n");
+  const pp = runHook(root, 'pre-push', 'refs/heads/main 0000000000000000000000000000000000000000 refs/heads/main 0000000000000000000000000000000000000000\n');
+  assert.equal(pp.status, 5, `pre-push 扩展必须可达（无基点成功出口）；stderr=${pp.stderr}`);
+  assert.match(pp.stderr, /\[rk-ext\] loaded pre-push/);
 });
