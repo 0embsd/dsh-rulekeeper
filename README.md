@@ -502,6 +502,28 @@ afterward."）⇒ provider 用**该会话自己的 cwd**解析落点，不再需
   > 决策轨迹：当时以"要件不能推定"为由砍掉，后确认"量出来的事实"不属于推定。**真正不可自动化的仍是"摘绑定"**——
   > 它必须人签字走 `rk-effect apply`。
 
+## 项目扩展点（`hooksExt`，2026-10-18）
+
+`rk-gate hooks install` 生成的 `hook.mjs` 是**生成物**（重装即覆盖）。项目自己的钩子逻辑放在：
+
+```
+<落点>/hooks/<hook>.mjs      # hook ∈ pre-commit / commit-msg / post-commit / pre-push
+```
+
+runner 在基础门禁**通过之后**执行它，**退出码逐字透传**（`process.execPath`、cwd=仓库根、参数与 git 传的一致）。
+
+- 开关：`hooks.local.json`（本机态）或 `config.json`（可入库）的 `hooksExt.required`。
+  - `required=true`：声明"这是门禁"。缺文件 ⇒ fail-closed；`rk-gate hooks verify` 另判
+    `HOOK_EXT_REQUIRED_MISSING`（一份都没有）与 `HOOK_EXT_REQUIRED_UNTRACKED`（文件没入库）。
+  - `required=false` / 未声明：缺文件 ⇒ 如实跳过；只有**声明过** `hooksExt` 的仓才打横幅，避免长期噪音。
+  - **作用域**（`hooksExt.hooks`）：如 `["pre-commit"]` 表示只对该 hook 强制；不给则全部强制。只加一条
+    扩展的仓若省略作用域，同一次提交的 commit-msg/pre-push 会被自身"缺扩展"拒掉（2026-10-18 真机踩到）。
+  - `HOOK_EXT_REQUIRED_MISSING` 在**给了作用域时**逐条点名缺哪个 hook；未给作用域时只要求"至少有一份"
+    （否则 required 是空声明，等于没声明）。
+- `install` 重装会保留 `hooksExt` 与其余**非管理键**（人设配置不被抹掉）。
+- 扩展文件必须**入库**（`.gitignore` 已放行 `.dsh-ai/rulekeeper/hooks/**`）：否则干净 clone/换机上没有它，
+  门禁要么缺席、要么 fail-closed 卡死。
+
 ## 硬约束（不是"最佳实践"，是设计底线）
 
 - **零依赖**：只用 `node:*`（`rk-selfcheck` 的 S4 机械拦裸导入与 `require`）。

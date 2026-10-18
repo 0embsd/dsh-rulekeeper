@@ -163,9 +163,13 @@ export const FILES = Object.freeze([
       // 锚定式人签字（2026-09-19 契约扩展位）：true ⇒ rules.json 的写入必须带"问过真人"的凭证，
       // `--by human` 这种字符串声明一律拒（规则 43 的同族落地）。缺省 = 不要求（保持既有落点行为不变）。
       { name: 'requireAnchoredApproval', type: 'boolean', required: false, note: 'true ⇒ 无锚定人签字凭证时拒绝写 rules.json（凭证由插件工具 rulekeeper_apply 经 ctx.userQuestions 取得）' },
+      // 项目扩展点（P25，2026-10-18）：`required` 声明"这是门禁"，`hooks` 限定作用域。
+      // 为什么必须进冻结表：`hooks verify` 要按它判"声明了 required 却把 ext 留在工作区"（入库面）；
+      // 不登记 ⇒ 那条判据没有权威字段可读，只能读自由配置（两处口径必然漂移）。
+      { name: 'hooksExt', type: 'object', required: false, note: '项目扩展点声明：{ required?: boolean, hooks?: string[] }。required=true 声明 <落点>/hooks/<hook>.mjs 是门禁；hooks 限定作用域（不给=全部）。缺文件在作用域内 fail-closed；hooks verify 另判入库面（HOOK_EXT_REQUIRED_MISSING / HOOK_EXT_REQUIRED_UNTRACKED）。hooks.local.json 里同名键优先（本机态）。' },
     ],
     derived: [],
-    extensions: ['requireAnchoredApproval'],
+    extensions: ['requireAnchoredApproval', 'hooksExt'],
   },
   {
     name: 'proposals/<id>.json',

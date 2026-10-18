@@ -102,6 +102,7 @@
 | `ledgerPath` | string | 否 |  |  |  |
 | `maxInjectChars` | number | 否 |  |  |  |
 | `requireAnchoredApproval` | boolean | 否 |  |  | true ⇒ 无锚定人签字凭证时拒绝写 rules.json（凭证由插件工具 rulekeeper_apply 经 ctx.userQuestions 取得） |
+| `hooksExt` | object | 否 |  |  | 项目扩展点声明：{ required?: boolean, hooks?: string[] }。required=true 声明 <落点>/hooks/<hook>.mjs 是门禁；hooks 限定作用域（不给=全部）。缺文件在作用域内 fail-closed；hooks verify 另判入库面（HOOK_EXT_REQUIRED_MISSING / HOOK_EXT_REQUIRED_UNTRACKED）。hooks.local.json 里同名键优先（本机态）。 |
 
 ### `proposals/<id>.json`
 

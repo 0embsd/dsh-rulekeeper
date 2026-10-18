@@ -204,11 +204,10 @@ export function hookRunnerContent() {
     '  return { file: null, tried };',
     '}',
     'function extState() {',
-    '  const local = readLandingJson(\'hooks.local.json\').hooksExt;',
-    '  if (local !== null && typeof local === \'object\' && typeof local.required === \'boolean\') return { declared: true, required: local.required };',
-    '  const cfg = readLandingJson(\'config.json\').hooksExt;',
-    '  if (cfg !== null && typeof cfg === \'object\' && typeof cfg.required === \'boolean\') return { declared: true, required: cfg.required };',
-    '  return { declared: false, required: false };',
+    '  const pick = (obj) => (obj !== null && typeof obj === \'object\' && typeof obj.required === \'boolean\'',
+    '    ? { declared: true, required: obj.required, hooks: Array.isArray(obj.hooks) ? obj.hooks.filter((h) => typeof h === \'string\') : null }',
+    '    : null);',
+    '  return pick(readLandingJson(\'hooks.local.json\').hooksExt) ?? pick(readLandingJson(\'config.json\').hooksExt) ?? { declared: false, required: false, hooks: null };',
     '}',
     'function runExt(fallbackExit) {',
     '  const ext = resolveExt();',
@@ -220,12 +219,16 @@ export function hookRunnerContent() {
     '    return typeof er.status === \'number\' ? er.status : 1;',
     '  }',
     '  const st = extState();',
-    '  if (st.required) {',
+    '  // `required` 的**作用域**（P25 复核）：只对 `hooks` 列出的 hook 生效；没给 `hooks` 则全部生效。',
+    '  // 为什么必须有作用域：项目通常只加一条 pre-commit 扩展，若 required 无差别 strict，',
+    '  //   同一次提交的 commit-msg/pre-push 会被自身的"缺扩展"拒掉（2026-10-18 真机踩到）。',
+    '  const strict = st.required && (st.hooks === null || st.hooks.includes(hook));',
+    '  if (strict) {',
     '    console.error(\'[rk-ext] required=true 但找不到 <landing>/hooks/\' + hook + \'.mjs ⇒ 拒绝（fail-closed）\');',
     '    console.error(\'  试过：\' + ext.tried.join(\' / \'));',
     '    return 1;',
     '  }',
-    '  if (st.declared) console.error(\'[rk-ext] 未配置项目扩展（hooks/\' + hook + \'.mjs 不存在）⇒ 跳过（required=false，如实告知）\');',
+    '  if (st.declared) console.error(\'[rk-ext] 未配置项目扩展（hooks/\' + hook + \'.mjs 不存在）⇒ 跳过（hooksExt 未覆盖本 hook，如实告知）\');',
     '  return fallbackExit;',
     '}',
     "// commit-msg：正文文件路径由 git 作为**第一个参数**传进来（`$1`），扫同一份公开面模式表",
@@ -688,6 +691,61 @@ export function verifyHooks(opts = {}) {
         + `${toPosix(relative(repoRoot, landing))}/${HOOK_RUNNER}。要在本机核指纹就重跑一次 \`rk-gate hooks install\`（同参数，不改钩子内容）。`,
       advisory: true,
     });
+  }
+
+  // ── 扩展点**入库**判据（P25，2026-10-18）──────────────────────────────────────
+  // 为什么：`hooksExt.required=true` 是**声明"这条扩展是门禁"**。声明了却把 ext 文件留在工作区
+  //   （没入库）⇒ 干净 clone/换机上没有它 ⇒ required=true 直接 fail-closed 卡死，或 required=false
+  //   时门禁静默缺席。故：声明 required ⇒ ext 必须**随仓到达**（`git ls-files --error-unmatch` 命中），
+  //   且至少要有一份 ext（否则 required 是空声明，等于没声明）。
+  // 解析顺序与本机态同族：local → 老清单 → 落点 config.json。
+  const extCfg = state.local?.hooksExt ?? state.manifest?.hooksExt ?? (() => {
+    try {
+      const c = JSON.parse(readFileSync(join(landing, 'config.json'), 'utf8'));
+      return c !== null && typeof c === 'object' ? (c.hooksExt ?? null) : null;
+    } catch { return null; }
+  })();
+  const extRequired = extCfg !== null && typeof extCfg === 'object' && extCfg.required === true;
+  const extHooks = extCfg !== null && typeof extCfg === 'object' && Array.isArray(extCfg.hooks)
+    ? extCfg.hooks.filter((h) => typeof h === 'string')
+    : null;
+  details.push({ key: 'HOOKS_EXT_REQUIRED', value: extRequired });
+  if (extRequired) {
+    const installed = names.length > 0 ? names : [...DEFAULT_HOOK_NAMES];
+    const targets = extHooks !== null ? extHooks : installed;
+    const present = [];
+    for (const hookName of targets) {
+      const extRel = `${toPosix(relative(repoRoot, landing))}/hooks/${hookName}.mjs`;
+      const extFile = join(landing, 'hooks', `${hookName}.mjs`);
+      if (!existsSync(extFile)) {
+        // 声明了作用域（hooks 列表）时，列表内每一条都必须真有文件 ⇒ 缺一条就判红；
+        // 未给作用域时，只要求"至少有一份"（否则 required 是空声明），见下方 present 判定。
+        if (extHooks !== null) {
+          findings.push({
+            code: 'HOOK_EXT_REQUIRED_MISSING',
+            message: `hooksExt.required=true 且 hooks 列出了 ${hookName}，但扩展文件不存在: ${extRel}（该 hook 会 fail-closed）`,
+          });
+        }
+        continue;
+      }
+      present.push(extRel);
+      const tracked = runGit(repoRoot, ['ls-files', '--error-unmatch', '--', extRel]);
+      if (!tracked.ok) {
+        findings.push({
+          code: 'HOOK_EXT_REQUIRED_UNTRACKED',
+          message: `声明了 hooksExt.required=true，但扩展文件未入库: ${extRel}`
+            + '（`git ls-files --error-unmatch` 未命中 ⇒ 干净 clone/换机上没有它，门禁会缺席或 fail-closed）',
+        });
+      }
+    }
+    if (extHooks === null && present.length === 0) {
+      findings.push({
+        code: 'HOOK_EXT_REQUIRED_MISSING',
+        message: `声明了 hooksExt.required=true，但 ${toPosix(relative(repoRoot, landing))}/hooks/ 下没有任何 <hook>.mjs`
+          + ' ⇒ required 是空声明，等于没声明',
+      });
+    }
+    details.push({ key: 'HOOKS_EXT_PRESENT', value: present.length });
   }
 
   // P14：把「跨机核什么 / 本机核什么」在输出里**分开可读**（不让人把"核过名字"读成"核过一切"）

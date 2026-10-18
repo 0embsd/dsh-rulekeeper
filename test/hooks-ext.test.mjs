@@ -18,7 +18,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { hookRunnerContent, installHooks, localStatePathOf } from '../src/hooks.mjs';
+import { hookRunnerContent, installHooks, localStatePathOf, verifyHooks } from '../src/hooks.mjs';
 import { cleanupAll, tempDir } from './helpers/sandbox.mjs';
 
 test.after(cleanupAll);
@@ -123,7 +123,7 @@ test('P25⑤: 缺扩展时 required 档位', () => {
   patchLocal(root, { required: false });
   const skipped = runHook(root);
   assert.equal(skipped.status, 0, 'required=false 缺扩展必须放行');
-  assert.match(skipped.stderr, /未配置项目扩展.*required=false/);
+  assert.match(skipped.stderr, /未配置项目扩展/);
 });
 
 test('P25⑥: 未声明 hooksExt 的仓不输出降级噪音（放行且无横幅）', () => {
@@ -146,4 +146,55 @@ test('P25⑦（可达性）: commit-msg / pre-push 的成功出口也必须执�
   const pp = runHook(root, 'pre-push', 'refs/heads/main 0000000000000000000000000000000000000000 refs/heads/main 0000000000000000000000000000000000000000\n');
   assert.equal(pp.status, 5, `pre-push 扩展必须可达（无基点成功出口）；stderr=${pp.stderr}`);
   assert.match(pp.stderr, /\[rk-ext\] loaded pre-push/);
+});
+
+test('P25⑧: required=true 的扩展未入库 ⇒ verify 判 HOOK_EXT_REQUIRED_UNTRACKED（入库后转绿）', () => {
+  const root = gitRepo('p25-track');
+  install(root);
+  spawnSync('git', ['config', 'core.hooksPath', '.githooks'], { cwd: root });
+  patchLocal(root, { required: true });
+  writeExt(root, 'pre-commit', 'process.exit(0);\n');
+
+  const before = verifyHooks({ repoRoot: root });
+  assert.equal(before.ok, false, '未入库的 required 扩展必须判红');
+  assert.ok(before.findings.some((f) => f.code === 'HOOK_EXT_REQUIRED_UNTRACKED'), JSON.stringify(before.findings));
+
+  const add = spawnSync('git', ['add', '.dsh-ai/rulekeeper/hooks/pre-commit.mjs'], { cwd: root });
+  assert.equal(add.status, 0);
+  const after = verifyHooks({ repoRoot: root });
+  assert.equal(after.ok, true, JSON.stringify(after.findings));
+});
+
+test('P25⑨: required=true 但一份扩展都没有 ⇒ verify 判 HOOK_EXT_REQUIRED_MISSING', () => {
+  const root = gitRepo('p25-noext');
+  install(root);
+  spawnSync('git', ['config', 'core.hooksPath', '.githooks'], { cwd: root });
+  patchLocal(root, { required: true });
+  const r = verifyHooks({ repoRoot: root });
+  assert.equal(r.ok, false);
+  assert.ok(r.findings.some((f) => f.code === 'HOOK_EXT_REQUIRED_MISSING'), JSON.stringify(r.findings));
+});
+
+test('P25⑩: required 的作用域只覆盖 hooks 列出的 hook（免得被自身缺扩展拒掉）', () => {
+  const root = gitRepo('p25-scope');
+  install(root);
+  patchLocalRaw(root, { hooksExt: { required: true, hooks: ['pre-commit'] } });
+  const cm = runHook(root, 'commit-msg', '');
+  assert.equal(cm.status, 0, `commit-msg 不在作用域内 ⇒ 放行；stderr=${cm.stderr}`);
+  assert.match(cm.stderr, /hooksExt 未覆盖本 hook/);
+  const pc = runHook(root, 'pre-commit');
+  assert.equal(pc.status, 1, 'pre-commit 在作用域内且缺扩展 ⇒ fail-closed');
+});
+
+test('P25⑪: hooks 作用域内缺文件 ⇒ verify 点名缺的是哪一条', () => {
+  const root = gitRepo('p25-scope-verify');
+  install(root);
+  spawnSync('git', ['config', 'core.hooksPath', '.githooks'], { cwd: root });
+  patchLocalRaw(root, { hooksExt: { required: true, hooks: ['pre-commit', 'pre-push'] } });
+  writeExt(root, 'pre-commit', 'process.exit(0);\n');
+  const add = spawnSync('git', ['add', '.dsh-ai/rulekeeper/hooks/pre-commit.mjs'], { cwd: root });
+  assert.equal(add.status, 0);
+  const r = verifyHooks({ repoRoot: root });
+  assert.equal(r.ok, false);
+  assert.ok(r.findings.some((f) => f.code === 'HOOK_EXT_REQUIRED_MISSING' && /pre-push/.test(f.message)), JSON.stringify(r.findings));
 });

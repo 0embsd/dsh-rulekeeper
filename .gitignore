@@ -23,6 +23,10 @@
 #   它**保持被忽略** —— 否则换机跑一次 `hooks install` 就把入库文件改写 ⇒ 工作区变脏 ⇒
 #   在本仓（pre-push「脏树即阻断」）上直接推不出去。
 !.dsh-ai/rulekeeper/hooks.json
+# 2026-10-18（P25）：**项目扩展点入库**。控制逻辑住在项目自己的文件里就必须随仓到达；
+#   不入库 ⇒ 换机上 required=true 会 fail-closed 卡死、required=false 则门禁静默缺席。
+!.dsh-ai/rulekeeper/hooks/
+!.dsh-ai/rulekeeper/hooks/**
 # 2026-09-23（发布时实测踩到）：**取证台账必须入库**。
 #   `rk-gate ci`（服务端门，CI 里跑的那条）判定"受保护路径的改动有没有留证"读的就是本文件；
 #   它原来被 ignore ⇒ **干净 clone 里没有台账** ⇒ 任何动过保护面的提交都被判
