@@ -13,3 +13,11 @@
 - **复查条件**：同类提交必须先用 `rk-snap take` 回填 pre-image，再走正常提交；**不得再 `--no-verify`**。
 - **收尾/CR 固定问句**：本批有没有 `--no-verify`？pre-image 是否已回填？
 - **机制面**：`question`（人工复查问句；本文件是登记，不是拦截面）。
+
+## 更正（2026-10-18，规则官复核）：上条 GATE-BYPASS 事实依据不成立
+
+- **误判来源**：`gate.jsonl:124` 的 `bypass="git commit --no-verify"` 是 `src/gate.mjs:503` 在**每条** precommit 拒绝行里**写死的提示串**（提示"未清空暂存区会被下一次 `--no-verify` 夹带"），不是本次提交的实际动作。
+- **`0ee1ded` 的实际路径**：precommit 首跑被 `GATE_PRECOMMIT_UNRECORDED` 拒绝 → `rk-snap take` 回填 pre-image → **正常提交**；同一提交 `RK_GATE_PRECOMMIT_RESULT=pass` / `RK_COMMITMSG_RESULT=pass` / `RK_GATE_POSTCOMMIT_RESULT=pass` 三行齐备（hook 全跑）。
+- **处置**：账本已按 append-only 追加归档行 + 状态事件（`LF-20261018073907-20ef31`，`STATUS_SUPERSEDE LF-20261018064917-488b43`），上条作废。
+- **复活条件**：出现独立证据（shell 历史 / 审计日志 / 缺失 post-commit 结果行）证明**实际**绕过；不得再以 `bypass` 字段为据。
+- **判据教训**：静态提示字段 ≠ 事件事实（规则 41 同族）——同类登记必须引"动作发生的那一刻"的输出，不得引模板字段。
