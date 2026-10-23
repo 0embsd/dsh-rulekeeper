@@ -324,7 +324,12 @@ export function verifyRunbook({ workdir, pkgRoot = PKG_ROOT }) {
     return { exit: typeof r.status === 'number' ? r.status : 1, stdout: r.stdout ?? '' };
   };
   const doctor = () => {
-    const r = spawnSync(process.execPath, [join(bin, 'rk-doctor.mjs'), '--landing', landing, '--strict'], { encoding: 'utf8' });
+    // **必须显式给 --project repo**（2026-10-23 修）：doctor 的 projectRoot 缺省是 `process.cwd()`，
+    //   而本函数在测试/调用者进程里跑 ⇒ 缺省会去体检**调用者自己的仓**（hooksPath 等），
+    //   不是被测的临时仓。实测后果：本机开发仓恰好设了 core.hooksPath ⇒ 绿；干净 clone（CI）没设
+    //   ⇒ doctor --strict 报 DOCTOR_HOOKS_PATH_UNSET ⇒ 同一条用例在 CI 恒红、本机恒绿。
+    //   这是"验证器验的不是被测对象"（规则 41 同族），不是被测仓的问题。
+    const r = spawnSync(process.execPath, [join(bin, 'rk-doctor.mjs'), '--landing', landing, '--project', repo, '--strict'], { encoding: 'utf8' });
     return typeof r.status === 'number' ? r.status : 1;
   };
   const writeRecon = () => {
