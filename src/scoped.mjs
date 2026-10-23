@@ -219,7 +219,7 @@ export function registerAgentScopedDelivery({
           //   否则"后来它自己想投"时会误判成"这个会话已经有了" —— 用例 ⑦c 钉住这一条）
           if (!contributed.has(a.dir)) continue;
           for (const rule of a.rules) bumpUsage(a.dir, { rule, event: 'emitted', now: now() });
-          writeEmission(a.dir, selfKey, { sha: textSha(built.text), at: now().toISOString() });
+          writeEmission(a.dir, selfKey, { sha: textSha(built.text), at: now().toISOString(), now: now() });
         }
       }
       return step.text;

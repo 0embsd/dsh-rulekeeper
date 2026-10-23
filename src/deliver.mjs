@@ -273,7 +273,7 @@ export function registerDelivery(ctx, {
           //   ①计数器语义诚实化：`(root)` 伪会话把"进程级一次投递"与"某个会话收到"分开记；
           //   ②跨通道指纹去重：作用域通道见到"根刚投过同一段文本"就不再投（见 `scoped.mjs` 的窗口）。
           for (const dir of contributed) {
-            writeEmission(dir, ROOT_EMISSION_KEY, { sha: textSha(built.text), at: now().toISOString() });
+            writeEmission(dir, ROOT_EMISSION_KEY, { sha: textSha(built.text), at: now().toISOString(), now: now() });
           }
         }
       }

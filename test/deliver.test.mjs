@@ -209,12 +209,12 @@ test('判据: 用量账往返 + 损坏降级 + 摘要排序 + 不留 .tmp 残fil
 test('判据（白名单吃掉字段的回归）: 按会话的投递状态必须能往返（跨重启去重靠它）', () => {
   const dir = tempDir('usage-emission');
   assert.equal(readEmission(dir, 'sess-1'), null, '空账 ⇒ null');
-  assert.equal(writeEmission(dir, 'sess-1', { sha: 'a'.repeat(32), at: '2026-09-20T00:00:00.000Z' }), true);
+  assert.equal(writeEmission(dir, 'sess-1', { sha: 'a'.repeat(32), at: '2026-09-20T00:00:00.000Z', now: new Date('2026-09-20T00:00:00.000Z') }), true);
   assert.deepEqual(readEmission(dir, 'sess-1'), { sha: 'a'.repeat(32), at: '2026-09-20T00:00:00.000Z' },
     '写进去又读不回来 = 字段被 normalize 的白名单吃掉了（本仓已犯过三次的错）');
   // **按会话分开**：会话 2 不受会话 1 的状态影响
   assert.equal(readEmission(dir, 'sess-2'), null, '别的会话不该看到 sess-1 的状态');
-  writeEmission(dir, 'sess-2', { sha: 'b'.repeat(32) });
+  writeEmission(dir, 'sess-2', { sha: 'b'.repeat(32), now: new Date('2026-09-20T00:00:00.000Z') });
   assert.equal(readEmission(dir, 'sess-1').sha, 'a'.repeat(32), '写 sess-2 不能覆盖 sess-1');
   // 与用量计数共存：互相不能覆盖
   bumpUsage(dir, { rule: 'CAT-CODE', event: 'emitted' });
@@ -231,17 +231,17 @@ test('判据（2026-09-21 修上限）: 去重状态表不再 20 键封顶；`(r
   const dir = tempDir('usage-emissions-cap');
   // 25 个会话（旧实现会在第 21 个起淘汰最早的 ⇒ 那些会话回来时会重复收到提醒）
   for (let i = 0; i < 25; i += 1) {
-    writeEmission(dir, `session-${String(i).padStart(2, '0')}`, { sha: 'c'.repeat(32), at: `2026-09-20T00:00:${String(i).padStart(2, '0')}.000Z` });
+    writeEmission(dir, `session-${String(i).padStart(2, '0')}`, { sha: 'c'.repeat(32), at: `2026-09-20T00:00:${String(i).padStart(2, '0')}.000Z`, now: new Date('2026-09-20T00:00:00.000Z') });
   }
-  writeEmission(dir, ROOT_EMISSION_KEY, { sha: 'd'.repeat(32), at: '2026-09-20T00:00:00.000Z' });
+  writeEmission(dir, ROOT_EMISSION_KEY, { sha: 'd'.repeat(32), at: '2026-09-20T00:00:00.000Z', now: new Date('2026-09-20T00:00:00.000Z') });
   const keys = Object.keys(readUsage(dir).emissions);
   assert.equal(keys.length, 26, `25 个会话 + (root) 都该在（旧实现只剩 20；实得 ${keys.length}）`);
   assert.ok(keys.includes('session-00'), '最早的会话也必须还在（20 键上限正是被它踩到的）');
   assert.ok(keys.includes(ROOT_EMISSION_KEY), '(root) 键必须常驻');
   // 保鲜期：把一条改成 40 天前 ⇒ 下一次写入时被清掉；但 (root) 即使很旧也不清
-  writeEmission(dir, 'session-old', { sha: 'e'.repeat(32), at: '2026-01-01T00:00:00.000Z' });
-  writeEmission(dir, ROOT_EMISSION_KEY, { sha: 'd'.repeat(32), at: '2026-01-01T00:00:00.000Z' });
-  writeEmission(dir, 'session-new', { sha: 'f'.repeat(32), at: new Date().toISOString() });
+  writeEmission(dir, 'session-old', { sha: 'e'.repeat(32), at: '2026-01-01T00:00:00.000Z', now: new Date('2026-09-21T00:00:00.000Z') });
+  writeEmission(dir, ROOT_EMISSION_KEY, { sha: 'd'.repeat(32), at: '2026-01-01T00:00:00.000Z', now: new Date('2026-09-21T00:00:00.000Z') });
+  writeEmission(dir, 'session-new', { sha: 'f'.repeat(32), at: '2026-09-21T00:00:00.000Z', now: new Date('2026-09-21T00:00:00.000Z') });
   const after = Object.keys(readUsage(dir).emissions);
   assert.ok(!after.includes('session-old'), '超过保鲜期的会话条目应被清掉（表只在真正的大主机上才触顶）');
   assert.ok(after.includes(ROOT_EMISSION_KEY), '(root) 是根通道的跨通道去重状态，不按会话保鲜期清理');
@@ -251,9 +251,9 @@ test('判据（2026-09-21 计数器语义）: 汇总要能把"投递动作数"�
   const dir = tempDir('usage-sessions');
   bumpUsage(dir, { rule: 'CAT-CODE', event: 'evaluated' });
   bumpUsage(dir, { rule: 'CAT-CODE', event: 'emitted' });
-  writeEmission(dir, 'session-a', { sha: 'a'.repeat(32), at: '2026-09-20T00:00:01.000Z' });
-  writeEmission(dir, 'session-b', { sha: 'b'.repeat(32), at: '2026-09-20T00:00:02.000Z' });
-  writeEmission(dir, ROOT_EMISSION_KEY, { sha: 'c'.repeat(32), at: '2026-09-20T00:00:03.000Z' });
+  writeEmission(dir, 'session-a', { sha: 'a'.repeat(32), at: '2026-09-20T00:00:01.000Z', now: new Date('2026-09-20T00:00:01.000Z') });
+  writeEmission(dir, 'session-b', { sha: 'b'.repeat(32), at: '2026-09-20T00:00:02.000Z', now: new Date('2026-09-20T00:00:02.000Z') });
+  writeEmission(dir, ROOT_EMISSION_KEY, { sha: 'c'.repeat(32), at: '2026-09-20T00:00:03.000Z', now: new Date('2026-09-20T00:00:03.000Z') });
   const sum = usageSummary(dir);
   assert.equal(sum.totalEmitted, 1, '动作数照旧');
   assert.equal(sum.sessions, 2, '会话数 = 真实会话（**不含** (root) 伪会话）');

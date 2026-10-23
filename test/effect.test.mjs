@@ -479,7 +479,9 @@ test('LF-A60 生效登记行**不算复发**（effect 与 evolve 必须同一口
   // 账本此刻只有那条生效登记行（没有教训行）：effect 与 evolve 都必须看到"零复发"
   const plan = effectPlan({ landingDir: landing, now: new Date('2026-09-19T13:00:00.000Z') });
   assert.equal(plan.items[0].recurredAfterActivation, false);
-  rk(['evolve', '--landing', landing, '--rule', 'FACT-WRITING', '--quality', qualityFileFor(landing)]);
+  // 时钟必须与上面 effectPlan 同源（此前不带 --now ⇒ 用真实时钟算"生效后多少天" ⇒
+  //   2026-09-19 生效、今天已是 30+ 天 ⇒ 多产一条退役提案；断言没错，是用例没隔离时钟）
+  rk(['evolve', '--landing', landing, '--rule', 'FACT-WRITING', '--quality', qualityFileFor(landing), '--now', '2026-09-19T13:00:00.000Z']);
   assert.equal(listProposals(landing).items.length, 1, '生效登记行被当成复发 => 会多出一条提案（口径不一致）');
 });
 

@@ -195,18 +195,27 @@ export function readEmission(landingDir, agentKey) {
   return { sha: row.sha, at: typeof row.at === 'string' ? row.at : null };
 }
 
-/** 记下"这个会话收到了什么指纹"（原子写；失败返回 false，**绝不抛**） */
-export function writeEmission(landingDir, agentKey, { sha, at = null } = {}) {
+/** 记下"这个会话收到了什么指纹"（原子写；失败返回 false，**绝不抛**）
+ *
+ * `now`：**记录时刻的口径**，用于保鲜期淘汰。为什么必须能传（2026-10-23 修）：
+ *   此前淘汰线用系统时钟 `Date.now()` 算，而记录时间 `at` 由调用方注入 ⇒ 两者一旦不同源
+ *   （冻结时钟的用例、补录历史记录），刚写进去的条目会被当场判成"过期"删掉：
+ *   实测 `at=2026-09-20` + 真实今天 2026-10-23 ⇒ 30 天保鲜线 ≈ 2026-09-23 ⇒ 写入即丢失。
+ *   这是**时间炸弹**：2026-10-20 之后 CI 对同一份干净代码恒红（本地/远端同因，不是脏状态）。
+ *   缺省仍取系统时钟（生产路径两边是同一时刻）。
+ */
+export function writeEmission(landingDir, agentKey, { sha, at = null, now = null } = {}) {
   const key = typeof agentKey === 'string' && agentKey !== '' ? agentKey : null;
   if (key === null || typeof sha !== 'string' || sha === '') return false;
+  const clock = now instanceof Date && Number.isFinite(now.getTime()) ? now : new Date();
   const usage = readUsage(landingDir);
   const emissions = usage.emissions !== null && typeof usage.emissions === 'object' ? { ...usage.emissions } : {};
-  emissions[key] = { sha, at: at === null ? new Date().toISOString() : String(at) };
+  emissions[key] = { sha, at: at === null ? clock.toISOString() : String(at) };
   // 有界（2026-09-21 修）：先按**保鲜期**淘汰久未动过的，再按上限淘汰最旧的。
   // 排序用**码位比较**（S5_LOCALE_COMPARE 禁 localeCompare：跨平台/跨语言环境下结果不稳定）。
   // `(root)` 键**永不淘汰**：它承载根通道的跨通道去重状态（进程级一份），不是"某个会话的历史"。
   const atOf = (k) => String(emissions[k]?.at ?? '');
-  const staleBefore = new Date(Date.now() - EMISSIONS_MAX_AGE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const staleBefore = new Date(clock.getTime() - EMISSIONS_MAX_AGE_DAYS * 24 * 60 * 60 * 1000).toISOString();
   for (const k of Object.keys(emissions)) {
     if (k === ROOT_EMISSION_KEY) continue;
     const at = atOf(k);
