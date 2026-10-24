@@ -86,7 +86,7 @@ test('red（清单原文）: 直接改文件、不留证、不提交 -> exit=1 �
   const c = gate(['write', '--project', f.projectRoot]);
   assert.equal(c.rc, RC.FAIL, c.out);
   assert.match(c.out, /^RK_GATE_WRITE_UNRECORDED=1$/m);
-  assert.match(c.out, /^UNRECORDED AGENTS\.md current=[0-9a-f]{12} baseline=[0-9a-f]{12} record_ts=2026-09-14T00:00:00\.000Z$/m);
+  assert.match(c.out, /^UNRECORDED AGENTS\.md current=[0-9a-f]{64} baseline=[0-9a-f]{64} record_ts=2026-09-14T00:00:00\.000Z record_line=1\/1 tail=yes$/m);
   assert.match(c.out, /^FINDING GATE_WRITE_UNRECORDED_CHANGE /m);
   assert.match(c.out, /^RK_GATE_WRITE_RESULT=fail$/m);
 });
@@ -101,7 +101,39 @@ test('red: 受保护文件从未留证 -> NOSNAPSHOT + exit=1（"没留证"不�
   assert.ok(r.findings.some((x) => x.code === 'GATE_WRITE_NO_SNAPSHOT'));
   const c = gate(['write', '--project', f.projectRoot]);
   assert.equal(c.rc, RC.FAIL);
-  assert.match(c.out, /^NOSNAPSHOT src\/a\.txt current=[0-9a-f]{12} matched=src\/a\.txt$/m);
+  assert.match(c.out, /^NOSNAPSHOT src\/a\.txt current=[0-9a-f]{64} matched=src\/a\.txt$/m);
+});
+
+// 2026-10-25（规则官诊断 §7.2-1）：判红行必须能区分**两因**——
+//   ① 「判定时索引还在长」（该路径的记录就是当时最后一条，后来的记录当时还不存在）
+//   ② 「内容真的不符」（内容与基线不同）
+// 旧输出只有 `record_ts`，两种因长得一样，读者只能反推时间线；本用例把两态钉在同一份判据上。
+test('red: record_line 的两态可区分（tail=no 其后有别路径记录 / tail=yes 判定时它就是末尾）', () => {
+  // A：AGENTS.md 的记录在第 1 条，其后还有 src/a.txt 的记录 ⇒ tail=no
+  const a = fixture('gw-pos-tail-no', { protectedPaths: ['AGENTS.md', 'src/a.txt'] });
+  assert.equal(snap(a, 'AGENTS.md').ok, true);
+  assert.equal(snap(a, 'src/a.txt').ok, true);
+  writeFileSync(join(a.projectRoot, 'AGENTS.md'), 'v2-未留证\n', 'utf8');
+  const ca = gate(['write', '--project', a.projectRoot]);
+  assert.equal(ca.rc, RC.FAIL, ca.out);
+  assert.match(ca.out, /^UNRECORDED AGENTS\.md current=[0-9a-f]{64} baseline=[0-9a-f]{64} record_ts=2026-09-14T00:00:00\.000Z record_line=1\/2 tail=no$/m);
+
+  // B：顺序反过来（AGENTS.md 最后留证）⇒ 判定时它就是索引末尾 ⇒ tail=yes
+  //    这正是事故形态：判的那一刻"后来会有的那条"还不存在
+  const b = fixture('gw-pos-tail-yes', { protectedPaths: ['AGENTS.md', 'src/a.txt'] });
+  assert.equal(snap(b, 'src/a.txt').ok, true);
+  assert.equal(snap(b, 'AGENTS.md').ok, true);
+  writeFileSync(join(b.projectRoot, 'AGENTS.md'), 'v2-未留证\n', 'utf8');
+  const cb = gate(['write', '--project', b.projectRoot]);
+  assert.equal(cb.rc, RC.FAIL, cb.out);
+  assert.match(cb.out, /^UNRECORDED AGENTS\.md current=[0-9a-f]{64} baseline=[0-9a-f]{64} record_ts=2026-09-14T00:00:00\.000Z record_line=2\/2 tail=yes$/m);
+
+  // 正对照（防"新字段一加就恒红"）：给 A 补一次改后留证 ⇒ 立刻绿。
+  //   证明判红只看内容，`tail=no` 本身不构成红。
+  assert.equal(snap(a, 'AGENTS.md', '改动后确认').ok, true);
+  const ca2 = gate(['write', '--project', a.projectRoot]);
+  assert.equal(ca2.rc, RC.OK, ca2.out);
+  assert.match(ca2.out, /^RK_GATE_WRITE_UNRECORDED=0$/m);
 });
 
 test('green: 合规流程「改前留证 -> 改 -> 改后再留证」-> exit 0', () => {

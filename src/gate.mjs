@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 import { effectiveConfig, isProtected, loadLandingRules, normalizeTarget } from './rules.mjs';
 import { displayPath } from './checks.mjs';
-import { latestRecordFor, readIndex } from './snap.mjs';
+import { latestRecordFor, latestRecordPos, readIndex } from './snap.mjs';
 import { blobMatchesBaseline, sha256LfOfBuffer } from './lineend.mjs';
 import { appendLine } from './append.mjs';
 import { defaultRunGit, defaultRunGitRaw } from './hooks.mjs';
@@ -213,7 +213,8 @@ export function reconWrite(opts = {}) {
     }
     const sha256 = sha256OfFile(c.abs);
     const mtimeMs = statSync(c.abs).mtimeMs;
-    const record = latestRecordFor(landing, c.rel);
+    const rec = latestRecordPos(landing, c.rel);
+    const record = rec === null ? null : rec.row;
     const baseline = baselineOf(record);
     let state;
     if (record === null || baseline === null) state = 'nosnapshot';
@@ -224,6 +225,9 @@ export function reconWrite(opts = {}) {
     checked.push({
       path: c.rel, matched: verdict.matchedPattern, verdict: state, sha256, baseline,
       mtimeMs, recordTs, mtimeNewer, why: record?.why ?? null,
+      // 判的是索引第几条 / 当时共几条（2026-10-25）：让读者能区分「索引还在长」与「内容不符」
+      recordLine: rec === null ? null : rec.line,
+      indexLines: rec === null ? null : rec.total,
     });
   }
 
