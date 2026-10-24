@@ -1299,9 +1299,14 @@ export const CI_TEST_SCRIPT = [
 /** 工作流内容**单一来源**：生成与校验都走它（L474：同一语义只许一套实现）
  *
  * `run:` 行两种形态（**`range` 参数不再是死参数**，独立评审 中危①）：
- *   · 默认 = **事件感知**：`--base "${{ github.event.before }}" --head "${{ github.sha }}"`
- *     —— push 事件判"这次推上来的范围"；`before` 缺失/全零（首次 push、pull_request 事件）时 `--base` 为空，
- *     `ciGate` 自动退回全历史（fail-closed：不会因为拿不到范围就放行，`/^0+$/` 的首次 push 哨兵值也按空处理）。
+ *   · 默认 = **事件分步**（2026-10-25 修：PR 门死锁）：
+ *       - `push`（**只挂在 `branches: [main]`**）→ `--base "${{ github.event.before }}" --head "${{ github.sha }}"`
+ *       - `pull_request` → `--base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}"`
+ *     为什么必须分步：`pull_request` 事件**没有** `github.event.before` ⇒ 旧口径 `--base ""` ⇒ `ciGate` 退回全历史，
+ *     把历史欠账也算成"这次 PR 的问题" ⇒ **任何 PR 的 gate 恒红**；而 main 的 required checks 含 gate
+ *     ⇒ PR 永远合不了（实测 2026-10-25：分支推送的两项 test 绿、gate 红、PR 建不了）。
+ *     事件选择用 `if:`，**不拼 shell 字符串**（规则 3.4 同族）。
+ *     分步后 `--base` 为空只在**人手动**调 `rk-gate ci` 时出现；`ciGate` 的 fail-closed 语义不变。
  *   · 显式 `range`（如 `--all`）= 逐字使用，供"首次接入/一次性 backfill"场景生成。
  */
 export function ciWorkflowYaml(opts = {}) {
@@ -1339,13 +1344,27 @@ export function ciWorkflowYaml(opts = {}) {
   //   （实测坑：CLI 侧若也把前缀写进 binPath，就会变成 `.dsh-rulekeeper-tool/.dsh-rulekeeper-tool/bin/…`。）
   const effBin = toolRepo === null ? binPath : `${TOOL_DIR}/${binPath}`;
   const repoArg = toolRepo === null ? '' : ' --repo "$GITHUB_WORKSPACE"';
-  const runLine = range !== null
-    ? `        run: node ${effBin} ci${repoArg} ${range}`
-    : `        run: node ${effBin} ci${repoArg} --base "\${{ github.event.before }}" --head "\${{ github.sha }}"`;
+  const gateCmd = (args) => `node ${effBin} ci${repoArg} ${args}`.trim();
+  // 事件分步（2026-10-25）：**不拼 shell 字符串**，靠 `if:` 选步。
+  //   旧写法把 before..sha 写死一步 ⇒ PR 事件没有 before ⇒ 退全历史 ⇒ 每个 PR 被历史欠账判红（PR 门死锁）。
+  const gateStepLines = range !== null
+    ? [
+      '      - name: dsh-rulekeeper 服务端防线（显式范围）',
+      `        run: ${gateCmd(range)}`,
+    ]
+    : [
+      '      - name: dsh-rulekeeper 服务端防线（push：本次推送范围）',
+      "        if: github.event_name == 'push'",
+      `        run: ${gateCmd('--base "${{ github.event.before }}" --head "${{ github.sha }}"')}`,
+      '      - name: dsh-rulekeeper 服务端防线（pull_request：base..head）',
+      "        if: github.event_name == 'pull_request'",
+      `        run: ${gateCmd('--base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}"')}`,
+    ];
   return [
     '# 本文件由 dsh-rulekeeper 生成，请勿手改：`node <bin> ci --write-workflow`',
     '# 源：dsh-rulekeeper/src/gate.mjs 的 ciWorkflowYaml()（手改会被 `rk-gate ci` 的完整性校验判红）',
-    '# 范围口径：push 用 github.event.before..github.sha；拿不到 before（首次 push / pull_request）退回 --all（fail-closed）',
+    '# 范围口径（2026-10-25 修）：push（仅 main）用 github.event.before..github.sha；pull_request 用 pull_request.base.sha..head.sha',
+    '# 为什么 push 与 PR 分两步：PR 事件里没有 before 字段；旧口径据此退回全历史，导致每个 PR 都被历史欠账判红（PR 门死锁）。',
     ...(toolRepo === null ? [] : [
       `# 本工作流从**独立 checkout 的钉版本工具仓**跑 gate：${toolRepo} @ ${toolRef}`,
       `# 为什么不是仓内 bin：消费方仓里没有 dsh-rulekeeper 这个包（搬进来要 ~60 个模块且会过期）。`,
@@ -1354,6 +1373,7 @@ export function ciWorkflowYaml(opts = {}) {
     'name: dsh-rulekeeper-gate',
     'on:',
     '  push:',
+    '    branches: [main]',
     '  pull_request:',
     'jobs:',
     '  gate:',
@@ -1372,8 +1392,9 @@ export function ciWorkflowYaml(opts = {}) {
     '      - uses: actions/setup-node@v5',
     '        with:',
     `          node-version: '${nodeVersion}'`,
-    '      - name: dsh-rulekeeper 服务端防线（不依赖本机 hook：新 clone 也拦得住）',
-    runLine,
+    // 两个事件两步（`if:` 选步，不拼 shell 串）——见 `gateStepLines` 的定义处注释。
+    //   （原来只有一步"服务端防线（不依赖本机 hook：新 clone 也拦得住）"，PR 事件必红。）
+    ...gateStepLines,
     ...(withTestJob ? [
       // 2026-09-16 新增：**跨平台测试任务**（此前 CI 只跑门禁、不跑用例）。
       // 为什么：本仓只在 Windows/Linux 上人工跑过用例；macOS 从未真跑过（README 曾如实标"未实测"）。
