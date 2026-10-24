@@ -10,7 +10,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { runGate, runRulekeeper } from '../src/cli.mjs';
@@ -134,6 +134,46 @@ test('red: record_line 的两态可区分（tail=no 其后有别路径记录 / t
   const ca2 = gate(['write', '--project', a.projectRoot]);
   assert.equal(ca2.rc, RC.OK, ca2.out);
   assert.match(ca2.out, /^RK_GATE_WRITE_UNRECORDED=0$/m);
+});
+
+// ③（2026-10-25）：write 相位判红必须落台账——此前只有 precommit 落，"工作区视角的拦截"
+//   事后查不到，只能靠聊天记录。三条口径逐条钉住：一次完整写入 / 退出码仍非零 / 带 record_line。
+test('red: write 判红落台账（一行一次写完；带 record_line/tail；退出码仍非零）', () => {
+  const f = fixture('gw-write-ledger', { protectedPaths: ['AGENTS.md'] });
+  assert.equal(snap(f, 'AGENTS.md').ok, true);
+  const ledgerPath = join(f.landingDir, 'logs', 'gate.jsonl');
+
+  // 绿态：不写台账（不许把"跑了一次"记成"被拦过"）
+  const g = gate(['write', '--project', f.projectRoot]);
+  assert.equal(g.rc, RC.OK, g.out);
+  assert.equal(existsSync(ledgerPath), false, '绿态不得产生台账行');
+
+  writeFileSync(join(f.projectRoot, 'AGENTS.md'), 'v2-未留证\n', 'utf8');
+  const c = gate(['write', '--project', f.projectRoot]);
+  assert.equal(c.rc, RC.FAIL, c.out); // ② 写了台账，退出码仍非零
+  assert.match(c.out, /^RK_GATE_WRITE_LEDGER=logs\/gate\.jsonl ok=true$/m);
+
+  const lines = readFileSync(ledgerPath, 'utf8').split('\n').filter((l) => l.trim() !== '');
+  assert.equal(lines.length, 1, '一次判红 = 一行（不许半截、不许分次写）');
+  const row = JSON.parse(lines[0]); // 能整行 parse ⇒ 这一行是完整写入的
+  assert.equal(row.gate, 'write');
+  assert.equal(row.exitCode, 1);
+  assert.equal(row.indexLines, 1);
+  assert.equal(row.violations.length, 1);
+  assert.equal(row.violations[0].code, 'GATE_WRITE_UNRECORDED_CHANGE');
+  // ③ 新字段：record_line / indexLines / tail 一个都不少
+  assert.equal(row.violations[0].recordLine, 1);
+  assert.equal(row.violations[0].indexLines, 1);
+  assert.equal(row.violations[0].tail, 'yes');
+  assert.match(row.violations[0].current, /^[0-9a-f]{64}$/);
+  assert.match(row.violations[0].baseline, /^[0-9a-f]{64}$/);
+
+  // 再红一次 ⇒ 追加第二行（append-only：第一行原样保留，不覆盖）
+  const c2 = gate(['write', '--project', f.projectRoot]);
+  assert.equal(c2.rc, RC.FAIL);
+  const lines2 = readFileSync(ledgerPath, 'utf8').split('\n').filter((l) => l.trim() !== '');
+  assert.equal(lines2.length, 2);
+  assert.equal(JSON.parse(lines2[0]).violations[0].recordLine, 1, '第一行必须原样保留');
 });
 
 test('green: 合规流程「改前留证 -> 改 -> 改后再留证」-> exit 0', () => {
