@@ -2315,6 +2315,7 @@ export function runGateWrite(rest, io = defaultIo(), env = process.env) {
       },
       violations: [...r.nosnapshot, ...r.unrecorded].map((c) => ({ path: c.path, verdict: c.verdict, sha256: c.sha256, baseline: c.baseline ?? null, recordTs: c.recordTs ?? null, recordLine: c.recordLine ?? null, indexLines: c.indexLines ?? null, matched: c.matched })),
       findings: r.findings,
+      ledger: r.ledger,
     }));
     return r.ok ? RC.OK : RC.FAIL;
   }
@@ -2336,6 +2337,9 @@ export function runGateWrite(rest, io = defaultIo(), env = process.env) {
   io.out(line(`RK_GATE_WRITE_INDEX_PATH_FORM=${(r.indexPathForm ?? []).length}`));
   io.out(line(`RK_GATE_WRITE_SKIPPED_NOT_PROTECTED=${r.skipped}`));
   io.out(line(`RK_GATE_WRITE_MTIME_NEWER_THAN_RECORD=${r.mtimeAux}`));
+  // 判红才写台账（③2026-10-25）：把这行也打出来——不打印的话，读者无法区分
+  //   "写了台账" 与 "台账写失败但判红照旧"（后者是真缺口，必须可见）。
+  if (r.ledger !== null) io.out(line(`RK_GATE_WRITE_LEDGER=${r.ledger.path} ok=${r.ledger.ok}`));
   for (const c of r.indexPathForm ?? []) {
     io.out(line(`INDEX_PATH_FORM ${c.form} path=${c.path} record_ts=${c.recordTs ?? '(none)'}`));
   }

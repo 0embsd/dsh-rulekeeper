@@ -301,10 +301,64 @@ export function reconWrite(opts = {}) {
     });
   }
   const mtimeAux = checked.filter((c) => c.mtimeNewer === true).length;
+  const ok = findings.filter((f) => f.advisory !== true).length === 0;
+  // ③（2026-10-25）：**write 相位判红也入台账**。
+  //   此前只有 precommit（暂存区视角）落台账，工作区视角的拦截事后查不到 —— 只能靠聊天记录，
+  //   而"证据链不能靠聊天记录补"在这道门上是空的。
+  //   三条口径：① 一行 = 一次 `appendLine`（短写即失败，禁分段续写）；
+  //            ② 写完**退出码仍非零**（台账是取证，不是降级/放行）；
+  //            ③ 带上 record_line / tail —— 与 CLI 判红行同一组字段，读到哪都一致。
+  let ledger = null;
+  if (!ok) {
+    const row = {
+      schema: 1,
+      ts: new Date().toISOString(),
+      gate: 'write',
+      repo: pathKey(root),
+      phase,
+      indexLines: index.lines ?? 0,
+      indexBadLines: index.badLines ?? 0,
+      counts: {
+        checked: checked.length,
+        snapshotted: snapshotted.length,
+        unrecorded: unrecorded.length,
+        nosnapshot: nosnapshot.length,
+        missingOnDisk: missingOnDisk.length,
+      },
+      violations: [
+        ...nosnapshot.map((c) => ({ path: c.path, code: 'GATE_WRITE_NO_SNAPSHOT', current: c.sha256, matched: c.matched })),
+        ...unrecorded.map((c) => ({
+          path: c.path,
+          code: 'GATE_WRITE_UNRECORDED_CHANGE',
+          current: c.sha256,
+          baseline: c.baseline ?? null,
+          recordTs: c.recordTs ?? null,
+          recordLine: c.recordLine ?? null,
+          indexLines: c.indexLines ?? null,
+          tail: c.recordLine === null || c.recordLine === undefined
+            ? null
+            : (c.recordLine === c.indexLines ? 'yes' : 'no'),
+        })),
+        ...missingOnDisk.map((c) => ({ path: c.path, code: 'GATE_WRITE_MISSING_ON_DISK', matched: c.matched })),
+      ],
+      findings: findings.map((f) => f.code),
+      exitCode: 1,
+    };
+    try {
+      mkdirSync(join(landing, 'logs'), { recursive: true });
+      const appended = appendGateRow(landing, row);
+      ledger = { ok: appended.ok === true, path: GATE_LEDGER_REL, reason: appended.reason ?? null };
+      if (appended.ok !== true) findings.push({ code: 'GATE_WRITE_LEDGER_FAILED', message: `台账写入失败: ${appended.reason}` });
+    } catch (err) {
+      ledger = { ok: false, path: GATE_LEDGER_REL, reason: String(err?.message ?? err) };
+      findings.push({ code: 'GATE_WRITE_LEDGER_FAILED', message: `台账写入异常: ${String(err?.message ?? err)}` });
+    }
+  }
   return {
     // advisory **不判红**（P26：`GATE_WRITE_INDEX_PATH_FORM` 是"如实登记历史越界记录"，
     //   被治理方无法合规修复 append-only 的旧行 ⇒ 判红它等于把落点永久钉死）。口径同 `verifyHooks`/`ciGate`。
-    ok: findings.filter((f) => f.advisory !== true).length === 0,
+    ok,
+    ledger,
     phase,
     landingPresent: existsSync(landing),
     present: protection.present,
