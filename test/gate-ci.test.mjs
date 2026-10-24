@@ -359,6 +359,25 @@ test('判据: 工作流内容**单一来源**（生成 == 校验基准），且 
   assert.equal(ci(['--repo', f.repo, '--all']).rc, RC.FAIL, '按 --all 生成后再用默认参数校验 → 判 TAMPERED（生成与校验必须同一套参数）');
 });
 
+// ── PR 门死锁（2026-10-25 实测）：`pull_request` 事件**没有** `github.event.before` ──────────
+//   旧口径：一步写死 before..sha ⇒ PR 里 --base 为空 ⇒ ciGate 退全历史 ⇒ 翻出历史欠账 ⇒ gate 恒红；
+//   而 main 的 required checks 含 gate（enforce_admins）⇒ 任何 PR 都合不了。
+test('判据: PR 事件不再退回全历史 —— push 只挂 main、PR 用 pull_request.base.sha..head.sha', () => {
+  const f = fixture('ci-pr-base', { withHooks: false });
+  const yml = readFileSync(join(f.repo, CI_WORKFLOW_REL), 'utf8');
+  // ① push 只在 main 触发（分支推送不再触发 ⇒ "新分支 before 全零 ⇒ 扫全历史"这条路消失）
+  assert.match(yml, /^on:\n {2}push:\n {4}branches: \[main\]\n {2}pull_request:$/m);
+  // ② PR 事件的 base/head 来自 pull_request 上下文，不是 github.event.before / github.sha
+  assert.match(yml, /^ {8}run: node .+ ci --base "\$\{\{ github\.event\.pull_request\.base\.sha \}\}" --head "\$\{\{ github\.event\.pull_request\.head\.sha \}\}"$/m);
+  // ③ "拿不到 before 就退 --all" 的口径必须消失（它正是 PR 恒红的原因）
+  assert.equal(yml.includes('拿不到 before'), false);
+  // ④ 两步各带 if：事件选择靠 if，不拼 shell 字符串
+  assert.match(yml, /^ {8}if: github\.event_name == 'push'$/m);
+  assert.match(yml, /^ {8}if: github\.event_name == 'pull_request'$/m);
+  // ⑤ 旧行为不回归：push 那支仍判"这次推上来的范围"
+  assert.match(yml, /^ {8}run: node .+ ci --base "\$\{\{ github\.event\.before \}\}" --head "\$\{\{ github\.sha \}\}"$/m);
+});
+
 // ── 范围优先于条数（本轮新教训 L512）────────────────────────────────────────
 test('判据: `--base..--head` **优先于** `-n`（CI 要的是"这次 push 推上来的那些"，不是"最近 N 条"）', () => {
   const f = fixture('ci-range', { withHooks: false });

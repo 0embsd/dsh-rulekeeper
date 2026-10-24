@@ -178,8 +178,9 @@ ci = 远端防线（LF-540，**服务端入口**：新 clone 没有 hook 时的�
     否则判红（防"追一行 JSON 洗白"）；ledgerAuthenticated=false 是**自曝边界**（无签名 ⇒ 能改台账的人也能写全物证）
   · **空转闸判红**：保护面为空、或保护面**匹配不到任何真实文件** -> CI_VACUOUS_NO_PROTECTION / CI_PROTECTION_MATCHES_NOTHING
   · **配置完整性**：工作流必须与生成内容逐字一致（缺文件/被放宽 -> 判红）；--write-workflow 显式生成
-  · **范围口径**：生成物默认用 github.event.before..github.sha（push 判"这次推上来的"）；
-    拿不到 before（首次 push / pull_request）时 --base 为空 ⇒ **自动退回全历史**（fail-closed，不默认放行）；
+  · **范围口径（2026-10-25 改）**：生成物按事件分步——push（只挂 branches: [main]）用 github.event.before..github.sha；
+    pull_request 用 pull_request.base.sha..head.sha（PR 事件没有 before，旧口径会退回全历史 ⇒ 被历史欠账判红 ⇒ PR 门死锁）；
+    --base 为空只在**手动**调用时出现，此时仍 fail-closed 退回全历史（不默认放行）；
     --workflow-range <参数> 可生成固定范围（首次接入/一次性 backfill 用）
   · **自曝边界**：CI_CARRIER_DONE=false（本机代码无法自证 GitHub 侧事实：远端是否真执行、分支保护是否设置）——
     本机模拟**不冒充**远端已执行，显式 --claim-remote 判红；谁要说"远端 CI 拦住了"必须另附远端运行记录
