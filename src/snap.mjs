@@ -41,16 +41,35 @@ export function readIndex(landingDir) {
   };
 }
 
-/** 某路径（pathKey 形式）的**最新**快照记录 */
-export function latestRecordFor(landingDir, key) {
+/**
+ * 某路径（pathKey 形式）的最新快照记录，**连它落在索引第几条**（1 起，按有效行计）。
+ * 为什么需要行号（2026-10-25）：门禁判红的典型误读是"同一路径有两条记录，它挑了旧的那条"——
+ *   实际更常见的是**判的那一刻更新的那条还不存在**。把"判的是第几条 / 当时共几条"打出来，
+ *   读者能当场区分「索引还在长」与「内容真的不符」，不必再去反推时间线。
+ * `total` 与 `readIndex().lines` 同口径（非空行计数）⇒ `line <= total` 恒成立。
+ */
+export function latestRecordPos(landingDir, key) {
   const want = pathKey(key);
+  const read = readLines(snapIndexPath(landingDir));
+  let total = 0;
   let best = null;
-  for (const row of readIndex(landingDir).values) {
+  for (const line of read.lines) {
+    if (line.trim() === '') continue;
+    total += 1;
+    let row;
+    try { row = JSON.parse(line); } catch { continue; }
+    if (row === null || typeof row !== 'object' || Array.isArray(row)) continue;
     if (typeof row.path !== 'string' || pathKey(row.path) !== want) continue;
     const ts = typeof row.ts === 'string' ? row.ts : '';
-    if (best === null || ts >= best.ts) best = { ts, row };
+    if (best === null || ts >= best.ts) best = { ts, row, line: total };
   }
-  return best === null ? null : best.row;
+  return best === null ? null : { row: best.row, line: best.line, total };
+}
+
+/** 某路径（pathKey 形式）的**最新**快照记录（单一实现：`latestRecordPos` 的行，别另写一遍） */
+export function latestRecordFor(landingDir, key) {
+  const hit = latestRecordPos(landingDir, key);
+  return hit === null ? null : hit.row;
 }
 
 /**

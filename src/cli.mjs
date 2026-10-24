@@ -2283,7 +2283,15 @@ export function runGateWrite(rest, io = defaultIo(), env = process.env) {
     files: flags.file ?? null,
     phase: flags.phase ?? 'close',
   });
-  const short = (h) => (typeof h === 'string' && h !== '' ? h.slice(0, 12) : '(none)');
+  // 2026-10-25：**sha 不再截断**。12 位截断制造过一种最坏的读数——`current` 与 `baseline`
+  //   前 12 位相同、长度不同（12 vs 64），于是"看起来完全相等却判红"；这种输出最会训练人
+  //   "补个 snapshot 就过"，比判错更危险。取证行就是取证行，给全长。
+  const sha = (h) => (typeof h === 'string' && h !== '' ? h : '(none)');
+  // 「判的是第几条 / 当时共几条」（2026-10-25）：`tail=yes` ⇒ 它就是判定时索引的最后一条，
+  //   不存在"更新的记录被忽略"（后来的记录当时还不存在）；`tail=no` ⇒ 其后还有别路径的记录。
+  const pos = (c) => (c.recordLine === null || c.recordLine === undefined
+    ? 'record_line=(none)'
+    : `record_line=${c.recordLine}/${c.indexLines} tail=${c.recordLine === c.indexLines ? 'yes' : 'no'}`);
   if (flags.json === true) {
     io.out(jsonStable({
       ok: r.ok,
@@ -2305,7 +2313,7 @@ export function runGateWrite(rest, io = defaultIo(), env = process.env) {
         skippedNotProtected: r.skipped,
         mtimeNewerThanRecord: r.mtimeAux,
       },
-      violations: [...r.nosnapshot, ...r.unrecorded].map((c) => ({ path: c.path, verdict: c.verdict, sha256: c.sha256, baseline: c.baseline ?? null, recordTs: c.recordTs ?? null, matched: c.matched })),
+      violations: [...r.nosnapshot, ...r.unrecorded].map((c) => ({ path: c.path, verdict: c.verdict, sha256: c.sha256, baseline: c.baseline ?? null, recordTs: c.recordTs ?? null, recordLine: c.recordLine ?? null, indexLines: c.indexLines ?? null, matched: c.matched })),
       findings: r.findings,
     }));
     return r.ok ? RC.OK : RC.FAIL;
@@ -2331,9 +2339,9 @@ export function runGateWrite(rest, io = defaultIo(), env = process.env) {
   for (const c of r.indexPathForm ?? []) {
     io.out(line(`INDEX_PATH_FORM ${c.form} path=${c.path} record_ts=${c.recordTs ?? '(none)'}`));
   }
-  for (const c of r.nosnapshot) io.out(line(`NOSNAPSHOT ${c.path} current=${short(c.sha256)} matched=${c.matched}`));
+  for (const c of r.nosnapshot) io.out(line(`NOSNAPSHOT ${c.path} current=${sha(c.sha256)} matched=${c.matched}`));
   for (const c of r.unrecorded) {
-    io.out(line(`UNRECORDED ${c.path} current=${short(c.sha256)} baseline=${short(c.baseline)} record_ts=${c.recordTs ?? '(none)'}`));
+    io.out(line(`UNRECORDED ${c.path} current=${sha(c.sha256)} baseline=${sha(c.baseline)} record_ts=${c.recordTs ?? '(none)'} ${pos(c)}`));
   }
   for (const c of r.missingOnDisk) io.out(line(`MISSING_ON_DISK ${c.path} matched=${c.matched}`));
   for (const f of r.findings) io.out(line(`FINDING ${f.code} ${f.message}`));
